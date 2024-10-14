@@ -49,7 +49,7 @@ def log_level_set(input_parameters):
         logging.Formatter.converter = time.gmtime
         logging.basicConfig(
             level=log_level,
-            format='%(asctime)s.%(msecs)03d   TROUTE    %(levelname)s       %(message)s',
+            format='%(asctime)s.%(msecs)03d TROUTE   %(levelname)s   %(message)s',
             datefmt='%Y-%m-%dT%H:%M:%S',
             handlers=[
             logging.FileHandler(logFilePath, mode='a'),  # Log to a file
