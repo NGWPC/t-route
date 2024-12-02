@@ -27,24 +27,25 @@ def log_level_set(input_parameters):
     See also https://docs.python.org/3/library/logging.html
     
     '''
-    log_level = input_parameters.get("log_level", 'DEBUG')
+    #log_level = input_parameters.get("log_level", 'INFO')
+    log_level = 'INFO'
     if True:
         logFilePath = os.getenv('NGEN_LOG_FILE_PATH', "")
         try:
             logFile = open(logFilePath, "a")
         except IOError:
-            print("Warning: Can't Open shared Log File referenced from NGEN_LOG_FILE_PATH env. variable", file=sys.stderr)
+            print("Warning: Can't Open shared Log File referenced from NGEN_LOG_FILE_PATH env. variable for TROUTE module", file=sys.stderr)
             log_file_dir = f"./run-logs/ngen_{create_timestamp()}/"
             log_file_name = "troute_log.txt"
             os.makedirs(log_file_dir, exist_ok=True)
             logFilePath = os.path.join(log_file_dir, log_file_name)
             try:
                 logFile = open(logFilePath, "a")
-                print(f"Logging instead into: {logFilePath}")
+                print(f"TROUTE is logging instead into: {logFilePath}")
             except IOError:
-                print(f"Can't Open local directory Log File: {logFilePath}", file=sys.stderr)
+                print(f"Can't Open local directory Log File for TROUTE module: {logFilePath}", file=sys.stderr)
         else:
-            print(f"Log File Path: {logFilePath}")
+            print(f"Log File Path for TROUTE module: {logFilePath}")
         
         logging.Formatter.converter = time.gmtime
         logging.basicConfig(
@@ -53,7 +54,7 @@ def log_level_set(input_parameters):
             datefmt='%Y-%m-%dT%H:%M:%S',
             handlers=[
             logging.FileHandler(logFilePath, mode='a'),  # Log to a file
-            logging.StreamHandler(sys.stdout)  
+            #logging.StreamHandler(sys.stdout)  
         ])
     else:       
         logging.basicConfig(
