@@ -23,7 +23,7 @@ __showtiming__ = False
 
 def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
     # Establish which layers we will read. We'll always need the flowpath tables
-    layers = ['flowpaths','flowpath_attributes']
+    layers = ['flowpaths','flowpath-attributes']
 
     # If waterbodies are being simulated, read lakes table
     if waterbody_parameters.get('break_network_at_waterbodies',False):
@@ -44,7 +44,7 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
     hybrid_routing = hybrid_parameters.get('run_hybrid_routing', False)
     if hybrid_routing & ('nexus' not in layers):
         layers.append('nexus')
-    
+
     # Retrieve geopackage information:
     if cpu_pool > 1:
         with Parallel(n_jobs=len(layers)) as parallel:
@@ -58,14 +58,14 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
                 )
             gpkg_list = parallel(jobs)
         table_dict = {layers[i]: gpkg_list[i] for i in range(len(layers))}
-        flowpaths = pd.merge(table_dict.get('flowpaths'), table_dict.get('flowpath_attributes'), on='id')
+        flowpaths = pd.merge(table_dict.get('flowpaths'), table_dict.get('flowpath-attributes'), on='id',suffixes=('', '_y'))
         lakes = table_dict.get('lakes', pd.DataFrame())
         network = table_dict.get('network', pd.DataFrame())
         nexus = table_dict.get('nexus', pd.DataFrame())
     else:
         flowpaths = gpd.read_file(file_path, layer='flowpaths')
-        flowpath_attributes = gpd.read_file(file_path, layer='flowpath_attributes')
-        flowpaths = pd.merge(flowpaths, flowpath_attributes, on='id')
+        flowpath_attributes = gpd.read_file(file_path, layer='flowpath-attributes')
+        flowpaths = pd.merge(flowpaths, flowpath_attributes, on='id',suffixes=('', '_y'))
         # If waterbodies are being simulated, read lakes table
         lakes = pd.DataFrame()
         if 'lakes' in layers:
