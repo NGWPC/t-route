@@ -1,6 +1,7 @@
 
 import os
 
+from dotenv import load_dotenv
 from pydantic import ConfigDict
 from pydantic_settings import BaseSettings
 
@@ -13,6 +14,8 @@ class Settings(BaseSettings):
     }
 
     BASE_URL : str = "https://api.water.noaa.gov/nwps/v1"
+
+    S3_DOMAIN_URL: str = "s3://fim-services-data/replace-and-route/v0.2.0/domain_gpkgs"
 
     rate_limit: int = 8
 
@@ -34,6 +37,13 @@ class Settings(BaseSettings):
 
     def __init__(self, **data):
         super(Settings, self).__init__(**data)
+
+        load_dotenv()
+
+        self.AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
+        self.AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+        self.AWS_SESSION_TOKEN = os.getenv('AWS_SESSION_TOKEN')
+
         if os.getenv("RABBITMQ_HOST") is not None:
             self.rabbitmq_default_host = os.getenv("RABBITMQ_HOST")  
 
