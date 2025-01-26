@@ -1,3 +1,3 @@
-version=
-date=
-commit=
+version=rc-1.0.0
+date=2025-01-26
+commit=998a8e167d157c72f3c4e9334c4f624a2566fb6b
