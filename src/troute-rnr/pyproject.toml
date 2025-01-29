@@ -15,6 +15,7 @@ dependencies = [
     "xmltodict==0.12.0",
     "lxml==5.3.0",
     "pytest==8.3.2",
+    "boto3",
 ]
 description = "T-Route replace and route capabilities for water.noaa.gov"
 version = "0.2.0"

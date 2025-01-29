@@ -2,6 +2,8 @@ import os
 import configparser
 from pathlib import Path
 
+import boto3
+
 class Settings:
     def __init__(self):
         config_file = Path.cwd() / "src/troute-rnr/settings.ini"
@@ -41,3 +43,11 @@ class Settings:
         
         if os.getenv("REDIS_URL"):
             self.redis_url = os.getenv("REDIS_URL")
+
+        session = boto3.Session()
+        credentials = session.get_credentials()
+
+        os.environ['AWS_ACCESS_KEY_ID'] = credentials.access_key
+        os.environ['AWS_SECRET_ACCESS_KEY'] = credentials.secret_key
+        if credentials.token:  # If you're using temporary credentials
+            os.environ['AWS_SESSION_TOKEN'] = credentials.token
