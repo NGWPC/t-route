@@ -1,64 +1,43 @@
-
 import os
+import configparser
+from pathlib import Path
 
-from dotenv import load_dotenv
-from pydantic import ConfigDict
-from pydantic_settings import BaseSettings
-
-class Settings(BaseSettings):
-    STAGES : set = {
-        "action",
-        "minor",
-        "major",
-        "moderate",
-    }
-
-    BASE_URL : str = "https://api.water.noaa.gov/nwps/v1"
-
-    S3_DOMAIN_URL: str = "s3://fim-services-data/replace-and-route/v0.2.0/domain_gpkgs"
-
-    rate_limit: int = 8
-
-    rabbitmq_default_username: str = "guest"
-    rabbitmq_default_password: str = "guest"
-    rabbitmq_default_host: str = "localhost"
-    rabbitmq_default_port: int = 5672
-
-    pika_url: str = "amqp://{}:{}@{}:{}/"
-    redis_url: str = "localhost"
-    redis_port: int = 6379
-
-    flooded_data_queue: str = "flooded_data_queue"
-    error_queue: str = "error_queue"
-
-    log_path: str = "/app/data/logs"
-
-    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
-
-    def __init__(self, **data):
-        super(Settings, self).__init__(**data)
-
-        load_dotenv()
-
-        self.AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
-        self.AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
-        self.AWS_SESSION_TOKEN = os.getenv('AWS_SESSION_TOKEN')
-
-        if os.getenv("RABBITMQ_HOST") is not None:
-            self.rabbitmq_default_host = os.getenv("RABBITMQ_HOST")  
-
-        self.pika_url = self.pika_url.format(
-            self.rabbitmq_default_username,
-            self.rabbitmq_default_password,
-            self.rabbitmq_default_host,
-            self.rabbitmq_default_port,
-        )
-
-        if os.getenv("PIKA_URL") is not None:
+class Settings:
+    def __init__(self):
+        config_file = Path.cwd() / "src/troute-rnr/settings.ini"
+        self.config = configparser.ConfigParser()
+        self.config.read(config_file)
+        
+        self.STAGES = set(self.config['STAGES']['stages'].split(','))
+        
+        self.BASE_URL = self.config['DEFAULT']['BASE_URL']
+        self.S3_DOMAIN_URL = self.config['DEFAULT']['S3_DOMAIN_URL']
+        self.rate_limit = self.config.getint('DEFAULT', 'rate_limit')
+        
+        self.rabbitmq_username = self.config['RABBITMQ']['username']
+        self.rabbitmq_password = self.config['RABBITMQ']['password']
+        self.rabbitmq_host = self.config['RABBITMQ']['host']
+        self.rabbitmq_port = self.config.getint('RABBITMQ', 'port')
+        
+        self.redis_url = self.config['REDIS']['url']
+        self.redis_port = self.config.getint('REDIS', 'port')
+        
+        self.flooded_data_queue = self.config['QUEUES']['flooded_data']
+        self.error_queue = self.config['QUEUES']['error']
+        
+        self.log_path = self.config['PATHS']['log_path']
+        
+        if os.getenv("RABBITMQ_HOST"):
+            self.rabbitmq_host = os.getenv("RABBITMQ_HOST")
+        if os.getenv("RABBITMQ_USERNAME"):
+            self.rabbitmq_username = os.getenv("RABBITMQ_HOST")
+        if os.getenv("RABBITMQ_PASSWORD"):
+            self.rabbitmq_password = os.getenv("RABBITMQ_PASSWORD")
+        
+        self.pika_url = f"amqp://{self.rabbitmq_username}:{self.rabbitmq_password}@{self.rabbitmq_host}:{self.rabbitmq_port}/"
+        
+        if os.getenv("PIKA_URL"):
             self.pika_url = os.getenv("PIKA_URL")
-        if os.getenv("REDIS_URL") is not None:
+        
+        if os.getenv("REDIS_URL"):
             self.redis_url = os.getenv("REDIS_URL")
-        if os.getenv("SUBSET_URL") is not None:
-            self.base_subset_url = os.getenv("SUBSET_URL")
-        if os.getenv("TROUTE_URL") is not None:
-            self.base_troute_url = os.getenv("TROUTE_URL")

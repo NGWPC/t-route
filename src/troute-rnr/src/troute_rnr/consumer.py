@@ -8,7 +8,7 @@ def consume(settings: Settings) -> None:
     channel = connection.channel()
 
     channel.queue_declare(queue=settings.flooded_data_queue, durable=True)
-    print(' [*] Waiting for messages. To exit press CTRL+C')
+    print(f' [*] Waiting for messages from Queue on URL: {settings.pika_url}')
 
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue=settings.flooded_data_queue, on_message_callback=run)

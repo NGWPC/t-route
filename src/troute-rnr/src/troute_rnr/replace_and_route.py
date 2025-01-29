@@ -1,15 +1,26 @@
 import json
-from typing import Dict
+from typing import Dict, List
 
 import geopandas as gpd
+import httpx
+import lxml
 import pandas as pd
 import pika
+from pydantic.error_wrappers import ValidationError
 from pyogrio.errors import DataLayerError, DataSourceError
 
-import nwm_routing.__main_._main_v04 as t_route
+from nwm_routing.__main__ import main_v04 as t_route
+from troute_rnr.schemas.nwps import GaugeData
+from troute_rnr.schemas.weather import Site
 from troute_rnr.settings import Settings
+from troute_rnr.utils import get
 
 settings = Settings()
+
+headers = {
+    'Accept': 'application/ld+json',
+    'User-Agent': '(water.noaa.gov, Tadd.N.Bindas@rtx.com)'
+}
 
 def read_remote_gpkg(lid: int) -> Dict[str, pd.DataFrame]:
     try:
@@ -34,6 +45,37 @@ def write_config(gdf: Dict[str, pd.DataFrame]):
     # TODO create the config required for T-Route
     pass
 
+def format_xml(product_text: str) -> List[GaugeData]:
+    """A function to format the product text from HML into valid XML segments
+    """
+    xml_split = product_text.split("?xml")
+    forecasts = []
+
+    # ignore the first one since it's not valid XML
+    for i in range(1, len(xml_split)):
+        xml_segment = "<?xml" + xml_split[i][:-2]  # adding removed XML tag, and removed trailing tags
+        try:
+            site = Site.from_xml(xml_segment)
+        except lxml.etree.XMLSyntaxError:
+            xml_segment = xml_segment.split("</site>")[0] + "</site>"  # Removing extra content at end of document
+            site = Site.from_xml(xml_segment)
+        endpoint = f"{settings.BASE_URL}/gauges/{site.properties['id']}"
+        try:
+            forecast = get(endpoint).json()
+            try:
+                gauge_data = GaugeData(**forecast)
+            except ValidationError:
+                # There was no forecast/record for the site given
+                continue
+            if gauge_data.ForecastFloodCategory in settings.STAGES:
+                forecasts.append(gauge_data)
+        except httpx.HTTPStatusError:
+            # There was no forecast/record for the site given
+            # print(f"{endpoint} hit 404 error: {str(e)}")
+            continue
+            
+    return forecasts 
+
 
 def run(
    ch: pika.channel.Channel,
@@ -41,17 +83,21 @@ def run(
    properties: pika.spec.BasicProperties,
    body: bytes
 ):
-    body = json.loads(body.decode())
-    lid = body["lid"]
-    # TODO create an object for the input of the RnR data
-    gdf = read_remote_gpkg(lid)
-    write_forcast_csvs(gdf)
-    restart_file = create_initial_start_file(params, settings)
-    yaml_file_path = write_config(base_config, params, restart_file)
-    t_route(["-f", yaml_file_path.__str__()])
-    yaml_file_path.unlink()
-    
-    ch.basic_ack(delivery_tag=method.delivery_tag)
-
+    hml = json.loads(body.decode())
+    print(f"Reading forecast for {hml['rdf']}, issued at {hml['issuance_time']}")
+    site_data = get(hml["rdf"], headers=headers).json()
+    forecasts = format_xml(site_data["productText"])
+    if len(forecasts) == 0:
+        # There is no forecast present in this message. End the process
+        ch.basic_ack(delivery_tag=method.delivery_tag)
+    else:
+        gdf = read_remote_gpkg(lid)
+        write_forcast_csvs(gdf)
+        restart_file = create_initial_start_file(params, settings)
+        yaml_file_path = write_config(base_config, params, restart_file)
+        t_route(["-f", yaml_file_path.__str__()])
+        yaml_file_path.unlink()
+        
+        ch.basic_ack(delivery_tag=method.delivery_tag)
 
 # s3://fim-services-data/replace-and-route/v0.2.0/domain_gpkgs/
