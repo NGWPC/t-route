@@ -9,12 +9,18 @@ class Settings:
         config_file = Path.cwd() / "src/troute-rnr/settings.ini"
         self.config = configparser.ConfigParser()
         self.config.read(config_file)
+
+        self.headers = {
+            'Accept': self.config["HEADERS"]["accept"],
+            'User-Agent': self.config["HEADERS"]["user_agent"]
+        }
         
         self.STAGES = set(self.config['STAGES']['stages'].split(','))
         
         self.BASE_URL = self.config['DEFAULT']['BASE_URL']
         self.S3_DOMAIN_URL = self.config['DEFAULT']['S3_DOMAIN_URL']
         self.rate_limit = self.config.getint('DEFAULT', 'rate_limit')
+        self.reach_limit = self.config.getint('DEFAULT', 'reach_limit')
         
         self.rabbitmq_username = self.config['RABBITMQ']['username']
         self.rabbitmq_password = self.config['RABBITMQ']['password']

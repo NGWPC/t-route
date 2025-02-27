@@ -6,5 +6,6 @@ def get(url: str, headers=None, params=None):
     r = httpx.get(url,
         headers=headers,
         params=params,
+        timeout=None
     )
     return r
