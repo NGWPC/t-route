@@ -37,8 +37,8 @@ def run(
     sites = format_xml(site_response["productText"])
     for site in sites:
         try:
-            gauge_data = get_site_data(site, settings)
-            if gauge_data is None:
+            site_data = get_site_data(site, settings)
+            if site_data is None:
                 continue
         except ValidationError:
             #  ValidationError: Pydantic validation error for the ingested forecast
@@ -46,7 +46,7 @@ def run(
         except httpx.HTTPStatusError:
             #  HTTPStatusError: There was no forecast/record within NWPS for the site given
             continue
-        inputs = pull_nwm_inputs(gauge_data, settings)
+        inputs = pull_nwm_inputs(site_data, settings)
         if inputs is not None:
             print("Forecast successfully read")
 
