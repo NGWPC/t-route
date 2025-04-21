@@ -85,7 +85,7 @@ def consume(settings: Settings) -> None:
         channel.start_consuming()
     except (pika.exceptions.AMQPConnectionError, socket.timeout) as e:
         print(f" [!] Failed to connect to RabbitMQ: {e}")
-        print(" [!] Service is not running - check RabbitMQ connection")
+        print(" [!] Service is not running - check RabbitMQ connection from Hydrovis")
 
 
 if __name__ == "__main__":
