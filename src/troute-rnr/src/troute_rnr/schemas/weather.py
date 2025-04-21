@@ -3,8 +3,8 @@
 from collections.abc import Mapping
 from typing import Optional
 
-from pydantic_xml import BaseXmlModel, element
 from pydantic import Field
+from pydantic_xml import BaseXmlModel, element
 
 
 class Disclaimers(BaseXmlModel, tag="disclaimers"):

@@ -322,8 +322,8 @@ class Hydrograph(BaseModel):
         Link to flood category hydrograph image.
     """
 
-    default: str =  Field(description="Link to default hydrograph image")
-    floodcat: str =  Field(description="Link to flood category hydrograph image")
+    default: str = Field(description="Link to default hydrograph image")
+    floodcat: str = Field(description="Link to flood category hydrograph image")
 
 
 class PhotoGeometry(BaseModel):
@@ -595,7 +595,9 @@ class Inundation(BaseModel):
     zeroDatum: Optional[ZeroDatum] = Field(description="Zero datum information, if available")
     downloads: Optional[Downloads] = Field(description="Links to downloadable data, if available")
     siteSpecificInfo: str = Field(description="Site-specific inundation information")
-    dataAttribution: list[InundationDataAttribution] = Field(description="List of data attributions for inundation data")
+    dataAttribution: list[InundationDataAttribution] = Field(
+        description="List of data attributions for inundation data"
+    )
 
 
 class InService(BaseModel):
@@ -718,7 +720,9 @@ class GaugeData(BaseModel):
     images: Images = Field(description="Collection of related images")
     dataAttribution: list[DataAttribution] = Field(description="List of data attributions")
     impactsLowWaters: list[ImpactLowWater] = Field(description="List of low water impacts")
-    normalThreshold: Optional[NormalThreshold] = Field(description="Normal water level threshold, if available")
+    normalThreshold: Optional[NormalThreshold] = Field(
+        description="Normal water level threshold, if available"
+    )
     hydronotes: list[Hydronote] = Field(description="List of hydrologic notes")
     datums: Datums = Field(description="Datum information")
     inundation: Inundation = Field(description="Inundation data and services information")
@@ -782,8 +786,8 @@ class ReachClassification(str, Enum):
         Flowline classification.
     """
 
-    rfc_point = "rfc_point" = Field(description="RFC point classification")
-    flowline = "flowline" = Field(description="Flowline classification")
+    rfc_point = Field(description="RFC point classification", default="rfc_point")
+    flowline = Field(description="Flowline classification", default="flowline")
 
 
 class Reach(BaseModel):
@@ -850,11 +854,15 @@ class ResultItem(BaseModel):
         The status code of the exception if applicable.
     """
 
-    status: str = Field(description="The status of the processing operation. Possible values: 'success', 'no_forecast', 'api_error', 'error'")
+    status: str = Field(
+        description="The status of the processing operation. Possible values: 'success', 'no_forecast', 'api_error', 'error'"
+    )
     lid: str = Field(description="The location ID (LID) of the processed RFC entry")
     error_type: Optional[str] = Field(description="The exception/error that was raised", default=None)
     error_message: Optional[str] = Field(description="The error message that was raised", default=None)
-    status_code: Optional[str] = Field(description="The status code of the exception if applicable", default=None)
+    status_code: Optional[str] = Field(
+        description="The status code of the exception if applicable", default=None
+    )
 
 
 class Summary(BaseModel):
@@ -911,4 +919,4 @@ class ConsumerStatus(BaseModel):
         Whether the consumer is currently running.
     """
 
-    is_running: bool = Field(description="Whether the consumer is currently running", default= False)
+    is_running: bool = Field(description="Whether the consumer is currently running", default=False)
