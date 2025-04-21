@@ -150,7 +150,7 @@ def write_config() -> None:
     pass
 
 
-def format_xml(product_text: str, settings: Settings) -> list[GaugeData]:
+def format_xml(product_text: str) -> list[Site]:
     """
     Format product text from HML into valid XML segments.
 
@@ -163,13 +163,12 @@ def format_xml(product_text: str, settings: Settings) -> list[GaugeData]:
 
     Returns
     -------
-    List[GaugeData]
-        List of gauge data objects extracted from the XML.
+    List[Site]
+        List of Site objects extracted from the XML.
     """
     xml_split = product_text.split("?xml")
-    forecasts = []
-
-    # Ignore the first one since it's not valid XML
+    sites = []
+    # Ignore the first idx since it's never valid XML
     for i in range(1, len(xml_split)):
         xml_segment = "<?xml" + xml_split[i][:-2]  # Adding removed XML tag, and removed trailing tags
         try:
@@ -178,20 +177,49 @@ def format_xml(product_text: str, settings: Settings) -> list[GaugeData]:
             # Removing extra content at end of document
             xml_segment = xml_segment.split("</site>")[0] + "</site>"
             site = Site.from_xml(xml_segment)
+        sites.append(site)
+    return sites
 
-        endpoint = f"{settings.BASE_URL}/gauges/{site.properties['id']}"
+
+def get_site_data(site: Site, settings: Settings) -> GaugeData | None:
+    """Retrieves gauge data from the NWPS API for a specific site and validates it meets flood criteria.
+
+    Parameters
+    ----------
+    site : Site
+        The site object containing properties with an 'id' field used to construct the API endpoint
+    settings : Settings
+        Configuration object containing BASE_URL for the API endpoint and STAGES for flood criteria validation
+
+    Returns
+    -------
+    GaugeData | None
+        A validated GaugeData object if the site data meets flood criteria requirements,
+        None if the site's flood category does not meet the required criteria
+
+    Raises
+    ------
+    ValidationError
+        If the API response cannot be parsed into a valid GaugeData object
+    httpx.HTTPStatusError
+        If the API request fails or returns an error status
+    """
+    endpoint = f"{settings.BASE_URL}/gauges/{site.properties['id']}"
+    try:
+        forecast = get(endpoint).json()
         try:
-            forecast = get(endpoint).json()
-            try:
-                gauge_data = GaugeData(**forecast)
-            except ValidationError:
-                # There was no forecast/record for the site given
-                continue
-
-            if gauge_data.ForecastFloodCategory in settings.STAGES:
-                forecasts.append(gauge_data)
-        except httpx.HTTPStatusError:
-            # There was no forecast/record for the site given
-            continue
-
-    return forecasts
+            gauge_data = GaugeData(**forecast)
+        except ValidationError as e:
+            msg = f"ValidationError: Pydantic validation error for the endpoint given: {endpoint}"
+            print(msg)
+            raise e
+        if gauge_data.ForecastFloodCategory in settings.STAGES:
+            return gauge_data
+        else:
+            msg = f"This site does not meet the criteria for a flood: {gauge_data.lid}"
+            print(msg)
+            return None
+    except httpx.HTTPStatusError as e:
+        msg = f"HTTPStatusError: There was no forecast/record within NWPS for the site given: {endpoint}"
+        print(msg)
+        raise httpx.HTTPStatusError(msg) from e
