@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Optional
 
 from pydantic_xml import BaseXmlModel, element
+from pydantic import Field
 
 
 class Disclaimers(BaseXmlModel, tag="disclaimers"):
@@ -77,6 +78,6 @@ class Site(BaseXmlModel, tag="site"):
         Observed weather data at the site, if available.
     """
 
-    properties: Mapping[str, str]
-    disclaimers: Disclaimers
-    observed: Optional[Observed] = None
+    properties: Mapping[str, str] = Field(description="Properties associated with the site")
+    disclaimers: Disclaimers = Field(description="Disclaimers related to the site data")
+    observed: Optional[Observed] = Field(description="Disclaimers related to the site data", default=None)

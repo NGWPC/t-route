@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RFC(BaseModel):
@@ -19,8 +19,8 @@ class RFC(BaseModel):
         The full name of the RFC.
     """
 
-    abbreviation: str
-    name: str
+    abbreviation: str = Field(description="The abbreviated name of the RFC")
+    name: str = Field(description="The full name of the RFC")
 
 
 class WFO(BaseModel):
@@ -35,8 +35,8 @@ class WFO(BaseModel):
         The full name of the WFO.
     """
 
-    abbreviation: str
-    name: str
+    abbreviation: str = Field(description="The abbreviated name of the WFO")
+    name: str = Field(description="The full name of the WFO")
 
 
 class State(BaseModel):
@@ -51,8 +51,8 @@ class State(BaseModel):
         The full name of the state.
     """
 
-    abbreviation: str
-    name: str
+    abbreviation: str = Field(description="The state's two-letter abbreviation")
+    name: str = Field(description="The full name of the state")
 
 
 class PEDTS(BaseModel):
@@ -67,8 +67,8 @@ class PEDTS(BaseModel):
         The forecast PEDTS.
     """
 
-    observed: str
-    forecast: str
+    observed: str = Field(description="The observed PEDTS")
+    forecast: str = Field(description="The forecast PEDTS")
 
 
 class StatusData(BaseModel):
@@ -91,12 +91,12 @@ class StatusData(BaseModel):
         The timestamp when this status was recorded.
     """
 
-    primary: float
-    primaryUnit: str
-    secondary: float
-    secondaryUnit: str
-    floodCategory: str
-    validTime: datetime
+    primary: float = Field(description="The primary measurement value")
+    primaryUnit: str = Field(description="The unit of the primary measurement")
+    secondary: float = Field(description="The secondary measurement value")
+    secondaryUnit: str = Field(description="The unit of the secondary measurement")
+    floodCategory: str = Field(description="The current flood category")
+    validTime: datetime = Field(description="The timestamp when this status was recorded")
 
 
 class Status(BaseModel):
@@ -111,8 +111,8 @@ class Status(BaseModel):
         The forecast status data.
     """
 
-    observed: StatusData
-    forecast: StatusData
+    observed: StatusData = Field(description="The observed status data")
+    forecast: StatusData = Field(description="The forecast status data")
 
 
 class FloodCategory(BaseModel):
@@ -127,8 +127,8 @@ class FloodCategory(BaseModel):
         The flow rate threshold for this category.
     """
 
-    stage: float
-    flow: float
+    stage: float = Field(description="The stage (water level) threshold for this category")
+    flow: float = Field(description="The flow rate threshold for this category")
 
 
 class FloodCategories(BaseModel):
@@ -147,10 +147,10 @@ class FloodCategories(BaseModel):
         Thresholds for flood action stage.
     """
 
-    major: FloodCategory
-    moderate: FloodCategory
-    minor: FloodCategory
-    action: FloodCategory
+    major: FloodCategory = Field(description="Thresholds for major flooding")
+    moderate: FloodCategory = Field(description="Thresholds for moderate flooding")
+    minor: FloodCategory = Field(description="Thresholds for minor flooding")
+    action: FloodCategory = Field(description="Thresholds for flood action stage")
 
 
 class LRO(BaseModel):
@@ -171,11 +171,11 @@ class LRO(BaseModel):
         Interval of the outlook.
     """
 
-    minorCS: str
-    moderateCS: str
-    majorCS: str
-    producedTime: datetime
-    interval: str
+    minorCS: str = Field(description="Minor flood chance statement")
+    moderateCS: str = Field(description="Moderate flood chance statement")
+    majorCS: str = Field(description="Major flood chance statement")
+    producedTime: datetime = Field(description="Time when the outlook was produced")
+    interval: str = Field(description="Interval of the outlook")
 
 
 class Crest(BaseModel):
@@ -196,11 +196,11 @@ class Crest(BaseModel):
         Indicator if this uses an old datum.
     """
 
-    occurredTime: datetime
-    stage: float
-    flow: float
-    preliminary: str
-    olddatum: bool
+    occurredTime: datetime = Field(description="Time when the crest occurred")
+    stage: float = Field(description="Water stage at crest")
+    flow: float = Field(description="Flow rate at crest")
+    preliminary: str = Field(description="Indicator if this is a preliminary crest")
+    olddatum: bool = Field(description="Indicator if this uses an old datum")
 
 
 class LowWater(BaseModel):
@@ -219,10 +219,10 @@ class LowWater(BaseModel):
         Statement about the low water condition.
     """
 
-    occurredTime: datetime
-    stage: float
-    flow: float
-    statement: str
+    occurredTime: datetime = Field(description="Time when the low water condition occurred")
+    stage: float = Field(description="Water stage at low water")
+    flow: float = Field(description="Flow rate at low water")
+    statement: str = Field(description="Statement about the low water condition")
 
 
 class Impact(BaseModel):
@@ -237,8 +237,8 @@ class Impact(BaseModel):
         Description of the impact.
     """
 
-    stage: float
-    statement: str
+    stage: float = Field(description="Water stage at which this impact occurs")
+    statement: str = Field(description="Description of the impact")
 
 
 class Flood(BaseModel):
@@ -263,13 +263,13 @@ class Flood(BaseModel):
         List of flood impacts at different stages.
     """
 
-    stageUnits: str
-    flowUnits: str
-    categories: FloodCategories
-    lro: Optional[LRO]
-    crests: dict[str, list[Crest]]
-    lowWaters: dict[str, list[LowWater]]
-    impacts: list[Impact]
+    stageUnits: str = Field(description="Units used for stage measurements")
+    flowUnits: str = Field(description="Units used for flow measurements")
+    categories: FloodCategories = Field(description="Thresholds for different flood categories")
+    lro: Optional[LRO] = Field(description="Long Range Outlook information, if available")
+    crests: dict[str, list[Crest]] = Field(description="Historical and forecasted flood crests")
+    lowWaters: dict[str, list[LowWater]] = Field(description="Historical and forecasted low water conditions")
+    impacts: list[Impact] = Field(description="List of flood impacts at different stages")
 
 
 class ProbabilityImages(BaseModel):
@@ -286,9 +286,9 @@ class ProbabilityImages(BaseModel):
         Link to volume probability image.
     """
 
-    stage: str
-    flow: str
-    volume: str
+    stage: str = Field(description="Link to stage probability image")
+    flow: str = Field(description="Link to flow probability image")
+    volume: str = Field(description="Link to volume probability image")
 
 
 class Probability(BaseModel):
@@ -305,9 +305,9 @@ class Probability(BaseModel):
         Link to short range probability image.
     """
 
-    weekint: ProbabilityImages
-    entperiod: ProbabilityImages
-    shortrange: str
+    weekint: ProbabilityImages = Field(description="Week interval probability images")
+    entperiod: ProbabilityImages = Field(description="Entire period probability images")
+    shortrange: str = Field(description="Link to short range probability image")
 
 
 class Hydrograph(BaseModel):
@@ -322,8 +322,8 @@ class Hydrograph(BaseModel):
         Link to flood category hydrograph image.
     """
 
-    default: str
-    floodcat: str
+    default: str =  Field(description="Link to default hydrograph image")
+    floodcat: str =  Field(description="Link to flood category hydrograph image")
 
 
 class PhotoGeometry(BaseModel):
@@ -338,8 +338,8 @@ class PhotoGeometry(BaseModel):
         Coordinates of the photo location.
     """
 
-    type: str
-    coordinates: list[float]
+    type: str = Field(description='Type of geometry (e.g., "Point")')
+    coordinates: list[float] = Field(description="Coordinates of the photo location")
 
 
 class PhotoProperties(BaseModel):
@@ -354,8 +354,8 @@ class PhotoProperties(BaseModel):
         Caption for the photo.
     """
 
-    image: str
-    caption: str
+    image: str = Field(description="Link to the image file")
+    caption: str = Field(description="Caption for the photo")
 
 
 class Photo(BaseModel):
@@ -374,10 +374,10 @@ class Photo(BaseModel):
         Properties of the photo.
     """
 
-    id: str
-    type: str
-    geometry: PhotoGeometry
-    properties: PhotoProperties
+    id: str = Field(description="Unique identifier for the photo")
+    type: str = Field(description="Type of the photo data")
+    geometry: PhotoGeometry = Field(description="Geometry information for the photo")
+    properties: PhotoProperties = Field(description="Properties of the photo")
 
 
 class Images(BaseModel):
@@ -394,9 +394,9 @@ class Images(BaseModel):
         List of photos related to the gauge location.
     """
 
-    probability: Probability
-    hydrograph: Hydrograph
-    photos: list[Photo]
+    probability: Probability = Field(description="Probability images for different time ranges")
+    hydrograph: Hydrograph = Field(description="Hydrograph images")
+    photos: list[Photo] = Field(description="List of photos related to the gauge location")
 
 
 class DataAttribution(BaseModel):
@@ -415,10 +415,10 @@ class DataAttribution(BaseModel):
         URL for more information about the data source.
     """
 
-    abbrev: str
-    text: str
-    title: str
-    url: str
+    abbrev: str = Field(description="Abbreviation of the data source")
+    text: str = Field(description="Full text of the attribution")
+    title: str = Field(description="Title of the data source")
+    url: str = Field(description="URL for more information about the data source")
 
 
 class ImpactLowWater(BaseModel):
@@ -433,8 +433,8 @@ class ImpactLowWater(BaseModel):
         Description of the low water impact.
     """
 
-    value: str
-    impact: str
+    value: str = Field(description="Value at which the low water impact occurs")
+    impact: str = Field(description="Description of the low water impact")
 
 
 class NormalThreshold(BaseModel):
@@ -449,8 +449,8 @@ class NormalThreshold(BaseModel):
         Units of measurement for the threshold.
     """
 
-    value: float
-    units: str
+    value: float = Field(description="The value of the normal threshold")
+    units: str = Field(description="Units of measurement for the threshold")
 
 
 class Hydronote(BaseModel):
@@ -467,9 +467,9 @@ class Hydronote(BaseModel):
         The time when the note expires.
     """
 
-    statement: str
-    effective: str
-    expiration: str
+    statement: str = Field(description="The content of the hydrologic note")
+    effective: str = Field(description="The time when the note becomes effective")
+    expiration: str = Field(description="The time when the note expires")
 
 
 class DatumValue(BaseModel):
@@ -488,10 +488,10 @@ class DatumValue(BaseModel):
         The numerical value of the datum.
     """
 
-    label: str
-    abbrev: str
-    description: str
-    value: float
+    label: str = Field(description="Label for the datum value")
+    abbrev: str = Field(description="Abbreviation for the datum value")
+    description: str = Field(description="Description of the datum value")
+    value: float = Field(description="The numerical value of the datum")
 
 
 class Datums(BaseModel):
@@ -508,9 +508,9 @@ class Datums(BaseModel):
         Additional notes about the datums.
     """
 
-    vertical: dict[str, list[DatumValue]]
-    horizontal: dict[str, list[DatumValue]]
-    notes: dict[str, list[str]]
+    vertical: dict[str, list[DatumValue]] = Field(description="Vertical datum information")
+    horizontal: dict[str, list[DatumValue]] = Field(description="Horizontal datum information")
+    notes: dict[str, list[str]] = Field(description="Additional notes about the datums")
 
 
 class ZeroDatum(BaseModel):
@@ -525,8 +525,8 @@ class ZeroDatum(BaseModel):
         The type or name of the datum.
     """
 
-    value: float
-    datum: str
+    value: float = Field(description="The value of the zero datum")
+    datum: str = Field(description="The type or name of the datum")
 
 
 class Downloads(BaseModel):
@@ -543,9 +543,9 @@ class Downloads(BaseModel):
         Link to KMZ file.
     """
 
-    depthGrids: str
-    images: str
-    kmz: str
+    depthGrids: str = Field(description="Link to depth grids data")
+    images: str = Field(description="Link to image data")
+    kmz: str = Field(description="Link to KMZ file")
 
 
 class InundationDataAttribution(BaseModel):
@@ -564,10 +564,10 @@ class InundationDataAttribution(BaseModel):
         Link to an image related to the attribution.
     """
 
-    text: str
-    title: str
-    url: str
-    image: str
+    text: str = Field(description="Attribution text")
+    title: str = Field(description="Title of the data source")
+    url: str = Field(description="URL for more information")
+    image: str = Field(description="Link to an image related to the attribution")
 
 
 class Inundation(BaseModel):
@@ -590,12 +590,12 @@ class Inundation(BaseModel):
         List of data attributions for inundation data.
     """
 
-    enabled: bool
-    url: str
-    zeroDatum: Optional[ZeroDatum]
-    downloads: Optional[Downloads]
-    siteSpecificInfo: str
-    dataAttribution: list[InundationDataAttribution]
+    enabled: bool = Field(description="Whether inundation data is enabled")
+    url: str = Field(description="URL for inundation data")
+    zeroDatum: Optional[ZeroDatum] = Field(description="Zero datum information, if available")
+    downloads: Optional[Downloads] = Field(description="Links to downloadable data, if available")
+    siteSpecificInfo: str = Field(description="Site-specific inundation information")
+    dataAttribution: list[InundationDataAttribution] = Field(description="List of data attributions for inundation data")
 
 
 class InService(BaseModel):
@@ -610,8 +610,8 @@ class InService(BaseModel):
         Any message related to the service status.
     """
 
-    enabled: bool
-    message: str
+    enabled: bool = Field(description="Whether the gauge is in service")
+    message: str = Field(description="Any message related to the service status")
 
 
 class LowThreshold(BaseModel):
@@ -626,8 +626,8 @@ class LowThreshold(BaseModel):
         The value of the low threshold.
     """
 
-    units: str
-    value: float
+    units: str = Field(description="Units of measurement for the threshold")
+    value: float = Field(description="The value of the low threshold")
 
 
 class GaugeData(BaseModel):
@@ -700,37 +700,37 @@ class GaugeData(BaseModel):
         Forecast flood category.
     """
 
-    lid: str
-    usgsId: str
-    reachId: str
-    name: str
-    description: str
-    rfc: RFC
-    wfo: WFO
-    state: State
-    county: str
-    timeZone: str
-    latitude: float
-    longitude: float
-    pedts: PEDTS
-    status: Status
-    flood: Flood
-    images: Images
-    dataAttribution: list[DataAttribution]
-    impactsLowWaters: list[ImpactLowWater]
-    normalThreshold: Optional[NormalThreshold]
-    hydronotes: list[Hydronote]
-    datums: Datums
-    inundation: Inundation
-    upstreamLid: str
-    downstreamLid: str
-    inService: InService
-    lowThreshold: Optional[LowThreshold]
-    forecastReliability: str
-    TruncateObs: str
-    TruncateFcst: str
-    ObservedFloodCategory: str
-    ForecastFloodCategory: str
+    lid: str = Field(description="Location ID of the gauge")
+    usgsId: str = Field(description="USGS ID of the gauge")
+    reachId: str = Field(description="Reach ID associated with the gauge")
+    name: str = Field(description="Name of the gauge location")
+    description: str = Field(description="Description of the gauge location")
+    rfc: RFC = Field(description="River Forecast Center information")
+    wfo: WFO = Field(description="Weather Forecast Office information")
+    state: State = Field(description="State information")
+    county: str = Field(description="County where the gauge is located")
+    timeZone: str = Field(description="Time zone of the gauge location")
+    latitude: float = Field(description="Latitude of the gauge location")
+    longitude: float = Field(description="Longitude of the gauge location")
+    pedts: PEDTS = Field(description="Physical Element Data Type and Source information")
+    status: Status = Field(description="Current status of the gauge")
+    flood: Flood = Field(description="Flood-related information")
+    images: Images = Field(description="Collection of related images")
+    dataAttribution: list[DataAttribution] = Field(description="List of data attributions")
+    impactsLowWaters: list[ImpactLowWater] = Field(description="List of low water impacts")
+    normalThreshold: Optional[NormalThreshold] = Field(description="Normal water level threshold, if available")
+    hydronotes: list[Hydronote] = Field(description="List of hydrologic notes")
+    datums: Datums = Field(description="Datum information")
+    inundation: Inundation = Field(description="Inundation data and services information")
+    upstreamLid: str = Field(description="Location ID of the upstream gauge")
+    downstreamLid: str = Field(description="Location ID of the downstream gauge")
+    inService: InService = Field(description="Service status information")
+    lowThreshold: Optional[LowThreshold] = Field(description="Low water threshold information, if available")
+    forecastReliability: str = Field(description="Information about the reliability of forecasts")
+    TruncateObs: str = Field(description="Information about truncation of observations")
+    TruncateFcst: str = Field(description="Information about truncation of forecasts")
+    ObservedFloodCategory: str = Field(description="Observed flood category")
+    ForecastFloodCategory: str = Field(description="Forecast flood category")
 
 
 class GaugeForecast(BaseModel):
@@ -747,27 +747,27 @@ class GaugeForecast(BaseModel):
         List of primary forecast values.
     primary_unit : str
         Unit of measurement for primary forecast.
-    secondary_name : str
-        Name of the secondary forecast parameter.
     latest_observation: list[float]
         The latest observation from NWPS.
     latest_obs_units: str
         The latest observation units.
+    secondary_name : str
+        Name of the secondary forecast parameter.
     secondary_forecast : list[float]
         List of secondary forecast values.
     secondary_unit : str
         Unit of measurement for secondary forecast.
     """
 
-    times: list[datetime]
-    primary_name: str
-    primary_forecast: list[float]
-    primary_unit: str
-    latest_observation: list[float]
-    latest_obs_units: str
-    secondary_name: str
-    secondary_forecast: list[float]
-    secondary_unit: str
+    times: list[datetime] = Field(description="List of forecast times")
+    primary_name: str = Field(description="Name of the primary forecast parameter")
+    primary_forecast: list[float] = Field(description="List of primary forecast values")
+    primary_unit: str = Field(description="Unit of measurement for primary forecast")
+    latest_observation: list[float] = Field(description="The latest observation from NWPS")
+    latest_obs_units: str = Field(description="The latest observation units")
+    secondary_name: str = Field(description="Name of the secondary forecast parameter")
+    secondary_forecast: list[float] = Field(description="List of secondary forecast values")
+    secondary_unit: str = Field(description="Unit of measurement for secondary forecast")
 
 
 class ReachClassification(str, Enum):
@@ -782,8 +782,8 @@ class ReachClassification(str, Enum):
         Flowline classification.
     """
 
-    rfc_point = "rfc_point"
-    flowline = "flowline"
+    rfc_point = "rfc_point" = Field(description="RFC point classification")
+    flowline = "flowline" = Field(description="Flowline classification")
 
 
 class Reach(BaseModel):
@@ -804,11 +804,11 @@ class Reach(BaseModel):
         List of forecast values.
     """
 
-    reach_id: int
-    downstream_reach_id: int
-    reach_classification: ReachClassification
-    times: list[datetime]
-    forecast: list[float]
+    reach_id: int = Field(description="Identifier for the reach")
+    downstream_reach_id: int = Field(description="Identifier for the downstream reach")
+    reach_classification: ReachClassification = Field(description="Classification of the reach")
+    times: list[datetime] = Field(description="List of times for the forecast data")
+    forecast: list[float] = Field(description="List of forecast values")
 
 
 class ProcessedData(BaseModel):
@@ -826,9 +826,9 @@ class ProcessedData(BaseModel):
     """
 
     model_config = ConfigDict(from_attributes=True, arbitrary_types_allowed=True)
-    lid: str
-    downstream_lid: str
-    reaches: Optional[list[Reach]]
+    lid: str = Field(description="Location ID")
+    downstream_lid: str = Field(description="Downstream location ID")
+    reaches: Optional[list[Reach]] = Field(description="List of reaches, if available")
 
 
 class ResultItem(BaseModel):
@@ -850,11 +850,11 @@ class ResultItem(BaseModel):
         The status code of the exception if applicable.
     """
 
-    status: str
-    lid: str
-    error_type: Optional[str] = None
-    error_message: Optional[str] = None
-    status_code: Optional[str] = None
+    status: str = Field(description="The status of the processing operation. Possible values: 'success', 'no_forecast', 'api_error', 'error'")
+    lid: str = Field(description="The location ID (LID) of the processed RFC entry")
+    error_type: Optional[str] = Field(description="The exception/error that was raised", default=None)
+    error_message: Optional[str] = Field(description="The error message that was raised", default=None)
+    status_code: Optional[str] = Field(description="The status code of the exception if applicable", default=None)
 
 
 class Summary(BaseModel):
@@ -875,11 +875,11 @@ class Summary(BaseModel):
         The number of entries that encountered a validation error.
     """
 
-    total: int
-    success: int
-    no_forecast: int
-    api_error: int
-    validation_error: int
+    total: int = Field(description="The total number of RFC entries processed")
+    success: int = Field(description="The number of entries successfully processed")
+    no_forecast: int = Field(description="The number of entries that had no forecast available")
+    api_error: int = Field(description="The number of entries that encountered an API error")
+    validation_error: int = Field(description="The number of entries that encountered a validation error")
 
 
 class PublishMessagesResponse(BaseModel):
@@ -896,9 +896,9 @@ class PublishMessagesResponse(BaseModel):
         Detailed results for each processed RFC entry.
     """
 
-    status: int
-    summary: Summary
-    results: list[ResultItem]
+    status: int = Field(description="The HTTP status code of the response")
+    summary: Summary = Field(description="A summary of the processing results")
+    results: list[ResultItem] = Field(description="Detailed results for each processed RFC entry")
 
 
 class ConsumerStatus(BaseModel):
@@ -911,4 +911,4 @@ class ConsumerStatus(BaseModel):
         Whether the consumer is currently running.
     """
 
-    is_running: bool = False
+    is_running: bool = Field(description="Whether the consumer is currently running", default= False)
