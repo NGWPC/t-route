@@ -28,4 +28,4 @@ class Persistence(BaseModel):
     qc_threshold: int  # 1
 
 
-ReservoirDataAssimilationParameters.update_forward_refs()
+ReservoirDataAssimilationParameters.model_rebuild()
