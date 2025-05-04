@@ -3,8 +3,8 @@ import socket
 
 import httpx
 import pika
-from pydantic.error_wrappers import ValidationError
-from troute_rnr.format import format_xml, get_site_data, pull_nwm_inputs
+from pydantic import ValidationError
+from troute_rnr.format import build_config, format_xml, get_site_data, pull_nwm_inputs
 from troute_rnr.settings import Settings
 from troute_rnr.utils import get
 
@@ -33,22 +33,26 @@ def run(
     """
     hml = json.loads(body.decode())
     print(f"Reading forecast for {hml['rdf']}, issued at {hml['issuance_time']}")
-    site_response = get(hml["rdf"], headers=settings.headers).json()
-    sites = format_xml(site_response["productText"])
-    for site in sites:
-        try:
-            site_data = get_site_data(site, settings)
-            if site_data is None:
+    sites_response = get(hml["rdf"], headers=settings.headers).json()
+    try:
+        sites = format_xml(sites_response["productText"])
+        for site in sites:
+            try:
+                site_data = get_site_data(site, settings)
+                if site_data is None:
+                    continue
+            except ValidationError:
+                #  ValidationError: Pydantic validation error for the ingested forecast
                 continue
-        except ValidationError:
-            #  ValidationError: Pydantic validation error for the ingested forecast
-            continue
-        except httpx.HTTPStatusError:
-            #  HTTPStatusError: There was no forecast/record within NWPS for the site given
-            continue
-        inputs = pull_nwm_inputs(site_data, settings)
-        if inputs is not None:
-            print("Forecast successfully read")
+            except httpx.HTTPStatusError:
+                #  HTTPStatusError: There was no forecast/record within NWPS for the site given
+                continue
+            inputs = pull_nwm_inputs(site_data, settings)
+            if inputs is not None:
+                build_config(inputs, settings)
+    except KeyError:
+        print(f"Sites not found. Status: {sites_response['status']}")
+        pass
 
     # Acknowledging message since all HML files are read
     ch.basic_ack(delivery_tag=method.delivery_tag)
