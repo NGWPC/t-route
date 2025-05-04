@@ -796,26 +796,40 @@ class Reach(BaseModel):
     """
     Information about a river reach.
 
-    Parameters
+    Attributes
     ----------
     reach_id : int
         Identifier for the reach.
-    downstream_reach_id : int
-        Identifier for the downstream reach.
-    reach_classification : ReachClassification
-        Classification of the reach.
-    times : list[datetime]
-        List of times for the forecast data.
-    forecast : list[float]
-        List of forecast values.
+    times : List[datetime]
+        List of forecast times.
+    primary_name : str
+        Name of the primary forecast parameter.
+    primary_forecast : List[float]
+        List of primary forecast values.
+    primary_unit : str
+        Unit of measurement for primary forecast.
+    latest_obervation: List[float]
+        The latest observation from NWPS
+    latest_obs_units: str
+        The latest observation units
+    secondary_name: str
+        Name of the secondary forecast parameter
+    secondary_forecast : List[float]
+        List of secondary forecast values.
+    secondary_unit : str
+        Unit of measurement for secondary forecast.
     """
 
     reach_id: int = Field(description="Identifier for the reach")
-    downstream_reach_id: int = Field(description="Identifier for the downstream reach")
-    reach_classification: ReachClassification = Field(description="Classification of the reach")
-    times: list[datetime] = Field(description="List of times for the forecast data")
-    forecast: list[float] = Field(description="List of forecast values")
-
+    times: list[datetime] = Field(description="List of forecast times")
+    primary_name: str = Field(description="Name of the primary forecast parameter")
+    primary_forecast: list[float] = Field(description="List of primary forecast values")
+    primary_unit: str = Field(description="Unit of measurement for primary forecast")
+    latest_observation: list[float] = Field(description="The latest observation from NWPS")
+    latest_obs_units: str = Field(description="The latest observation units")
+    secondary_name: str = Field(description="Name of the secondary forecast parameter")
+    secondary_forecast: list[float] = Field(description="List of secondary forecast values")
+    secondary_unit: str = Field(description="Unit of measurement for secondary forecast")
 
 class ProcessedData(BaseModel):
     """
@@ -827,14 +841,14 @@ class ProcessedData(BaseModel):
         Location ID.
     downstream_lid : str
         Downstream location ID.
-    reaches : list[Reach] | None
-        List of reaches, if available.
+    reaches : Reach
+        The reach we're routing from
     """
 
     model_config = ConfigDict(from_attributes=True, arbitrary_types_allowed=True)
     lid: str = Field(description="Location ID")
     downstream_lid: str = Field(description="Downstream location ID")
-    reaches: Optional[list[Reach]] = Field(None, description="List of reaches, if available")
+    reach: Reach = Field(description="The reach we're routing from")
 
 
 class ResultItem(BaseModel):

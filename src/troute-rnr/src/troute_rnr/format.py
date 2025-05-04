@@ -1,120 +1,127 @@
 """Module for handling NWM data processing and NWPS integrations."""
+from pathlib import Path
+from datetime import datetime
 
 import geopandas as gpd
 import httpx
 import lxml.etree
 from icefabric_tools import rnr
+import numpy as np
+import pandas as pd
 from pydantic import ValidationError
+import yaml
 
+from nwm_routing.__main__ import main_v04 as t_route
 from troute_rnr.schemas.nwps import ProcessedData, Reach, ReachClassification, SiteData
 from troute_rnr.schemas.weather import Site
 from troute_rnr.settings import Settings
 from troute_rnr.utils import get
 
 
-def get_reach_flow(reach_id: int, settings: Settings) -> Reach:
-    """
-    Fetch flow data for a specific reach.
+def edit_yaml(original_file: Path, params: dict[str, str], restart_file: Path) -> Path:
+    """A function to dynamically edit the T-Route config
 
     Parameters
     ----------
-    reach_id : int
-        The identifier for the reach to fetch.
-    settings : Settings
-        Configuration settings containing base URL and other parameters.
+    original_file: Path
+        The path to the base yaml config file
+    params: Dict[str, str]
+        The parameters that will be added to the base config file
+    restart_file: path
+        The location to the restart_file path
 
     Returns
     -------
-    Reach
-        Object containing the reach flow data.
+    Path:
+        The path to the dynamically generated config
     """
-    flow_endpoint = f"{settings.BASE_URL}/reaches/{reach_id}/streamflow?series=short_range"
-    reach_flow = get(flow_endpoint).json()
-    return Reach(
-        reach_id=reach_id,
-        downstream_reach_id=int(reach_flow["reach"]["route"]["downstream"][0]["reachId"]),
-        reach_classification=ReachClassification.flowline,
-        times=[data["validTime"] for data in reach_flow["shortRange"]["series"]["data"]],
-        forecast=[data["flow"] for data in reach_flow["shortRange"]["series"]["data"]],
+    tmp_yaml = original_file.with_name(
+        original_file.stem + "_tmp_" + params["lid"] + original_file.suffix
+    )
+    with open(original_file) as file:
+        data = yaml.safe_load(file)
+
+    output_dir = Path(
+        data["output_parameters"]["stream_output"]["stream_output_directory"].format(
+            params["lid"]
+        )
+    )
+    output_dir.mkdir(exist_ok=True)
+
+    data["network_topology_parameters"]["supernetwork_parameters"]["geo_file_path"] = (
+        params["geo_file_path"]
     )
 
-
-def fetch_all_flows(processed_data: ProcessedData, gauge_data: SiteData, settings: Settings) -> list[Reach]:
-    """
-    Fetch flow data for all reaches in the route.
-
-    Parameters
-    ----------
-    processed_data : ProcessedData
-        Already processed data containing initial reach information.
-    gauge_data : SiteData
-        Gauge data containing the downstream LID.
-    settings : Settings
-        Configuration settings.
-
-    Returns
-    -------
-    list[Reach]
-        list of reach objects containing flow data.
-    """
-    endpoint = f"{settings.BASE_URL}/gauges/{gauge_data.downstreamLid}"
-    forecast = get(endpoint).json()
-    ending_reach_id = int(forecast["reachId"])
-    output: list[Reach] = []
-    downstream_reach_id = processed_data.reaches[0].downstream_reach_id
-    counter = 0
-    print("Pulling input reach forecasts")
-    while downstream_reach_id != ending_reach_id and counter <= settings.reach_limit:
-        reach = get_reach_flow(downstream_reach_id, settings)
-        output.append(reach)
-        downstream_reach_id = reach.downstream_reach_id
-        counter += 1
-    end_reach = get_reach_flow(ending_reach_id, settings)
-    output.append(end_reach)
-    return output
-
-
-def pull_nwm_inputs(forecast: SiteData, settings: Settings) -> ProcessedData | None:
-    """
-    Pull National Water Model inputs for a given forecast.
-
-    Parameters
-    ----------
-    forecast : SiteData
-        Gauge data containing forecast information.
-    settings : Settings
-        Configuration settings.
-
-    Returns
-    -------
-    ProcessedData | None
-        Processed data containing reach information or None if data is invalid.
-    """
-    forecast_endpoint = f"{settings.BASE_URL}/gauges/{forecast.lid}/stageflow/forecast"
-    site_data = get(forecast_endpoint).json()
-    if site_data["data"][0]["secondary"] == -999:
-        return None
-
-    metadata_endpoint = f"{settings.BASE_URL}/reaches/{forecast.reachId}"
-    downstream_metadata = get(metadata_endpoint).json()
-    downstream_reach_id = int(downstream_metadata["route"]["downstream"][0]["reachId"])
-    processed_data = ProcessedData(
-        lid=forecast.lid,
-        downstream_lid=forecast.downstreamLid,
-        reaches=[
-            Reach(
-                reach_id=forecast.reachId,
-                downstream_reach_id=downstream_reach_id,
-                reach_classification=ReachClassification.rfc_point,
-                times=[val["validTime"] for val in site_data["data"]],
-                forecast=[val["secondary"] for val in site_data["data"]],
-            )
-        ],
+    data["compute_parameters"]["restart_parameters"]["start_datetime"] = params[
+        "start_datetime"
+    ]
+    data["compute_parameters"]["restart_parameters"]["lite_channel_restart_file"] = (
+        restart_file.__str__()
     )
-    return processed_data
+    data["compute_parameters"]["forcing_parameters"]["nts"] = params["nts"]
+    data["compute_parameters"]["forcing_parameters"]["qlat_input_folder"] = params[
+        "qlat_input_folder"
+    ]
+
+    data["output_parameters"]["stream_output"]["stream_output_directory"] = (
+        output_dir.__str__()
+    )
+
+    with open(tmp_yaml, "w") as file:
+        yaml.dump(data, file)
+
+    return tmp_yaml
 
 
-def build_config(inputs: ProcessedData, settings: Settings) -> None:
+def create_initial_start_file(params: dict[str, str], settings: Settings) -> Path:
+    """Creating the initial start/restart files
+
+    Parmeters
+    ---------
+    params: Dict[str, str]
+        The parameters from the API to be added to the t-route config file
+    settings: Settings
+        The T-route BaseSettings
+
+    Returns
+    -------
+    Path:
+        The path to the t-route restart file
+    """
+    start_datetime = datetime.strptime(params["start_datetime"], "%Y-%m-%d_%H:%M")
+    formatted_datetime = start_datetime.strftime("%Y-%m-%d_%H:%M")
+
+    gdf = gpd.read_file(params["geo_file_path"], layer="network")
+    mask = gdf["divide_id"].isna()
+    keys = [int(val.split("-")[1]) for val in set(gdf[~mask]["divide_id"].values.tolist())]
+
+    discharge_upstream = np.zeros([len(keys)])
+    discharge_downstream = np.zeros([len(keys)])
+    height = np.zeros([len(keys)])
+    idx = keys.index(int(params["hy_id"]))
+    discharge_upstream[idx] = float(params["initial_start"])
+
+    time_array = np.array(
+        [pd.to_datetime(formatted_datetime, format="%Y-%m-%d_%H:%M")] * len(keys)
+    )
+
+    df = pd.DataFrame(
+        {
+            "time": time_array,
+            "key": np.array(keys),
+            "qu0": discharge_upstream,
+            "qd0": discharge_downstream,
+            "h0": height,
+        }
+    )
+    df.set_index("key", inplace=True)
+    restart_path = Path(settings.restart_path.format(params["lid"]))
+    restart_path.mkdir(exist_ok=True)
+    restart_full_path = restart_path / settings.restart_file.format(formatted_datetime)
+    df.to_pickle(restart_full_path)
+    return restart_full_path
+
+def format_config(inputs: ProcessedData, settings: Settings) -> None:
     """
     Create the configuration required for T-Route.
 
@@ -129,10 +136,29 @@ def build_config(inputs: ProcessedData, settings: Settings) -> None:
     -------
     None
     """
-    reach = inputs.reaches[0]
+    reach = inputs.reach
     rnr.get_rnr_segment(settings.catalog, reach.reach_id, settings.tmp_geopackage)
-    rnr_gdf = gpd.read_file(settings.tmp_geopackage, layer="flowpaths")
-    print(rnr_gdf.head())
+    start_timestamp = reach.times[0].strftime("%Y-%m-%d_%H:%M")
+    forecast_flows = reach.secondary_forecast
+
+    nts = 288 * len(forecast_flows)
+    
+    qlat_input_folder = settings.qlat_input_path.format(version, lid)
+    params = {
+        "lid": lid,
+        "hy_id": hy_id,
+        "initial_start": initial_start,
+        "start_datetime": start_timestamp,
+        "geo_file_path": settings.tmp_geopackage,
+        "nts": nts,
+        "qlat_input_folder": qlat_input_folder,
+    }
+    restart_file = create_initial_start_file(params, settings)
+    yaml_file_path = edit_yaml(settings.base_config_path, params, restart_file)
+
+    t_route(["-f", yaml_file_path.__str__()])
+
+    yaml_file_path.unlink()
     settings.tmp_geopackage.unlink()
 
 
@@ -165,47 +191,3 @@ def format_xml(product_text: str) -> list[Site]:
             site = Site.from_xml(xml_segment)
         sites.append(site)
     return sites
-
-
-def get_site_data(site: Site, settings: Settings) -> SiteData | None:
-    """Retrieves gauge data from the NWPS API for a specific site and validates it meets flood criteria.
-
-    Parameters
-    ----------
-    site : Site
-        The site object containing properties with an 'id' field used to construct the API endpoint
-    settings : Settings
-        Configuration object containing BASE_URL for the API endpoint and STAGES for flood criteria validation
-
-    Returns
-    -------
-    SiteData | None
-        A validated SiteData object if the site data meets flood criteria requirements,
-        None if the site's flood category does not meet the required criteria
-
-    Raises
-    ------
-    ValidationError
-        If the API response cannot be parsed into a valid SiteData object
-    httpx.HTTPStatusError
-        If the API request fails or returns an error status
-    """
-    endpoint = f"{settings.BASE_URL}/gauges/{site.properties['id']}"
-    try:
-        forecast = get(endpoint).json()
-        try:
-            site_data = SiteData(**forecast)
-        except ValidationError as e:
-            msg = f"ValidationError: Pydantic validation error for the endpoint given: {endpoint}"
-            print(msg)
-            raise e
-        if site_data.ForecastFloodCategory in settings.STAGES:
-            return site_data
-        else:
-            msg = f"This site does not meet the criteria for a flood: {site_data.lid}"
-            print(msg)
-            return None
-    except httpx.HTTPStatusError as e:
-        msg = f"HTTPStatusError: There was no forecast/record within NWPS for the site given: {endpoint}"
-        print(msg)
-        raise httpx.HTTPStatusError(msg) from e
