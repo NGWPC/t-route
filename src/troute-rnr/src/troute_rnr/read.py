@@ -1,15 +1,9 @@
 """Module for handling NWM data processing and NWPS integrations."""
-from pathlib import Path
+
 from datetime import datetime
 
-import geopandas as gpd
 import httpx
-import lxml.etree
-from icefabric_tools import rnr
-import numpy as np
-import pandas as pd
 from pydantic import ValidationError
-import yaml
 
 from troute_rnr.schemas.nwps import ProcessedData, Reach, SiteData
 from troute_rnr.schemas.weather import Site
@@ -104,16 +98,22 @@ def read_rfc_flows(forecast: SiteData, settings: Settings) -> ProcessedData | No
     obs_endpoint = f"{settings.BASE_URL}/gauges/{forecast.lid}/stageflow/observation"
     forecast_data = get(forecast_endpoint).json()
     obs_data = get(obs_endpoint).json()
-    if ["data"][0]["secondary"] == -999:
+    if forecast_data["data"][0]["secondary"] == -999:
         return None
 
-    latest_observation_units = obs_data["secondaryUnits"]
-    latest_observation_flow = [obs_data["data"][-1]["secondary"]]
+    try:
+        latest_observation_units = obs_data["secondaryUnits"]
+        latest_observation_flow = [obs_data["data"][-1]["secondary"]]
 
-    times = [
-        datetime.fromisoformat(entry["validTime"].rstrip("Z"))
-        for entry in forecast_data["data"]
-    ]
+        latest_observation_m3, latest_obs_units = convert_to_m3_per_sec(
+            latest_observation_flow, latest_observation_units
+        )
+    except KeyError:
+        print("No Observations found. Setting obs fields to None")
+        latest_obs_units = None
+        latest_observation_m3 = None
+
+    times = [datetime.fromisoformat(entry["validTime"].rstrip("Z")) for entry in forecast_data["data"]]
     primary_forecast = [entry["primary"] for entry in forecast_data["data"]]
     secondary_forecast = [entry["secondary"] for entry in forecast_data["data"]]
 
@@ -124,15 +124,11 @@ def read_rfc_flows(forecast: SiteData, settings: Settings) -> ProcessedData | No
         secondary_forecast, forecast_data["secondaryUnits"]
     )
 
-    latest_observation_m3, latest_obs_units = convert_to_m3_per_sec(
-        latest_observation_flow, latest_observation_units
-    )
-
     return ProcessedData(
         lid=forecast.lid,
         downstream_lid=forecast.downstreamLid,
         reach=Reach(
-            reach_id=forecast.reachId,
+            id=forecast.reachId,
             times=times,
             primary_name=forecast_data["primaryName"],
             primary_forecast=primary_forecast,
@@ -142,5 +138,5 @@ def read_rfc_flows(forecast: SiteData, settings: Settings) -> ProcessedData | No
             secondary_name=forecast_data["secondaryName"],
             secondary_forecast=secondary_m3_forecast,
             secondary_unit=secondary_units,
-        )
+        ),
     )

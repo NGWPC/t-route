@@ -798,7 +798,7 @@ class Reach(BaseModel):
 
     Attributes
     ----------
-    reach_id : int
+    id : int
         Identifier for the reach.
     times : List[datetime]
         List of forecast times.
@@ -820,16 +820,17 @@ class Reach(BaseModel):
         Unit of measurement for secondary forecast.
     """
 
-    reach_id: int = Field(description="Identifier for the reach")
+    id: int = Field(description="Identifier for the reach")
     times: list[datetime] = Field(description="List of forecast times")
     primary_name: str = Field(description="Name of the primary forecast parameter")
     primary_forecast: list[float] = Field(description="List of primary forecast values")
     primary_unit: str = Field(description="Unit of measurement for primary forecast")
-    latest_observation: list[float] = Field(description="The latest observation from NWPS")
-    latest_obs_units: str = Field(description="The latest observation units")
+    latest_observation: Optional[float] = Field(description="The latest observation from NWPS", default=None)
+    latest_obs_units: Optional[str] = Field(description="The latest observation units", default=None)
     secondary_name: str = Field(description="Name of the secondary forecast parameter")
     secondary_forecast: list[float] = Field(description="List of secondary forecast values")
     secondary_unit: str = Field(description="Unit of measurement for secondary forecast")
+
 
 class ProcessedData(BaseModel):
     """

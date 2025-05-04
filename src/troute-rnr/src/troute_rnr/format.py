@@ -1,21 +1,20 @@
 """Module for handling NWM data processing and NWPS integrations."""
-from pathlib import Path
+
 from datetime import datetime
+from pathlib import Path
 
 import geopandas as gpd
-import httpx
 import lxml.etree
-from icefabric_tools import rnr
 import numpy as np
 import pandas as pd
-from pydantic import ValidationError
 import yaml
-
+from icefabric_tools import find_origin, rnr
 from nwm_routing.__main__ import main_v04 as t_route
-from troute_rnr.schemas.nwps import ProcessedData, Reach, ReachClassification, SiteData
+
+from troute_rnr import write
+from troute_rnr.schemas.nwps import ProcessedData
 from troute_rnr.schemas.weather import Site
 from troute_rnr.settings import Settings
-from troute_rnr.utils import get
 
 
 def edit_yaml(original_file: Path, params: dict[str, str], restart_file: Path) -> Path:
@@ -35,37 +34,23 @@ def edit_yaml(original_file: Path, params: dict[str, str], restart_file: Path) -
     Path:
         The path to the dynamically generated config
     """
-    tmp_yaml = original_file.with_name(
-        original_file.stem + "_tmp_" + params["lid"] + original_file.suffix
-    )
+    tmp_yaml = original_file.with_name(f"tmp_{params['lid']}_{original_file.suffix}")
     with open(original_file) as file:
         data = yaml.safe_load(file)
 
-    output_dir = Path(
-        data["output_parameters"]["stream_output"]["stream_output_directory"].format(
-            params["lid"]
-        )
-    )
+    output_dir = params["output_folder"] / params["lid"]
     output_dir.mkdir(exist_ok=True)
 
-    data["network_topology_parameters"]["supernetwork_parameters"]["geo_file_path"] = (
+    data["network_topology_parameters"]["supernetwork_parameters"]["geo_file_path"] = str(
         params["geo_file_path"]
     )
 
-    data["compute_parameters"]["restart_parameters"]["start_datetime"] = params[
-        "start_datetime"
-    ]
-    data["compute_parameters"]["restart_parameters"]["lite_channel_restart_file"] = (
-        restart_file.__str__()
-    )
+    data["compute_parameters"]["restart_parameters"]["start_datetime"] = params["start_datetime"]
+    data["compute_parameters"]["restart_parameters"]["lite_channel_restart_file"] = str(restart_file)
     data["compute_parameters"]["forcing_parameters"]["nts"] = params["nts"]
-    data["compute_parameters"]["forcing_parameters"]["qlat_input_folder"] = params[
-        "qlat_input_folder"
-    ]
+    data["compute_parameters"]["forcing_parameters"]["qlat_input_folder"] = str(params["qlat_input_folder"])
 
-    data["output_parameters"]["stream_output"]["stream_output_directory"] = (
-        output_dir.__str__()
-    )
+    data["output_parameters"]["stream_output"]["stream_output_directory"] = str(output_dir)
 
     with open(tmp_yaml, "w") as file:
         yaml.dump(data, file)
@@ -101,9 +86,7 @@ def create_initial_start_file(params: dict[str, str], settings: Settings) -> Pat
     idx = keys.index(int(params["hy_id"]))
     discharge_upstream[idx] = float(params["initial_start"])
 
-    time_array = np.array(
-        [pd.to_datetime(formatted_datetime, format="%Y-%m-%d_%H:%M")] * len(keys)
-    )
+    time_array = np.array([pd.to_datetime(formatted_datetime, format="%Y-%m-%d_%H:%M")] * len(keys))
 
     df = pd.DataFrame(
         {
@@ -115,11 +98,10 @@ def create_initial_start_file(params: dict[str, str], settings: Settings) -> Pat
         }
     )
     df.set_index("key", inplace=True)
-    restart_path = Path(settings.restart_path.format(params["lid"]))
-    restart_path.mkdir(exist_ok=True)
-    restart_full_path = restart_path / settings.restart_file.format(formatted_datetime)
+    restart_full_path = settings.restart_path / f"{params['lid']}_{formatted_datetime}.pkl"
     df.to_pickle(restart_full_path)
     return restart_full_path
+
 
 def format_config(inputs: ProcessedData, settings: Settings) -> None:
     """
@@ -137,29 +119,45 @@ def format_config(inputs: ProcessedData, settings: Settings) -> None:
     None
     """
     reach = inputs.reach
-    rnr.get_rnr_segment(settings.catalog, reach.reach_id, settings.tmp_geopackage)
-    start_timestamp = reach.times[0].strftime("%Y-%m-%d_%H:%M")
-    forecast_flows = reach.secondary_forecast
+    rnr.get_rnr_segment(settings.catalog, reach.id, settings.tmp_geopackage)
+    network = settings.catalog.load_table("hydrofabric.network")
+    hy_id = (
+        find_origin(network_table=network, identifier=reach.id, id_type="comid")["id"].values[0].split("-")[1]
+    )
+    tmp_flow_files_path = settings.tmp_flow_files_path / inputs.lid
+    tmp_flow_files_path.mkdir(exist_ok=True)
+    write.write_flow_files(hy_id, reach, tmp_flow_files_path)
 
-    nts = 288 * len(forecast_flows)
-    
-    qlat_input_folder = settings.qlat_input_path.format(version, lid)
+    start_timestamp = reach.times[0].strftime("%Y-%m-%d_%H:%M")
+    time_diff = reach.times[-1] - reach.times[0]
+
+    # Get the number of hours
+    num_hours = time_diff.total_seconds() / 3600
+    nts = 288 * int(num_hours / 24)  # 288 = 24 hours × 12 (5-minute intervals per hour)
+
+    if reach.latest_observation is not None:
+        initial_start = reach.latest_observation
+    else:
+        initial_start = reach.secondary_forecast[0]  # Using t0 as initial start since no obs
+
     params = {
-        "lid": lid,
+        "lid": inputs.lid,
         "hy_id": hy_id,
         "initial_start": initial_start,
         "start_datetime": start_timestamp,
         "geo_file_path": settings.tmp_geopackage,
         "nts": nts,
-        "qlat_input_folder": qlat_input_folder,
+        "qlat_input_folder": tmp_flow_files_path,
+        "output_folder": settings.output_files_path,
     }
     restart_file = create_initial_start_file(params, settings)
     yaml_file_path = edit_yaml(settings.base_config_path, params, restart_file)
 
-    t_route(["-f", yaml_file_path.__str__()])
+    t_route(["-f", str(yaml_file_path)])
 
     yaml_file_path.unlink()
     settings.tmp_geopackage.unlink()
+    tmp_flow_files_path.unlink()
 
 
 def format_xml(product_text: str) -> list[Site]:
