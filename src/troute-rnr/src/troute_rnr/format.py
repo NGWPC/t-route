@@ -9,7 +9,6 @@ import numpy as np
 import pandas as pd
 import yaml
 from icefabric_tools import find_origin, rnr
-from nwm_routing.__main__ import main_v04 as t_route
 
 from troute_rnr import write
 from troute_rnr.schemas.nwps import ProcessedData
@@ -103,7 +102,7 @@ def create_initial_start_file(params: dict[str, str], settings: Settings) -> Pat
     return restart_full_path
 
 
-def format_config(inputs: ProcessedData, settings: Settings) -> None:
+def format_config(inputs: ProcessedData, settings: Settings) -> tuple[Path, Path]:
     """
     Create the configuration required for T-Route.
 
@@ -116,7 +115,8 @@ def format_config(inputs: ProcessedData, settings: Settings) -> None:
 
     Returns
     -------
-    None
+    tuple[Path, Path]
+        The path to the YAML config file and flow files directory
     """
     reach = inputs.reach
     rnr.get_rnr_segment(settings.catalog, reach.id, settings.tmp_geopackage)
@@ -153,11 +153,7 @@ def format_config(inputs: ProcessedData, settings: Settings) -> None:
     restart_file = create_initial_start_file(params, settings)
     yaml_file_path = edit_yaml(settings.base_config_path, params, restart_file)
 
-    t_route(["-f", str(yaml_file_path)])
-
-    yaml_file_path.unlink()
-    settings.tmp_geopackage.unlink()
-    tmp_flow_files_path.unlink()
+    return yaml_file_path, tmp_flow_files_path
 
 
 def format_xml(product_text: str) -> list[Site]:

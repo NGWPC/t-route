@@ -1,8 +1,10 @@
 import json
+import shutil
 import socket
 
 import httpx
 import pika
+from nwm_routing.__main__ import main_v04 as t_route
 from pydantic import ValidationError
 from troute_rnr import format, read
 from troute_rnr.settings import Settings
@@ -49,7 +51,13 @@ def run(
                 continue
             inputs = read.read_rfc_flows(site_data, settings)
             if inputs is not None:
-                format.format_config(inputs, settings)
+                yaml_file_path, tmp_flow_files_path = format.format_config(inputs, settings)
+                print("Configs are built. Running T-Route")
+                t_route(["-f", str(yaml_file_path)])
+                print("Closing tmp files")
+                yaml_file_path.unlink()
+                settings.tmp_geopackage.unlink()
+                shutil.rmtree(tmp_flow_files_path)
     except KeyError:
         print(f"Sites not found. Status: {sites_response['status']}")
         pass

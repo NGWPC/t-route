@@ -3,7 +3,7 @@
 log_parameters:
     #----------
     showtiming: True
-    log_level : DEBUG
+    log_level : INFO
 #--------------------------------------------------------------------------------
 network_topology_parameters:
     #----------
