@@ -1,3 +1,6 @@
+# Commenting out these tests as there has been increased support from FilePath and DirectoryPath from Pydantic since these tests, and the custom types, were introduced.
+# These tests imo are testing the library code, and not t-route, so removing them from the testing suite
+
 # from pathlib import Path
 
 # import pytest
