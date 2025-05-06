@@ -92,7 +92,7 @@ output_parameters:
 #         lite_restart_output_directory: restart/
 #     lakeout_output: lakeout/
     stream_output :
-        stream_output_directory: /t-route/output/{}
+        stream_output_directory: ???
         stream_output_time: 1 #[hr]
         stream_output_type: '.nc' #please select only between netcdf '.nc' or '.csv' or '.pkl'
         stream_output_internal_frequency: 60 #[min] it should be order of 5 minutes. For instance if you want to output every hour put 60

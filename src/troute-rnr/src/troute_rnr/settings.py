@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 
 import boto3
+from icefabric_manage import build
+from pyiceberg.catalog import load_catalog
 
 
 class Settings:
@@ -14,7 +16,10 @@ class Settings:
     """
 
     def __init__(self):
-        config_file = Path.cwd() / "settings.ini"
+        module_dir = Path.cwd()
+        project_root = module_dir.parents[1]
+
+        config_file = module_dir / "settings.ini"
         self.config = configparser.ConfigParser()
         self.config.read(config_file)
 
@@ -43,6 +48,20 @@ class Settings:
 
         self.log_path = self.config["PATHS"]["log_path"]
         self.user = self.config["DEFAULT"]["user"]
+
+        self.data_dir = (project_root / "data").resolve()
+        self.catalog_settings = {
+            "type": "sql",
+            "uri": f"sqlite:///{str(self.data_dir / 'warehouse/pyiceberg_catalog.db')}",  # Note the three slashes for absolute path
+            "warehouse": f"file://{str(self.data_dir.resolve())}/warehouse",  # Use resolved absolute path
+        }
+
+        self.catalog = load_catalog("hydrofabric", **self.catalog_settings)
+        build(self.catalog, Path(f"{self.data_dir.resolve()}/parquet"))
+
+        self.base_config_path = module_dir / "base_files/base_config.yaml"
+        self.tmp_config = module_dir / "base_files/tmp_config.yaml"
+        self.tmp_geopackage = module_dir / "base_files/tmp_domain.gpkg"
 
         if os.getenv("RABBITMQ_HOST"):
             self.rabbitmq_host = os.getenv("RABBITMQ_HOST")

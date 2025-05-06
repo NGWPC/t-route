@@ -266,7 +266,7 @@ class Flood(BaseModel):
     stageUnits: str = Field(description="Units used for stage measurements")
     flowUnits: str = Field(description="Units used for flow measurements")
     categories: FloodCategories = Field(description="Thresholds for different flood categories")
-    lro: Optional[LRO] = Field(description="Long Range Outlook information, if available")
+    lro: Optional[LRO] = Field(None, description="Long Range Outlook information, if available")
     crests: dict[str, list[Crest]] = Field(description="Historical and forecasted flood crests")
     lowWaters: dict[str, list[LowWater]] = Field(description="Historical and forecasted low water conditions")
     impacts: list[Impact] = Field(description="List of flood impacts at different stages")
@@ -592,8 +592,8 @@ class Inundation(BaseModel):
 
     enabled: bool = Field(description="Whether inundation data is enabled")
     url: str = Field(description="URL for inundation data")
-    zeroDatum: Optional[ZeroDatum] = Field(description="Zero datum information, if available")
-    downloads: Optional[Downloads] = Field(description="Links to downloadable data, if available")
+    zeroDatum: Optional[ZeroDatum] = Field(None, description="Zero datum information, if available")
+    downloads: Optional[Downloads] = Field(None, description="Links to downloadable data, if available")
     siteSpecificInfo: str = Field(description="Site-specific inundation information")
     dataAttribution: list[InundationDataAttribution] = Field(
         description="List of data attributions for inundation data"
@@ -632,7 +632,7 @@ class LowThreshold(BaseModel):
     value: float = Field(description="The value of the low threshold")
 
 
-class GaugeData(BaseModel):
+class SiteData(BaseModel):
     """
     Comprehensive data about a gauge.
 
@@ -721,7 +721,7 @@ class GaugeData(BaseModel):
     dataAttribution: list[DataAttribution] = Field(description="List of data attributions")
     impactsLowWaters: list[ImpactLowWater] = Field(description="List of low water impacts")
     normalThreshold: Optional[NormalThreshold] = Field(
-        description="Normal water level threshold, if available"
+        None, description="Normal water level threshold, if available"
     )
     hydronotes: list[Hydronote] = Field(description="List of hydrologic notes")
     datums: Datums = Field(description="Datum information")
@@ -729,7 +729,9 @@ class GaugeData(BaseModel):
     upstreamLid: str = Field(description="Location ID of the upstream gauge")
     downstreamLid: str = Field(description="Location ID of the downstream gauge")
     inService: InService = Field(description="Service status information")
-    lowThreshold: Optional[LowThreshold] = Field(description="Low water threshold information, if available")
+    lowThreshold: Optional[LowThreshold] = Field(
+        None, description="Low water threshold information, if available"
+    )
     forecastReliability: str = Field(description="Information about the reliability of forecasts")
     TruncateObs: str = Field(description="Information about truncation of observations")
     TruncateFcst: str = Field(description="Information about truncation of forecasts")
@@ -832,7 +834,7 @@ class ProcessedData(BaseModel):
     model_config = ConfigDict(from_attributes=True, arbitrary_types_allowed=True)
     lid: str = Field(description="Location ID")
     downstream_lid: str = Field(description="Downstream location ID")
-    reaches: Optional[list[Reach]] = Field(description="List of reaches, if available")
+    reaches: Optional[list[Reach]] = Field(None, description="List of reaches, if available")
 
 
 class ResultItem(BaseModel):
