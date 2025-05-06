@@ -1,4 +1,4 @@
-# $ python -m nwm_routing -f -V4 test_rfc.yaml
+# $ python3 -m nwm_routing -f -V4 test_AnA_V4_HYFeature.yaml
 #--------------------------------------------------------------------------------
 log_parameters:
     #----------
@@ -51,6 +51,7 @@ compute_parameters:
         run_refactored_network: False
         refactored_domain: #domain/refactored_coastal_domain_subset.yaml
         refactored_topobathy_domain: #domain/refac_final_diffusive_natural_xs.nc
+        coastal_boundary_domain: #domain/coastal_domain_crosswalk.yaml
     forcing_parameters:
         #----------
         qts_subdivisions            : 12
@@ -74,7 +75,7 @@ compute_parameters:
                 reservoir_persistence_usace : False
             reservoir_rfc_da:
                 #----------
-                reservoir_rfc_forecasts : False
+                reservoir_rfc_forecasts                 : False
 #--------------------------------------------------------------------------------
 output_parameters:
     stream_output :
