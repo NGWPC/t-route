@@ -62,6 +62,13 @@ class Settings:
         self.base_config_path = module_dir / "base_files/base_config.yaml"
         self.tmp_config = module_dir / "base_files/tmp_config.yaml"
         self.tmp_geopackage = module_dir / "base_files/tmp_domain.gpkg"
+        self.tmp_flow_files_path = module_dir / "base_files/tmp_flow/"
+        self.tmp_flow_files_path.mkdir(exist_ok=True)
+        self.restart_path = module_dir / "base_files/tmp_restart_flow/"
+        self.restart_path.mkdir(exist_ok=True)
+
+        self.output_files_path = project_root / "data/output/"
+        self.output_files_path.mkdir(exist_ok=True)
 
         if os.getenv("RABBITMQ_HOST"):
             self.rabbitmq_host = os.getenv("RABBITMQ_HOST")

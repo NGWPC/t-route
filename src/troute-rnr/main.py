@@ -1,14 +1,26 @@
 import json
+import logging
+import shutil
 import socket
 
 import httpx
 import pika
+from icefabric_tools import rnr
+from nwm_routing.__main__ import main_v04 as t_route
 from pydantic import ValidationError
-from troute_rnr.format import build_config, format_xml, get_site_data, pull_nwm_inputs
+from troute_rnr import format, read
 from troute_rnr.settings import Settings
 from troute_rnr.utils import get
 
 settings = Settings()
+
+
+def reset_logging():
+    """T-Route sets the logging level to INFO. This resets to WARNING"""
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpcore.connection").setLevel(logging.WARNING)
+    logging.getLogger("httpcore.http11").setLevel(logging.WARNING)
 
 
 def run(
@@ -35,10 +47,10 @@ def run(
     print(f"Reading forecast for {hml['rdf']}, issued at {hml['issuance_time']}")
     sites_response = get(hml["rdf"], headers=settings.headers).json()
     try:
-        sites = format_xml(sites_response["productText"])
+        sites = format.format_xml(sites_response["productText"])
         for site in sites:
             try:
-                site_data = get_site_data(site, settings)
+                site_data = read.read_site_data(site, settings)
                 if site_data is None:
                     continue
             except ValidationError:
@@ -47,9 +59,18 @@ def run(
             except httpx.HTTPStatusError:
                 #  HTTPStatusError: There was no forecast/record within NWPS for the site given
                 continue
-            inputs = pull_nwm_inputs(site_data, settings)
+            inputs = read.read_rfc_flows(site_data, settings)
             if inputs is not None:
-                build_config(inputs, settings)
+                rnr.get_rnr_segment(settings.catalog, inputs.reach.id, settings.tmp_geopackage)
+                yaml_file_path, tmp_flow_files_path = format.format_config(inputs, settings)
+                print("Configs are built. Running T-Route")
+                t_route(["-f", str(yaml_file_path)])
+                print("Closing tmp files")
+                yaml_file_path.unlink()
+                settings.tmp_geopackage.unlink()
+                shutil.rmtree(tmp_flow_files_path)
+                shutil.rmtree(settings.restart_path / inputs.lid)
+                reset_logging()
     except KeyError:
         print(f"Sites not found. Status: {sites_response['status']}")
         pass
