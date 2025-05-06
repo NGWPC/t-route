@@ -1,10 +1,12 @@
 """Module for handling NWM data processing and NWPS integrations."""
 
+import geopandas as gpd
 import httpx
 import lxml.etree
-from pydantic.error_wrappers import ValidationError
+from icefabric_tools import rnr
+from pydantic import ValidationError
 
-from troute_rnr.schemas.nwps import GaugeData, ProcessedData, Reach, ReachClassification
+from troute_rnr.schemas.nwps import ProcessedData, Reach, ReachClassification, SiteData
 from troute_rnr.schemas.weather import Site
 from troute_rnr.settings import Settings
 from troute_rnr.utils import get
@@ -37,7 +39,7 @@ def get_reach_flow(reach_id: int, settings: Settings) -> Reach:
     )
 
 
-def fetch_all_flows(processed_data: ProcessedData, gauge_data: GaugeData, settings: Settings) -> list[Reach]:
+def fetch_all_flows(processed_data: ProcessedData, gauge_data: SiteData, settings: Settings) -> list[Reach]:
     """
     Fetch flow data for all reaches in the route.
 
@@ -45,7 +47,7 @@ def fetch_all_flows(processed_data: ProcessedData, gauge_data: GaugeData, settin
     ----------
     processed_data : ProcessedData
         Already processed data containing initial reach information.
-    gauge_data : GaugeData
+    gauge_data : SiteData
         Gauge data containing the downstream LID.
     settings : Settings
         Configuration settings.
@@ -72,13 +74,13 @@ def fetch_all_flows(processed_data: ProcessedData, gauge_data: GaugeData, settin
     return output
 
 
-def pull_nwm_inputs(forecast: GaugeData, settings: Settings) -> ProcessedData | None:
+def pull_nwm_inputs(forecast: SiteData, settings: Settings) -> ProcessedData | None:
     """
     Pull National Water Model inputs for a given forecast.
 
     Parameters
     ----------
-    forecast : GaugeData
+    forecast : SiteData
         Gauge data containing forecast information.
     settings : Settings
         Configuration settings.
@@ -109,45 +111,29 @@ def pull_nwm_inputs(forecast: GaugeData, settings: Settings) -> ProcessedData | 
             )
         ],
     )
-    flowline_data = fetch_all_flows(processed_data, forecast, settings)
-    processed_data.reaches.extend(flowline_data)
     return processed_data
 
 
-def write_forecast_csvs() -> None:
-    """
-    Write forecast data to CSV files.
-
-    Parameters
-    ----------
-    gdf : Dict[str, pd.DataFrame]
-        Dictionary of GeoDataFrames.
-    inputs : ProcessedData
-        Processed data containing reach information.
-
-    Returns
-    -------
-    None
-    """
-    # TODO: create the csvs required for T-Route
-    pass
-
-
-def write_config() -> None:
+def build_config(inputs: ProcessedData, settings: Settings) -> None:
     """
     Create the configuration required for T-Route.
 
     Parameters
     ----------
-    gdf : Dict[str, pd.DataFrame]
-        Dictionary of GeoDataFrames.
+    inputs: SiteData
+        The site information, and forecasts for each RnR Reach
+    settings: Settings
+        The site information, and forecasts for each RnR Reach
 
     Returns
     -------
     None
     """
-    # TODO: create the config required for T-Route
-    pass
+    reach = inputs.reaches[0]
+    rnr.get_rnr_segment(settings.catalog, reach.reach_id, settings.tmp_geopackage)
+    rnr_gdf = gpd.read_file(settings.tmp_geopackage, layer="flowpaths")
+    print(rnr_gdf.head())
+    settings.tmp_geopackage.unlink()
 
 
 def format_xml(product_text: str) -> list[Site]:
@@ -181,7 +167,7 @@ def format_xml(product_text: str) -> list[Site]:
     return sites
 
 
-def get_site_data(site: Site, settings: Settings) -> GaugeData | None:
+def get_site_data(site: Site, settings: Settings) -> SiteData | None:
     """Retrieves gauge data from the NWPS API for a specific site and validates it meets flood criteria.
 
     Parameters
@@ -193,14 +179,14 @@ def get_site_data(site: Site, settings: Settings) -> GaugeData | None:
 
     Returns
     -------
-    GaugeData | None
-        A validated GaugeData object if the site data meets flood criteria requirements,
+    SiteData | None
+        A validated SiteData object if the site data meets flood criteria requirements,
         None if the site's flood category does not meet the required criteria
 
     Raises
     ------
     ValidationError
-        If the API response cannot be parsed into a valid GaugeData object
+        If the API response cannot be parsed into a valid SiteData object
     httpx.HTTPStatusError
         If the API request fails or returns an error status
     """
@@ -208,15 +194,15 @@ def get_site_data(site: Site, settings: Settings) -> GaugeData | None:
     try:
         forecast = get(endpoint).json()
         try:
-            gauge_data = GaugeData(**forecast)
+            site_data = SiteData(**forecast)
         except ValidationError as e:
             msg = f"ValidationError: Pydantic validation error for the endpoint given: {endpoint}"
             print(msg)
             raise e
-        if gauge_data.ForecastFloodCategory in settings.STAGES:
-            return gauge_data
+        if site_data.ForecastFloodCategory in settings.STAGES:
+            return site_data
         else:
-            msg = f"This site does not meet the criteria for a flood: {gauge_data.lid}"
+            msg = f"This site does not meet the criteria for a flood: {site_data.lid}"
             print(msg)
             return None
     except httpx.HTTPStatusError as e:
