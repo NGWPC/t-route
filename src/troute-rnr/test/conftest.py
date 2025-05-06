@@ -87,6 +87,6 @@ def mock_flows() -> pd.DataFrame:
     pd.DataFrame
         The T-Route flows dataframe
     """
-    flows_path = Path.cwd() / "test/mock_data/flows/HPDT2/202505052100.CHRTOUT_DOMAIN1.csv"
+    flows_path = Path.cwd() / "test/mock_data/flows/HPDT2.CHRTOUT_DOMAIN1.csv"
     df = pd.read_csv(flows_path)
     return df
