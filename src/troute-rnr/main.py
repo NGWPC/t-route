@@ -68,7 +68,8 @@ def run(
                 print("Closing tmp files")
                 yaml_file_path.unlink()
                 settings.tmp_geopackage.unlink()
-                shutil.rmtree(tmp_flow_files_path)
+                shutil.rmtree(tmp_flow_files_path / inputs.reach.id)
+                shutil.rmtree(settings.restart_path / inputs.reach.id)
                 reset_logging()
     except KeyError:
         print(f"Sites not found. Status: {sites_response['status']}")

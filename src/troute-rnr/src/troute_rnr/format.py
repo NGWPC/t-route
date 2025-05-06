@@ -8,7 +8,7 @@ import lxml.etree
 import numpy as np
 import pandas as pd
 import yaml
-from icefabric_tools import find_origin, rnr
+from icefabric_tools import find_origin
 
 from troute_rnr import write
 from troute_rnr.schemas.nwps import ProcessedData
@@ -75,15 +75,13 @@ def create_initial_start_file(params: dict[str, str], settings: Settings) -> Pat
     start_datetime = datetime.strptime(params["start_datetime"], "%Y-%m-%d_%H:%M")
     formatted_datetime = start_datetime.strftime("%Y-%m-%d_%H:%M")
 
-    gdf = gpd.read_file(params["geo_file_path"], layer="network")
-    mask = gdf["divide_id"].isna()
-    keys = [int(val.split("-")[1]) for val in set(gdf[~mask]["divide_id"].values.tolist())]
+    gdf = gpd.read_file(params["geo_file_path"], layer="flowpaths")
+    mask = gdf["id"].isna()
+    keys = [int(val.split("-")[1]) for val in set(gdf[~mask]["id"].values.tolist())]
 
-    discharge_upstream = np.zeros([len(keys)])
-    discharge_downstream = np.zeros([len(keys)])
+    discharge_upstream = np.full([len(keys)], fill_value=params["initial_start"])
+    discharge_downstream = np.full([len(keys)], fill_value=params["initial_start"])
     height = np.zeros([len(keys)])
-    idx = keys.index(int(params["hy_id"]))
-    discharge_upstream[idx] = float(params["initial_start"])
 
     time_array = np.array([pd.to_datetime(formatted_datetime, format="%Y-%m-%d_%H:%M")] * len(keys))
 
@@ -97,9 +95,12 @@ def create_initial_start_file(params: dict[str, str], settings: Settings) -> Pat
         }
     )
     df.set_index("key", inplace=True)
-    restart_full_path = settings.restart_path / f"{params['lid']}_{formatted_datetime}.pkl"
-    df.to_pickle(restart_full_path)
-    return restart_full_path
+    df = df.sort_values("key")
+    restart_full_path = settings.restart_path / f"{params['lid']}/"
+    restart_full_path.mkdir(exist_ok=True)
+    restart_file = restart_full_path / f"{formatted_datetime}.pkl"
+    df.to_pickle(restart_file)
+    return restart_file
 
 
 def format_config(inputs: ProcessedData, settings: Settings) -> tuple[Path, Path]:
@@ -119,7 +120,6 @@ def format_config(inputs: ProcessedData, settings: Settings) -> tuple[Path, Path
         The path to the YAML config file and flow files directory
     """
     reach = inputs.reach
-    rnr.get_rnr_segment(settings.catalog, reach.id, settings.tmp_geopackage)
     network = settings.catalog.load_table("hydrofabric.network")
     hy_id = (
         find_origin(network_table=network, identifier=reach.id, id_type="comid")["id"].values[0].split("-")[1]

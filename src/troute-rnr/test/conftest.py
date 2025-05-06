@@ -18,11 +18,28 @@ def mock_rfc_inputs() -> nwps.ProcessedData:
     nwps.ProcessedData
         A pydantic object containing input data
     """
-    json_path = Path("mock_data/HPDT2.json")
+    json_path = Path.cwd() / "test/mock_data/HPDT2.json"
     with open(json_path) as f:
         data_dict = json.load(f)
 
-    return nwps.ProcessedData.model_validate(data_dict)
+    processed_data = nwps.ProcessedData.model_validate(data_dict)
+    processed_data.reach.latest_observation = None
+    print(processed_data.reach.latest_observation)
+    return processed_data
+
+
+@pytest.fixture
+def mock_restart_file() -> pd.DataFrame:
+    """A mock restart file to test against
+
+    Return
+    ------
+    pd.Dataframe
+        A restart dataframe
+    """
+    restart_path = Path.cwd() / "test/mock_data/HPDT2_2025-05-05_21:00.pkl"
+    df = pd.read_pickle(restart_path)
+    return df
 
 
 @pytest.fixture
@@ -35,11 +52,11 @@ def mock_settings() -> Settings:
         The settings object
     """
     settings = Settings()
-    settings.tmp_config = Path("mock_data/tmp_config.yaml")
-    settings.tmp_geopackage = Path("mock_data/HPDT2.yaml")
-    settings.tmp_flow_files_path = Path("mock_data/tmp_flows")
+    settings.tmp_config = Path.cwd() / "test/mock_data/tmp_config.yaml"
+    settings.tmp_geopackage = Path.cwd() / "test/mock_data/HPDT2.gpkg"
+    settings.tmp_flow_files_path = Path.cwd() / "test/mock_data/tmp_flows"
     settings.tmp_flow_files_path.mkdir(exist_ok=True)
-    settings.restart_path = Path("mock_data/tmp_restart_flow/")
+    settings.restart_path = Path.cwd() / "test/mock_data/tmp_restart_flow/"
     settings.restart_path.mkdir(exist_ok=True)
     return settings
 
@@ -55,7 +72,7 @@ def mock_config() -> dict[str, Any]:
     dict[str, Any]
         The correct config for this forecast
     """
-    config_path = Path("mock_data/HPDT2_config.yaml")
+    config_path = Path.cwd() / "test/mock_data/HPDT2_config.yaml"
     with open(config_path) as f:
         config_data = yaml.safe_load(f)
     return config_data
@@ -70,6 +87,6 @@ def mock_flows() -> pd.DataFrame:
     pd.DataFrame
         The T-Route flows dataframe
     """
-    flows_path = Path("mock_data/flows/HPDT2/202505052100.CHRTOUT_DOMAIN1.csv")
-    df = pd.read_csv(flows_path, index_col=0)
+    flows_path = Path.cwd() / "test/mock_data/flows/HPDT2/202505052100.CHRTOUT_DOMAIN1.csv"
+    df = pd.read_csv(flows_path)
     return df
