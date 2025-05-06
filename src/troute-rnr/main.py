@@ -1,9 +1,11 @@
 import json
+import logging
 import shutil
 import socket
 
 import httpx
 import pika
+from icefabric_tools import rnr
 from nwm_routing.__main__ import main_v04 as t_route
 from pydantic import ValidationError
 from troute_rnr import format, read
@@ -11,6 +13,14 @@ from troute_rnr.settings import Settings
 from troute_rnr.utils import get
 
 settings = Settings()
+
+
+def reset_logging():
+    """T-Route sets the logging level to INFO. This resets to WARNING"""
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpcore.connection").setLevel(logging.WARNING)
+    logging.getLogger("httpcore.http11").setLevel(logging.WARNING)
 
 
 def run(
@@ -51,6 +61,7 @@ def run(
                 continue
             inputs = read.read_rfc_flows(site_data, settings)
             if inputs is not None:
+                rnr.get_rnr_segment(settings.catalog, inputs.reach.id, settings.tmp_geopackage)
                 yaml_file_path, tmp_flow_files_path = format.format_config(inputs, settings)
                 print("Configs are built. Running T-Route")
                 t_route(["-f", str(yaml_file_path)])
@@ -58,6 +69,7 @@ def run(
                 yaml_file_path.unlink()
                 settings.tmp_geopackage.unlink()
                 shutil.rmtree(tmp_flow_files_path)
+                reset_logging()
     except KeyError:
         print(f"Sites not found. Status: {sites_response['status']}")
         pass
