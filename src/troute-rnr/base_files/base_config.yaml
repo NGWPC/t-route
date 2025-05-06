@@ -3,13 +3,12 @@
 log_parameters:
     #----------
     showtiming: True
-    log_level : DEBUG
+    log_level : INFO
 #--------------------------------------------------------------------------------
 network_topology_parameters:
     #----------
     supernetwork_parameters:
         #----------
-        network_type: HYFeaturesNetwork
         geo_file_path: ???
         columns:
             key: 'id'
@@ -52,25 +51,21 @@ compute_parameters:
         run_refactored_network: False
         refactored_domain: #domain/refactored_coastal_domain_subset.yaml
         refactored_topobathy_domain: #domain/refac_final_diffusive_natural_xs.nc
-        coastal_boundary_domain: #domain/coastal_boundary_domain.yaml
     forcing_parameters:
         #----------
         qts_subdivisions            : 12
         dt                          : 300 # [sec]
-        qlat_input_folder           : /data/rfc_channel_forcings
+        qlat_input_folder           : channel_forcing
         qlat_file_pattern_filter    : "*.CHRTOUT_DOMAIN1.csv"
         coastal_boundary_input_file : #boundary_forcing
-        nts                         : 1440 # 288 for 1day; 2592 for 9 days;
-        max_loop_size               : 24   # [hr]
+        nts                         : 288 # 288 for 1day; 2592 for 9 days
+        max_loop_size               : 48   # [hr]
     data_assimilation_parameters:
         #----------
-        # usgs_timeslices_folder   : usgs_timeslices/
-        # usace_timeslices_folder  : usace_timelices/
         streamflow_da:
             #----------
             streamflow_nudging            : False
             diffusive_streamflow_nudging  : False
-            lastobs_file                  : #lastobs/nudgingLastObs.2023-04-02_00:00:00.nc
         reservoir_da:
             #----------
             reservoir_persistence_da:
@@ -79,20 +74,11 @@ compute_parameters:
                 reservoir_persistence_usace : False
             reservoir_rfc_da:
                 #----------
-                reservoir_rfc_forecasts                 : False
-                reservoir_rfc_forecasts_time_series_path: rfc_timeseries/
-                reservoir_rfc_forecasts_lookback_hours  : 28
-                reservoir_rfc_forecasts_offset_hours    : 28
+                reservoir_rfc_forecasts : False
 #--------------------------------------------------------------------------------
 output_parameters:
-    #----------
-#     test_output : output/lcr_flowveldepth.pkl
-#     lite_restart:
-#         #----------
-#         lite_restart_output_directory: restart/
-#     lakeout_output: lakeout/
     stream_output :
         stream_output_directory: ???
-        stream_output_time: 1 #[hr]
+        stream_output_time: -1 #[hr]
         stream_output_type: '.nc' #please select only between netcdf '.nc' or '.csv' or '.pkl'
         stream_output_internal_frequency: 60 #[min] it should be order of 5 minutes. For instance if you want to output every hour put 60
