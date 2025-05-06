@@ -9,3 +9,5 @@ This repo depends on access to the Raytheon Icefabric package. To install, from 
 ```sh
 uv pip install git+https://github.com/NGWPC/icefabric.git#subdirectory=src/icefabric_tools
 ```
+
+if this command does not work, you will need to clone the Icefabric repo, then install from the `icefabric/src/icefabric_tools/` dirs
