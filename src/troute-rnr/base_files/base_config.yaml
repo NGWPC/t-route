@@ -78,6 +78,12 @@ compute_parameters:
                 reservoir_rfc_forecasts                 : False
 #--------------------------------------------------------------------------------
 output_parameters:
+#     #----------
+#     test_output : output/lcr_flowveldepth.pkl
+#     lite_restart:
+#         #----------
+#         lite_restart_output_directory: restart/
+#     lakeout_output: lakeout/
     stream_output :
         stream_output_directory: ???
         stream_output_time: -1 #[hr]
