@@ -2,7 +2,6 @@ import configparser
 import os
 from pathlib import Path
 
-import boto3
 from icefabric_manage import build
 from pyiceberg.catalog import load_catalog
 
@@ -31,7 +30,6 @@ class Settings:
         self.STAGES = set(self.config["STAGES"]["stages"].split(","))
 
         self.BASE_URL = self.config["DEFAULT"]["BASE_URL"]
-        self.S3_DOMAIN_URL = self.config["DEFAULT"]["S3_DOMAIN_URL"]
         self.rate_limit = self.config.getint("DEFAULT", "rate_limit")
         self.reach_limit = self.config.getint("DEFAULT", "reach_limit")
 
@@ -84,11 +82,3 @@ class Settings:
 
         if os.getenv("REDIS_URL"):
             self.redis_url = os.getenv("REDIS_URL")
-
-        session = boto3.Session()
-        credentials = session.get_credentials()
-
-        os.environ["AWS_ACCESS_KEY_ID"] = credentials.access_key
-        os.environ["AWS_SECRET_ACCESS_KEY"] = credentials.secret_key
-        if credentials.token:  # If you're using temporary credentials
-            os.environ["AWS_SESSION_TOKEN"] = credentials.token
