@@ -38,9 +38,6 @@ class Settings:
         self.rabbitmq_host = self.config["RABBITMQ"]["host"]
         self.rabbitmq_port = self.config.getint("RABBITMQ", "port")
 
-        self.redis_url = self.config["REDIS"]["url"]
-        self.redis_port = self.config.getint("REDIS", "port")
-
         self.flooded_data_queue = self.config["QUEUES"]["flooded_data"]
         self.error_queue = self.config["QUEUES"]["error"]
 
@@ -71,14 +68,11 @@ class Settings:
         if os.getenv("RABBITMQ_HOST"):
             self.rabbitmq_host = os.getenv("RABBITMQ_HOST")
         if os.getenv("RABBITMQ_USERNAME"):
-            self.rabbitmq_username = os.getenv("RABBITMQ_HOST")
+            self.rabbitmq_username = os.getenv("RABBITMQ_USERNAME")
         if os.getenv("RABBITMQ_PASSWORD"):
             self.rabbitmq_password = os.getenv("RABBITMQ_PASSWORD")
 
         self.pika_url = f"amqp://{self.rabbitmq_username}:{self.rabbitmq_password}@{self.rabbitmq_host}:{self.rabbitmq_port}/"
-
+        print(self.pika_url)
         if os.getenv("PIKA_URL"):
             self.pika_url = os.getenv("PIKA_URL")
-
-        if os.getenv("REDIS_URL"):
-            self.redis_url = os.getenv("REDIS_URL")
