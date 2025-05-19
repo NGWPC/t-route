@@ -73,6 +73,6 @@ class Settings:
             self.rabbitmq_password = os.getenv("RABBITMQ_PASSWORD")
 
         self.pika_url = f"amqp://{self.rabbitmq_username}:{self.rabbitmq_password}@{self.rabbitmq_host}:{self.rabbitmq_port}/"
-        print(self.pika_url)
+        
         if os.getenv("PIKA_URL"):
             self.pika_url = os.getenv("PIKA_URL")
