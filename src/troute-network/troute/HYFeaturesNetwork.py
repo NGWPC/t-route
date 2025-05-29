@@ -570,8 +570,10 @@ class HYFeaturesNetwork(AbstractNetwork):
             gages_df['id'] = gages_df['id'].str.split('-',expand=True).loc[:,1].astype(float).astype(int)
             # split the hl_uri column into type and value
             gages_df[['type','value']] = gages_df.hl_uri.str.split('-',expand=True,n=1)
-            # filter for 'Gages' only
-            gages_df = gages_df[gages_df['type'].isin(['Gages','NID'])]
+            # normalize type to lowercase for consistent filtering
+            gages_df['type'] = gages_df['type'].str.lower()
+            # filter for 'gages' only
+            gages_df = gages_df[gages_df['type'].isin(['gages','nid'])]
             # Some IDs have multiple gages associated with them. This will expand the dataframe so
             # there is a unique row per gage ID. Also adds lake ids to the dataframe for creating 
             # lake-gage crosswalk dataframes.
