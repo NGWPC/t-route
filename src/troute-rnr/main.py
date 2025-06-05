@@ -100,7 +100,8 @@ def run(
     # Acknowledging message since all HML files are read
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
-    hml_message_counter.increment()
+    if hml_message_counter.max_messages is not None:
+        hml_message_counter.increment()
 
 
 def consume(settings: Settings, hml_message_counter: MessageCounter | None = None) -> None:
