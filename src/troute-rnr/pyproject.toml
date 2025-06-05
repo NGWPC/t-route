@@ -1,6 +1,6 @@
 [project]
 description = "T-Route replace and route capabilities for water.noaa.gov"
-version = "0.2.0"
+version = "2025.6.0"
 readme = "README.md"
 requires-python = ">=3.9"
 name = "troute_rnr"
