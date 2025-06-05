@@ -92,13 +92,15 @@ def run(
                 shutil.rmtree(tmp_flow_files_path)
                 shutil.rmtree(settings.restart_path / inputs.lid)
                 reset_logging()
-            hml_message_counter.increment()
+
     except KeyError:
         print(f"Sites not found. Status: {sites_response['status']}")
         pass
 
     # Acknowledging message since all HML files are read
     ch.basic_ack(delivery_tag=method.delivery_tag)
+
+    hml_message_counter.increment()
 
 
 def consume(settings: Settings, hml_message_counter: MessageCounter | None = None) -> None:
