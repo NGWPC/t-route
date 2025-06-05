@@ -1,3 +1,4 @@
+import argparse
 import json
 import logging
 import shutil
@@ -23,11 +24,30 @@ def reset_logging():
     logging.getLogger("httpcore.http11").setLevel(logging.WARNING)
 
 
+class MessageCounter:
+    """Helper class to track processed messages"""
+
+    def __init__(self, max_messages: int | None):
+        self.count = 0
+        self.max_messages = max_messages
+        self.channel = None
+
+    def increment(self):
+        """A counter method"""
+        self.count += 1
+        print(f"Processed message {self.count}/{self.max_messages}")
+        if self.count >= self.max_messages:
+            print(f"Reached maximum messages ({self.max_messages}). Stopping consumer...")
+            if self.channel:
+                self.channel.stop_consuming()
+
+
 def run(
     ch: pika.channel.Channel,
     method: pika.spec.Basic.Deliver,
     properties: pika.spec.BasicProperties,
     body: bytes,
+    hml_message_counter: MessageCounter | None,
 ) -> None:
     """The main function for the T-Route replace and route module
 
@@ -41,7 +61,8 @@ def run(
         Pika properties
     body: bytes
         The message content body
-
+    hml_message_counter: MessageCounter | None
+        the number of forecasts to run for
     """
     hml = json.loads(body.decode())
     print(f"Reading forecast for {hml['rdf']}, issued at {hml['issuance_time']}")
@@ -71,6 +92,7 @@ def run(
                 shutil.rmtree(tmp_flow_files_path)
                 shutil.rmtree(settings.restart_path / inputs.lid)
                 reset_logging()
+
     except KeyError:
         print(f"Sites not found. Status: {sites_response['status']}")
         pass
@@ -78,8 +100,10 @@ def run(
     # Acknowledging message since all HML files are read
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
+    hml_message_counter.increment()
 
-def consume(settings: Settings) -> None:
+
+def consume(settings: Settings, hml_message_counter: MessageCounter | None = None) -> None:
     """
     The message consumer interfacing with RabbitMQ
 
@@ -87,6 +111,8 @@ def consume(settings: Settings) -> None:
     ----------
     settings : Settings
         Configuration object containing RabbitMQ connection parameters and flooding information
+    hml_message_counter: MessageCounter | None
+        The number of forecasts to process (usually a debug setting or for demonstrations)
 
     Raises
     ------
@@ -104,14 +130,38 @@ def consume(settings: Settings) -> None:
         connection = pika.BlockingConnection(connection_params)
         channel = connection.channel()
         channel.queue_declare(queue=settings.flooded_data_queue, durable=True)
-        print(f" [*] Waiting for messages from Queue on URL: {settings.pika_url}")
+        print(f" [*] Waiting for messages from Queue on URL: {settings.pika_url}.")
+        print(" [*] Be sure HML files are populated in the Message Queue")
         channel.basic_qos(prefetch_count=1)
-        channel.basic_consume(queue=settings.flooded_data_queue, on_message_callback=run)
-        channel.start_consuming()
+        hml_message_counter.channel = channel
+
+        channel.basic_consume(
+            queue=settings.flooded_data_queue,
+            on_message_callback=lambda ch, method, properties, body: run(
+                ch, method, properties, body, hml_message_counter
+            ),
+        )
+        try:
+            channel.start_consuming()
+        except KeyboardInterrupt:
+            print("\n [*] Stopping consumer due to keyboard interrupt...")
+            channel.stop_consuming()
+        print(f" [*] Processed {hml_message_counter.max_messages} forecasts. Closing connection.")
+        connection.close()
     except (pika.exceptions.AMQPConnectionError, socket.timeout) as e:
         print(f" [!] Failed to connect to RabbitMQ: {e}")
         print(" [!] Service is not running - check RabbitMQ connection from Hydrovis")
 
 
 if __name__ == "__main__":
-    consume(Settings())
+    parser = argparse.ArgumentParser(description="T-route RnR function")
+    parser.add_argument(
+        "--num-hml-files", type=int, help="The number of hml files to be read from the message queue"
+    )
+    args = parser.parse_args()
+    if args.num_hml_files is None:
+        print(" [*] Running T-Route for all messages in the queue")
+    else:
+        print(f" [*] Running T-Route for {args.num_hml_files} forecasts")
+    hml_message_counter = MessageCounter(args.num_hml_files)
+    consume(Settings(), hml_message_counter=hml_message_counter)
