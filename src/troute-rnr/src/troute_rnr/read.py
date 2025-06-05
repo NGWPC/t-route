@@ -59,7 +59,11 @@ def read_site_data(site: Site, settings: Settings) -> SiteData | None:
     """
     endpoint = f"{settings.BASE_URL}/gauges/{site.properties['id']}"
     try:
-        forecast = get(endpoint).json()
+        response = get(endpoint)
+        forecast = response.json()
+        if response.status_code == 404:
+            print(f"Gauge not found in NWPS API: {forecast['message']}")
+            return None
         try:
             site_data = SiteData(**forecast)
         except ValidationError as e:
@@ -69,11 +73,11 @@ def read_site_data(site: Site, settings: Settings) -> SiteData | None:
         if site_data.ForecastFloodCategory in settings.STAGES:
             return site_data
         else:
-            msg = f"This site does not meet the criteria for a flood: {site_data.lid}"
+            msg = f"{site_data.lid} is not reporting flooding for this forecast. Ignoring routing for RnR"
             print(msg)
             return None
     except httpx.HTTPStatusError as e:
-        msg = f"HTTPStatusError: There was no forecast/record within NWPS for the site given: {endpoint}"
+        msg = f"HTTPStatusError: There was no forecast/record at the NWPS API  @ {endpoint}"
         print(msg)
         raise httpx.HTTPStatusError(msg) from e
 
@@ -109,7 +113,7 @@ def read_rfc_flows(forecast: SiteData, settings: Settings) -> ProcessedData | No
             latest_observation_flow, latest_observation_units
         )
     except KeyError:
-        print("No Observations found. Setting obs fields to None")
+        # Skiping Obs read. None found
         latest_obs_units = None
         latest_observation_m3 = None
 
@@ -124,19 +128,37 @@ def read_rfc_flows(forecast: SiteData, settings: Settings) -> ProcessedData | No
         secondary_forecast, forecast_data["secondaryUnits"]
     )
 
-    return ProcessedData(
-        lid=forecast.lid,
-        downstream_lid=forecast.downstreamLid,
-        reach=Reach(
-            id=forecast.reachId,
-            times=times,
-            primary_name=forecast_data["primaryName"],
-            primary_forecast=primary_forecast,
-            primary_unit=forecast_data["primaryUnits"],
-            latest_observation=latest_observation_m3,
-            latest_obs_units=latest_obs_units,
-            secondary_name=forecast_data["secondaryName"],
-            secondary_forecast=secondary_m3_forecast,
-            secondary_unit=secondary_units,
-        ),
-    )
+    try:
+        processed_data = ProcessedData(
+            lid=forecast.lid,
+            downstream_lid=forecast.downstreamLid,
+            reach=Reach(
+                id=forecast.reachId,
+                times=times,
+                primary_name=forecast_data["primaryName"],
+                primary_forecast=primary_forecast,
+                primary_unit=forecast_data["primaryUnits"],
+                latest_observation=latest_observation_m3,
+                latest_obs_units=latest_obs_units,
+                secondary_name=forecast_data["secondaryName"],
+                secondary_forecast=secondary_m3_forecast,
+                secondary_unit=secondary_units,
+            ),
+        )
+    except ValidationError as e:
+        if forecast_data["wfo"] in settings.unsupported_wfo:
+            print(
+                f"{forecast.lid} is located in an unsupported RFC Domain {forecast_data['wfo']}. Skipping RnR run"
+            )
+            return None
+        elif forecast.reachId == "":
+            print(
+                f"No reach ID found for: {forecast.lid}. Skipping RnR run since we do not have the location of the flowline."
+            )
+            return None
+        else:
+            print(f"Validation Error for {forecast.lid}. Please check logs for error. Skipping RnR run")
+            print(e)
+            return None
+
+    return processed_data
