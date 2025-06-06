@@ -102,6 +102,7 @@ def run(
 
     # Acknowledging message since all HML files are read
     ch.basic_ack(delivery_tag=method.delivery_tag)
+
     if hml_message_counter.max_messages is not None:
         hml_message_counter.increment()
 
