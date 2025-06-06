@@ -1,10 +1,45 @@
 """A function to format t-route outputs into the correct format for water.noaa.gov"""
 
+import re
 from datetime import datetime
 
 import xarray as xr
 from icefabric_tools import table_to_geopandas
 from troute_rnr.settings import Settings
+
+
+def extract_timestamp_from_filename(filename: str) -> datetime | None:
+    """Extract timestamp from filename like 'troute_output_202505061230.nc'
+
+    Parameters
+    ----------
+    filename : str
+        The filename to extract timestamp from (format: troute_output_YYYYMMDDHHMM.nc)
+
+    Returns
+    -------
+    datetime | None
+        The extracted datetime, or None if parsing fails
+    """
+    # Pattern to match troute_output_*.nc and extract the timestamp
+    pattern = r"troute_output_(\d{12})\.nc"
+
+    match = re.search(pattern, filename)
+    if not match:
+        return None
+    timestamp_str = match.group(1)
+
+    try:
+        # Parse YYYYMMDDHHMM format
+        year = int(timestamp_str[:4])
+        month = int(timestamp_str[4:6])
+        day = int(timestamp_str[6:8])
+        hour = int(timestamp_str[8:10])
+        minute = int(timestamp_str[10:12])
+        return datetime(year, month, day, hour, minute)
+    except (ValueError, IndexError) as e:
+        print(f"Error parsing timestamp from {filename}: {e}")
+        return None
 
 
 def post_process(settings: Settings) -> None:
@@ -16,10 +51,15 @@ def post_process(settings: Settings) -> None:
         The global RnR settings
     """
     files = []
-    print("Opening all datasets...")
-    for file in settings.output_files_path.glob("*"):
-        for ds in file.glob("*"):
-            files.append(xr.open_dataset(ds, engine="netcdf4"))
+    current_time = datetime.now()
+    print("Opening all forecasts for times after the current timestep")
+    for folder in settings.output_files_path.glob("*"):
+        if folder.is_dir():
+            for nc_file in folder.glob("*.nc"):
+                file_timestamp = extract_timestamp_from_filename(nc_file.name)
+                if file_timestamp > current_time:
+                    _ds = xr.open_dataset(nc_file, engine="netcdf4")
+                    files.append(_ds)
     ds = xr.concat(files, dim="feature_id")
 
     # Find max flows and their time indices
