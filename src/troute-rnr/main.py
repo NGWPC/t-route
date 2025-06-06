@@ -82,11 +82,14 @@ def run(
                 continue
             inputs = read.read_rfc_flows(site_data, settings)
             if inputs is not None:
-                rnr.get_rnr_segment(settings.catalog, inputs.reach.id, settings.tmp_geopackage)
+                rnr.get_rnr_segment(
+                    settings.catalog, inputs.reach.id, settings.tmp_geopackage
+                )  # Writes the rnr geopackage to disk
                 yaml_file_path, tmp_flow_files_path = format.format_config(inputs, settings)
                 print("Configs are built. Running T-Route")
                 t_route(["-f", str(yaml_file_path)])
                 print("Closing tmp files")
+                format.format_output_nc(site_data, inputs, yaml_file_path)
                 yaml_file_path.unlink()
                 settings.tmp_geopackage.unlink()
                 shutil.rmtree(tmp_flow_files_path)
@@ -99,8 +102,8 @@ def run(
 
     # Acknowledging message since all HML files are read
     ch.basic_ack(delivery_tag=method.delivery_tag)
-
-    hml_message_counter.increment()
+    if hml_message_counter.max_messages is not None:
+        hml_message_counter.increment()
 
 
 def consume(settings: Settings, hml_message_counter: MessageCounter | None = None) -> None:

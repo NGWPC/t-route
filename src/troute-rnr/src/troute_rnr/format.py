@@ -7,11 +7,12 @@ import geopandas as gpd
 import lxml.etree
 import numpy as np
 import pandas as pd
+import xarray as xr
 import yaml
 from icefabric_tools import find_origin
 
 from troute_rnr import write
-from troute_rnr.schemas.nwps import ProcessedData
+from troute_rnr.schemas.nwps import ProcessedData, SiteData
 from troute_rnr.schemas.weather import Site
 from troute_rnr.settings import Settings
 
@@ -185,3 +186,51 @@ def format_xml(product_text: str) -> list[Site]:
             site = Site.from_xml(xml_segment)
         sites.append(site)
     return sites
+
+
+def format_output_nc(site_data: SiteData, inputs: ProcessedData, yaml_file_path: Path) -> None:
+    """Formats the output .nc file to contain flood/RFC metadata
+
+    Parameters
+    ----------
+    site_data: SiteData
+        The data about the NWPS site
+    inputs: ProcessedData
+        Information about the Flooded Location
+    yaml_file_path: Path
+        The T-Route YAML file
+    """
+    with open(yaml_file_path) as file:
+        data = yaml.safe_load(file)
+
+    start_datetime_str = data["compute_parameters"]["restart_parameters"]["start_datetime"]
+    file_name_time = datetime.strptime(start_datetime_str, "%Y-%m-%d_%H:%M")
+    output_file_name = (
+        "troute_output_" + file_name_time.strftime("%Y%m%d%H%M") + ".nc"
+    )  # required to have .nc
+    stream_output_directory = Path(data["output_parameters"]["stream_output"]["stream_output_directory"])
+    full_output_path = stream_output_directory / output_file_name
+    _ds = xr.open_dataset(full_output_path, engine="netcdf4")
+    ds = _ds.load()  # Loading the contents to RAM since we cannot overwrite an open file
+    _ds.close()
+    gdf = gpd.read_file(
+        data["network_topology_parameters"]["supernetwork_parameters"]["geo_file_path"], layer="flowpaths"
+    )
+    df = gpd.read_file(
+        data["network_topology_parameters"]["supernetwork_parameters"]["geo_file_path"], layer="network"
+    )
+
+    # Add metadata to .nc file
+    ds.attrs["max_status"] = site_data.ForecastFloodCategory
+    ds.attrs["stream_order"] = int(
+        gdf["order"].iloc[0]
+    )  # Using the first value since the full RnR segment is the same stream order
+    ds.attrs["rfc_location"] = inputs.lid
+    ds.attrs["rfc_reach_id"] = inputs.reach.id
+    ds.attrs["hf_id"] = df[df["hf_id"] == inputs.reach.id]["id"].iloc[
+        0
+    ]  # Getting the catchment where the RFC is
+    ds.attrs["state"] = site_data.state.abbreviation
+    ds.attrs["name"] = site_data.name
+
+    ds.to_netcdf(full_output_path)

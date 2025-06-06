@@ -10,4 +10,4 @@ This repo depends on access to the Raytheon Icefabric package. To install, from 
 uv pip install git+https://github.com/NGWPC/icefabric.git#subdirectory=src/icefabric_tools
 ```
 
-if this command does not work, you will need to clone the Icefabric repo, then install from the `icefabric/src/icefabric_tools/` dirs
+if this command does not work, you will need to access the pip wheels, which can be located in the following location: https://github.com/NGWPC/hydrovis/tree/pi_6/Source/RnR/dist

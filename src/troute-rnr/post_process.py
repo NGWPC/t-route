@@ -1,7 +1,7 @@
 """A function to format t-route outputs into the correct format for water.noaa.gov"""
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import xarray as xr
 from icefabric_tools import table_to_geopandas
@@ -52,14 +52,21 @@ def post_process(settings: Settings) -> None:
     """
     files = []
     current_time = datetime.now()
+    twenty_four_hours_ago = current_time - timedelta(hours=24)
     print("Opening all forecasts for times after the current timestep")
     for folder in settings.output_files_path.glob("*"):
         if folder.is_dir():
             for nc_file in folder.glob("*.nc"):
                 file_timestamp = extract_timestamp_from_filename(nc_file.name)
-                if file_timestamp > current_time:
+                # Filter files created within the last 24 hours
+                if file_timestamp and twenty_four_hours_ago <= file_timestamp <= current_time:
                     _ds = xr.open_dataset(nc_file, engine="netcdf4")
                     files.append(_ds)
+
+    if not files:
+        print("No files found within the last 24 hours")
+        return
+
     ds = xr.concat(files, dim="feature_id")
 
     # Find max flows and their time indices
