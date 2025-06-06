@@ -87,9 +87,12 @@ def run(
                 )  # Writes the rnr geopackage to disk
                 yaml_file_path, tmp_flow_files_path = format.format_config(inputs, settings)
                 print("Configs are built. Running T-Route")
-                t_route(["-f", str(yaml_file_path)])
+                try:
+                    t_route(["-f", str(yaml_file_path)])
+                    format.format_output_nc(site_data, inputs, yaml_file_path)
+                except IndexError:
+                    print(f"T-Route inflow formatting error for {inputs.lid}. Skipping Routing")
                 print("Closing tmp files")
-                format.format_output_nc(site_data, inputs, yaml_file_path)
                 yaml_file_path.unlink()
                 settings.tmp_geopackage.unlink()
                 shutil.rmtree(tmp_flow_files_path)
