@@ -18,6 +18,9 @@ import troute.nhd_io as nhd_io #FIXME
 from troute.nhd_network import reverse_dict, extract_connections, reverse_network, reachable
 from .rfc_lake_gage_crosswalk import get_rfc_lake_gage_crosswalk, get_great_lakes_climatology
 
+import logging
+LOG = logging.getLogger('')
+
 __verbose__ = False
 __showtiming__ = False
 
@@ -249,7 +252,7 @@ class HYFeaturesNetwork(AbstractNetwork):
         self.showtiming = showtiming
 
         if self.verbose:
-            print("creating supernetwork connections set")
+            LOG.info("creating supernetwork connections set")
         if self.showtiming:
             start_time = time.time()
         
@@ -297,9 +300,9 @@ class HYFeaturesNetwork(AbstractNetwork):
                     quit()
 
         if self.verbose:
-            print("supernetwork connections set complete")
+            LOG.info("supernetwork connections set complete")
         if self.showtiming:
-            print("... in %s seconds." % (time.time() - start_time))
+            LOG.info("... in %s seconds." % (time.time() - start_time))
             
 
         super().__init__(from_files, value_dict)   
