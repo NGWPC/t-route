@@ -82,10 +82,17 @@ def run(
                 continue
             inputs = read.read_rfc_flows(site_data, settings)
             if inputs is not None:
-                rnr.get_rnr_segment(
-                    settings.catalog, inputs.reach.id, settings.tmp_geopackage
-                )  # Writes the rnr geopackage to disk
-                yaml_file_path, tmp_flow_files_path = format.format_config(inputs, settings)
+                try:
+                    rnr.get_rnr_segment(
+                        settings.catalog, inputs.reach.id, settings.tmp_geopackage
+                    )  # Writes the rnr geopackage to disk
+                    yaml_file_path, tmp_flow_files_path = format.format_config(inputs, settings)
+                except IndexError:
+                    print(
+                        "Cannot find river segments downstream of the RFC point. RnR not available; skipping"
+                    )
+                    continue
+
                 print("Configs are built. Running T-Route")
                 try:
                     t_route(["-f", str(yaml_file_path)])
@@ -102,12 +109,12 @@ def run(
     except KeyError:
         print(f"Sites not found. Status: {sites_response['status']}")
         pass
+    finally:
+        # Acknowledging message since all HML files are read
+        ch.basic_ack(delivery_tag=method.delivery_tag)
 
-    # Acknowledging message since all HML files are read
-    ch.basic_ack(delivery_tag=method.delivery_tag)
-
-    if hml_message_counter.max_messages is not None:
-        hml_message_counter.increment()
+        if hml_message_counter.max_messages is not None:
+            hml_message_counter.increment()
 
 
 def consume(settings: Settings, hml_message_counter: MessageCounter | None = None) -> None:
