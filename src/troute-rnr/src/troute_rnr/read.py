@@ -103,6 +103,7 @@ def read_rfc_flows(forecast: SiteData, settings: Settings) -> ProcessedData | No
     forecast_data = get(forecast_endpoint).json()
     obs_data = get(obs_endpoint).json()
     if forecast_data["data"][0]["secondary"] == -999:
+        print(f"Streamflow forecast does not exist. Skipping Forecast for {forecast.lid}")
         return None
 
     try:
@@ -116,12 +117,17 @@ def read_rfc_flows(forecast: SiteData, settings: Settings) -> ProcessedData | No
         # Skiping Obs read. None found
         latest_obs_units = None
         latest_observation_m3 = None
+    except ValueError:
+        print(f"Streamflow forecast returning stage values. Skipping Forecast for {forecast.lid}")
+        # Can't route the flows since the units are in ft and not kcfs. Passing
+        return None
 
     times = [datetime.fromisoformat(entry["validTime"].rstrip("Z")) for entry in forecast_data["data"]]
     primary_forecast = [entry["primary"] for entry in forecast_data["data"]]
     secondary_forecast = [entry["secondary"] for entry in forecast_data["data"]]
 
     if len(secondary_forecast) == 0:
+        print(f"No streamflow forecast found. Skipping Forecast for {forecast.lid}")
         return None
 
     secondary_m3_forecast, secondary_units = convert_to_m3_per_sec(
