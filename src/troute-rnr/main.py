@@ -80,7 +80,11 @@ def run(
             except httpx.HTTPStatusError:
                 #  HTTPStatusError: There was no forecast/record within NWPS for the site given
                 continue
-            inputs = read.read_rfc_flows(site_data, settings)
+            try:
+                inputs = read.read_rfc_flows(site_data, settings)
+            except ValueError:
+                print(f"Site input data is not supported")
+                continue
             if inputs is not None:
                 try:
                     rnr.get_rnr_segment(
