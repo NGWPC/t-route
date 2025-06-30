@@ -11,6 +11,9 @@ import pyarrow.parquet as pq
 
 from troute.nhd_network import reverse_dict, extract_waterbody_connections, gage_mapping, extract_connections, replace_waterbodies_connections
 
+import logging
+LOG = logging.getLogger('')
+
 __showtiming__ = True #FIXME pass flag
 __verbose__ = True #FIXME pass verbosity
 
@@ -47,7 +50,7 @@ class NHDNetwork(AbstractNetwork):
         self.showtiming = showtiming
 
         if self.verbose:
-            print("creating supernetwork connections set")
+            LOG.info("creating supernetwork connections set")
         if self.showtiming:
             start_time = time.time()
         
@@ -58,9 +61,9 @@ class NHDNetwork(AbstractNetwork):
         self.read_geo_file()
 
         if self.verbose:
-            print("supernetwork connections set complete")
+            LOG.info("supernetwork connections set complete")
         if self.showtiming:
-            print("... in %s seconds." % (time.time() - start_time))
+            LOG.info("... in %s seconds." % (time.time() - start_time))
 
         self._flowpath_dict = {}
 
