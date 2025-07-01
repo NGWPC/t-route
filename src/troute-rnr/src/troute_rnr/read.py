@@ -113,7 +113,7 @@ def read_rfc_flows(forecast: SiteData, settings: Settings) -> ProcessedData | No
         latest_observation_m3, latest_obs_units = convert_to_m3_per_sec(
             latest_observation_flow, latest_observation_units
         )
-    except (KeyError, ValueError):
+    except KeyError:
         # Skiping Obs read. None found
         latest_obs_units = None
         latest_observation_m3 = None
