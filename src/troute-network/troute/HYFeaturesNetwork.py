@@ -34,6 +34,7 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
     if waterbody_parameters.get("break_network_at_waterbodies", False):
         layers.append("lakes")
         layers.append("nexus")
+        layers.append("hydrolocations")
 
     # If any DA is activated, read network table as well for gage information
     data_assimilation_parameters = compute_parameters.get("data_assimilation_parameters", {})
