@@ -117,10 +117,13 @@ def read_rfc_flows(forecast: SiteData, settings: Settings) -> ProcessedData | No
         # Skiping Obs read. None found
         latest_obs_units = None
         latest_observation_m3 = None
-    except ValueError:
         print(f"Streamflow forecast returning stage values. Skipping Forecast for {forecast.lid}")
         # Can't route the flows since the units are in ft and not kcfs. Passing
         return None
+    # except ValueError:
+    #     print(f"Streamflow forecast returning stage values. Skipping Forecast for {forecast.lid}")
+    #     # Can't route the flows since the units are in ft and not kcfs. Passing
+    #     return None
 
     times = [datetime.fromisoformat(entry["validTime"].rstrip("Z")) for entry in forecast_data["data"]]
     primary_forecast = [entry["primary"] for entry in forecast_data["data"]]
