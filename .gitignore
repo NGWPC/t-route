@@ -53,10 +53,10 @@ __pycache__/
 .env
 .python-version
 .ipynb_checkpoints/
-.venv
+.venv/
 *.venv/*
 *.env
-.idea
+.idea/
 *.idea
 
 # pyenv #
