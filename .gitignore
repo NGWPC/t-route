@@ -29,7 +29,7 @@ _site/
 *.log
 *.sql
 *.sqlite
-
+3,!=3.0.4
 # OS generated files #
 ######################
 .DS_Store
@@ -86,3 +86,7 @@ src/vendor/
 dist/
 
 build/
+
+# vscode #
+###########
+.vscode
