@@ -118,7 +118,7 @@ def read_rfc_flows(forecast: SiteData, settings: Settings) -> ProcessedData | No
         latest_obs_units = None
         latest_observation_m3 = None
     except ValueError:
-        print(f"Streamflow forecast returning stage values. Skipping Forecast for {forecast.lid}")
+        print(f"Streamflow observation returning stage values. Skipping Forecast for {forecast.lid}")
         # Can't route the flows since the units are in ft and not kcfs. Passing
         return None
 
@@ -130,9 +130,14 @@ def read_rfc_flows(forecast: SiteData, settings: Settings) -> ProcessedData | No
         print(f"No streamflow forecast found. Skipping Forecast for {forecast.lid}")
         return None
 
-    secondary_m3_forecast, secondary_units = convert_to_m3_per_sec(
-        secondary_forecast, forecast_data["secondaryUnits"]
-    )
+    try:
+        secondary_m3_forecast, secondary_units = convert_to_m3_per_sec(
+            secondary_forecast, forecast_data["secondaryUnits"]
+        )
+    except ValueError:
+        print(f"Streamflow forecast returning stage values. Skipping Forecast for {forecast.lid}")
+        # Can't route the flows since the units are in ft and not kcfs. Passing
+        return None
 
     try:
         processed_data = ProcessedData(
