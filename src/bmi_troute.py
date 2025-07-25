@@ -106,7 +106,6 @@ class bmi_troute(Bmi):
         'lake_water~incoming__volume_flow_rate':['waterbody_cms','m3 s-1'],
         'lake_water~outgoing__volume_flow_rate':['waterbody_cms','m3 s-1'],
         'lake_surface__elevation':['waterbody_m','m'],
-        'lake_surface__elevation':['waterbody_m','m'],
         'channel_water__assimilated_volume_flow_rate':['assimilated_value','m3 s-1'],
         #--------------   Dynamic inputs --------------------------------
         'land_surface_water_source__volume_flow_rate':['streamflow_cms','m3 s-1'],
