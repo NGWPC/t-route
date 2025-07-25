@@ -467,10 +467,10 @@ class ComputeParameters(BaseModel):
     If True, Courant metrics are returnd with simulations. This only works for MC simulations
     """
 
-    restart_parameters: "RestartParameters" = Field(default_factory=RestartParameters)
-    hybrid_parameters: "HybridParameters" = Field(default_factory=HybridParameters)
-    forcing_parameters: "ForcingParameters" = Field(default_factory=ForcingParameters)
-    data_assimilation_parameters: "DataAssimilationParameters" = Field(default_factory=DataAssimilationParameters)
+    restart_parameters: RestartParameters = Field(default_factory=RestartParameters)
+    hybrid_parameters: HybridParameters = Field(default_factory=HybridParameters)
+    forcing_parameters: ForcingParameters = Field(default_factory=ForcingParameters)
+    data_assimilation_parameters: DataAssimilationParameters = Field(default_factory=DataAssimilationParameters)
 
 
 ComputeParameters.model_rebuild()

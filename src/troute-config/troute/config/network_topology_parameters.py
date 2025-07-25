@@ -242,9 +242,9 @@ class NetworkTopologyParameters(BaseModel):
     """
     Parameters controlling how the stream network is synthesized.
     """
-    preprocessing_parameters: "PreprocessingParameters" = Field(default_factory=PreprocessingParameters)
-    supernetwork_parameters: "SupernetworkParameters"
-    waterbody_parameters: "WaterbodyParameters" = Field(default_factory=WaterbodyParameters)
+    preprocessing_parameters: PreprocessingParameters = Field(default_factory=PreprocessingParameters)
+    supernetwork_parameters: SupernetworkParameters
+    waterbody_parameters: WaterbodyParameters = Field(default_factory=WaterbodyParameters)
 
 
 NetworkTopologyParameters.model_rebuild()
