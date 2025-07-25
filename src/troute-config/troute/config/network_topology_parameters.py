@@ -4,15 +4,6 @@ from typing import Optional, List, Union, Dict, Any
 from typing_extensions import Literal
 
 
-class NetworkTopologyParameters(BaseModel):
-    """
-    Parameters controlling how the stream network is synthesized.
-    """
-    preprocessing_parameters: "PreprocessingParameters" = Field(default_factory=dict)
-    supernetwork_parameters: "SupernetworkParameters"
-    waterbody_parameters: "WaterbodyParameters" = Field(default_factory=dict)
-
-
 class PreprocessingParameters(BaseModel):
     """
     Parameters controlling the creation and use of preprocessed network graph data.
@@ -245,6 +236,15 @@ class LevelPool(BaseModel):
     """
     Column name for waterbody ID.
     """
+
+
+class NetworkTopologyParameters(BaseModel):
+    """
+    Parameters controlling how the stream network is synthesized.
+    """
+    preprocessing_parameters: "PreprocessingParameters" = Field(default_factory=PreprocessingParameters)
+    supernetwork_parameters: "SupernetworkParameters"
+    waterbody_parameters: "WaterbodyParameters" = Field(default_factory=WaterbodyParameters)
 
 
 NetworkTopologyParameters.model_rebuild()
