@@ -129,7 +129,7 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
 
         # Convert lake_id to integer and merge with hydrolocations
         lakes["lake_id"] = lakes["lake_id"].astype(int)
-        lakes = lakes.merge(hydro[["hl_link", "id"]], left_on="lake_id", right_on="hl_link", how="left")
+        lakes = lakes.merge(hydro[["hl_link", "id", "hl_reference"]], left_on="lake_id", right_on="hl_link", how="left")
 
         # add hl_uri to nexus
         nexus = nexus.merge(hydro[["nex_id", "hl_uri"]], left_on="id", right_on="nex_id", how="left")
