@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import troute.nhd_io as nhd_io
 from build_tests import parity_check
 import logging
-
+import xarray as xr
 
 LOG = logging.getLogger('')
 
