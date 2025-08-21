@@ -234,6 +234,10 @@ class ReservoirPersistenceDA(BaseModel):
     """
     If True, Great Lakes will perform data assimilation.
     """
+    reservoir_persistence_usbr: bool = False
+    """
+    If True, USBR Reservoirs will perform data assimilation.
+    """
 
     crosswalk_usgs_gage_field: str = "usgs_gage_id"
     """
@@ -314,6 +318,11 @@ class DataAssimilationParameters(BaseModel):
     """
     Directory path to usace timeslice files.
     NOTE: required for USACE reservoir DA
+    """
+    usbr_timeslices_folder: Optional[DirectoryPath] = None
+    """
+    Directory path to USBR timeslice files.
+    NOTE: required for USBR reservoir DA
     """
     canada_timeslices_folder: Optional[DirectoryPath] = None
     """
