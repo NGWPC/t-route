@@ -224,7 +224,7 @@ def nwm_output_generator(
             wbdy = pd.concat(
                 [pd.DataFrame(r[7], index=r[0], columns=i_columns) for r in results],
                 copy=False,
-            )
+            )  # Corresponds to the ordering of the outflows from line 843 troute/routing/fast_reach/mc_reach.pyx
 
             wbdy_id_list = waterbodies_df.index.values.tolist()
             flow_df = flowveldepth.loc[wbdy_id_list]
