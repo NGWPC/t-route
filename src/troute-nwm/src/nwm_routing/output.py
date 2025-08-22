@@ -222,9 +222,9 @@ def nwm_output_generator(
             ).to_flat_index()
 
             wbdy = pd.concat(
-                [pd.DataFrame(r[6], index=r[0], columns=i_columns) for r in results],
+                [pd.DataFrame(r[7], index=r[0], columns=i_columns) for r in results],
                 copy=False,
-            )
+            )  # Corresponds to the ordering of the outflows from line 843 troute/routing/fast_reach/mc_reach.pyx
 
             wbdy_id_list = waterbodies_df.index.values.tolist()
             flow_df = flowveldepth.loc[wbdy_id_list]
@@ -286,7 +286,7 @@ def nwm_output_generator(
         if stream_output_mask:
             stream_output_mask = Path(stream_output_mask)
         
-        nudge = np.concatenate([r[8] for r in results])
+        nudge = np.concatenate([r[9] for r in results])  # Corresponds to the ordering of the outflows from line 843 troute/routing/fast_reach/mc_reach.pyx
         usgs_positions_id = np.concatenate([r[3][0] for r in results])
         nhd_io.write_flowveldepth(
             Path(stream_output_directory),
