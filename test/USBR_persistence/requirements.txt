@@ -1,4 +1,6 @@
-dask
-matplotlib
+dask==2025.5.1
+matplotlib==3.9.0
 mapclassify
-folium
+folium==0.19.7
+jupyterlab==3.67
+ipykernel==6.29.4
