@@ -891,6 +891,26 @@ class HYFeaturesNetwork(AbstractNetwork):
 
         self._qlateral = qlats_df
 
+    def build_et_array(
+        self,
+        run,
+    ):
+        col_idx = run.get("pet_index_name", "divide_id")
+        var_idx = run.get("pet_var_name", "ACTUAL_ET")
+        try:
+            ds = run["pet_forcing_ds"]
+        except KeyError as e:
+            raise KeyError("Cannot find pet_forcing_ds in runs") from e
+        ds_AET = ds[var_idx]
+        time_strings = pd.to_datetime(ds_AET.time.values).strftime('%Y%m%d%H%M')
+        aet_df = pd.DataFrame(
+            data=ds_AET.values,
+            index=ds_AET[col_idx].values,
+            columns=time_strings
+        )
+        aet_df.index.name = 'divide_id'
+        self._et = aet_df
+
     ######################################################################
     # FIXME Temporary solution to hydrofabric issues.
     def bandaid(

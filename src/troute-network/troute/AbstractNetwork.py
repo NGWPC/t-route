@@ -31,7 +31,7 @@ class AbstractNetwork(ABC):
                 "_independent_networks", "_reaches_by_tw", "_flowpath_dict",
                 "_reverse_network", "_q0", "_t0", "_link_lake_crosswalk",
                 "_usgs_lake_gage_crosswalk", "_usace_lake_gage_crosswalk", "_rfc_lake_gage_crosswalk",
-                "_qlateral", "_break_segments", "_segment_index", "_coastal_boundary_depth_df",
+                "_qlateral", "_et", "_break_segments", "_segment_index", "_coastal_boundary_depth_df",
                 "supernetwork_parameters", "waterbody_parameters","data_assimilation_parameters",
                 "restart_parameters", "compute_parameters", "forcing_parameters",
                 "hybrid_parameters", "preprocessing_parameters", "output_parameters",
@@ -46,6 +46,7 @@ class AbstractNetwork(ABC):
         self._q0 = None
         self._t0 = None
         self._qlateral = None
+        self._et = None
         self._link_gage_df = None
         #qlat_const = forcing_parameters.get("qlat_const", 0)
         #FIXME qlat_const
@@ -106,6 +107,8 @@ class AbstractNetwork(ABC):
         qlat_file_value_col          = self.forcing_parameters.get("qlat_file_value_col", "q_lateral")
         qlat_file_gw_bucket_flux_col = self.forcing_parameters.get("qlat_file_gw_bucket_flux_col", "qBucket")
         qlat_file_terrain_runoff_col = self.forcing_parameters.get("qlat_file_terrain_runoff_col", "qSfcLatRunoff")
+        pet_index_name               = self.forcing_parameters.get("pet_file_index_col", "divide_id")
+        pet_var_name                 = self.forcing_parameters.get("pet_file_value_col", "ACTUAL_ET")  # Using Actual ET from the evapotranspiration module
 
     
         # TODO: find a better way to deal with these defaults and overrides.
@@ -117,6 +120,9 @@ class AbstractNetwork(ABC):
         run["qlat_file_value_col"]          = run.get("qlat_file_value_col", qlat_file_value_col)
         run["qlat_file_gw_bucket_flux_col"] = run.get("qlat_file_gw_bucket_flux_col", qlat_file_gw_bucket_flux_col)
         run["qlat_file_terrain_runoff_col"] = run.get("qlat_file_terrain_runoff_col", qlat_file_terrain_runoff_col)
+        run["pet_index_name"]               = run.get("pet_index_name", pet_index_name)
+        run["pet_var_name"]                 = run.get("pet_var_name", pet_var_name)
+
         
         #---------------------------------------------------------------------------
         # Assemble lateral inflow data
@@ -133,6 +139,24 @@ class AbstractNetwork(ABC):
         
         LOG.debug(
             "lateral inflow DataFrame creation complete in %s seconds." \
+                % (time.time() - start_time)
+                )
+
+        #---------------------------------------------------------------------------
+        # Assemble catchment PET data
+        #---------------------------------------------------------------------------
+
+        # Place holder, if reading qlats from a file use this.
+        # TODO: add an option for reading qlat data from BMI/model engine
+        start_time = time.time()
+        LOG.info("Creating a DataFrame of pet forcings ...")
+
+        self.build_et_array(
+            run,
+        )
+        
+        LOG.debug(
+            "ET DataFrame creation complete in %s seconds." \
                 % (time.time() - start_time)
                 )
 
@@ -288,6 +312,13 @@ class AbstractNetwork(ABC):
         
         """
         return self._qlateral
+
+    @property
+    def et(self):
+        """
+        
+        """
+        return self._et
 
     @property
     def q0(self):
@@ -746,6 +777,7 @@ class AbstractNetwork(ABC):
         stream_output = self.output_parameters.get('stream_output', None)
         run_sets           = forcing_parameters.get("qlat_forcing_sets", None)
         qlat_input_folder  = forcing_parameters.get("qlat_input_folder", None)
+        pet_input_folder   = forcing_parameters.get("pet_input_folder", None)
         nts                = forcing_parameters.get("nts", None)
         max_loop_size      = forcing_parameters.get("max_loop_size", 12)
         dt                 = forcing_parameters.get("dt", None)
@@ -758,8 +790,18 @@ class AbstractNetwork(ABC):
         except AssertionError:
             raise AssertionError("Aborting simulation because the qlat_input_folder:", qlat_input_folder,"does not exist. Please check the the nexus_input_folder variable is correctly entered in the .yaml control file") from None
 
+        try:
+            pet_input_folder = pathlib.Path(pet_input_folder)
+            assert pet_input_folder.is_dir() == True
+        except TypeError:
+            raise TypeError("Aborting simulation because no pet_input_folder is specified in the forcing_parameters section of the .yaml control file.") from None
+        except AssertionError:
+            raise AssertionError("Aborting simulation because the pet_input_folder:", pet_input_folder,"does not exist. Please check the the nexus_input_folder variable is correctly entered in the .yaml control file") from None
+
         forcing_glob_filter = forcing_parameters["qlat_file_pattern_filter"]
         binary_folder = forcing_parameters.get('binary_nexus_file_folder', None)
+
+        pet_glob_filter = forcing_parameters["pet_file_pattern_filter"]
 
         if forcing_glob_filter=="nex-*" and binary_folder:
             print("Reformating qlat nexus files as hourly binary files...")
@@ -916,6 +958,19 @@ class AbstractNetwork(ABC):
                 k += max_loop_size
                 j += 1
 
+        if pet_glob_filter=="cat-*":  # will be called if using NGEN catchment files (cat-<CATCHMENT_ID>.csv)
+            print("Reformating pet catchment files into xr dataset")
+            pet_files = pet_input_folder.glob(pet_glob_filter)
+            
+            pet_ds = cat_files_to_binary(pet_files)
+            forcing_parameters["pet_input_folder"] = pet_input_folder
+            forcing_parameters["pet_file_pattern_filter"] = pet_glob_filter
+
+            for i in range(len(run_sets)):
+                run_sets[i]["pet_forcing_ds"] = pet_ds
+        elif pet_glob_filter is not None:
+            raise NotImplementedError("PET reads are only implemented for catchment files at this time with a `cat-*` filter")
+
         return run_sets
     
     def filter_diffusive_nexus_pts(self,):
@@ -991,6 +1046,34 @@ def nex_files_to_binary(nexus_files, binary_folder):
     forcing_glob_filter = '*NEXOUT.parquet'
     
     return nexus_input_folder, forcing_glob_filter
+
+def cat_files_to_binary(cat_files):
+    """Converts catchment .csv files into a .nc binary"""
+    datasets = []
+    divide_ids = []
+    
+    for file in list(cat_files):
+        filename = os.path.basename(file)
+        divide_id = int(filename.split("-")[1].split(".")[0])  # Gets the ID from the catchment file
+        df = pd.read_csv(file)
+        df = df.rename(columns={"Time": "time"})
+        ds = df.set_index("time").to_xarray()
+        ds = ds.assign_coords(divide_id=divide_id)
+        datasets.append(ds)
+        divide_ids.append(divide_id)    
+    combined_ds = xr.concat(datasets, dim='divide_id')
+    
+    # Assign the divide_ids as coordinates for the catchment dimension
+    combined_ds = combined_ds.assign_coords(divide_id=divide_ids)
+    
+    # # Generate output filename and save to file
+    # start_time = pd.to_datetime(combined_ds.time.values[0]).strftime('%Y%m%d%H%M')
+    # end_time = pd.to_datetime(combined_ds.time.values[-1]).strftime('%Y%m%d%H%M')
+    # output_file_name = f"{start_time}_{end_time}_cat_vars.nc"
+    
+    # combined_ds.to_netcdf(binary_folder / output_file_name)
+    
+    return combined_ds
 
 def get_id_from_filename(file_name):
     id = os.path.splitext(file_name)[0].split('-')[1].split('_')[0]
