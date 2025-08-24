@@ -376,9 +376,9 @@ class ForcingParameters(BaseModel):
     Time step size (seconds). Default is 5 mintues
     """
     qlat_input_folder: Optional[DirectoryPath] = None
-    pet_input_folder: Optional[DirectoryPath] = None
+    et_input_folder: Optional[DirectoryPath] = None
     """
-    Name of the directory where PET forcings are stored for channel loss
+    Name of the directory where ET forcings are stored for channel loss
     """
     nts: Optional[int] = 288
     """
@@ -411,9 +411,9 @@ class ForcingParameters(BaseModel):
     """
     Globbing file pattern to identify q_lateral forcing files.
     """
-    pet_file_pattern_filter: Optional[str] = None
+    et_file_pattern_filter: Optional[str] = None
     """
-    Globbing file pattern to identify pet forcing files.
+    Globbing file pattern to identify ET forcing files.
     """
 
     qlat_forcing_sets: Optional[List[QLateralForcingSet]] = None
@@ -439,7 +439,7 @@ class ForcingParameters(BaseModel):
 
     peadj: float = 1.0 
     """
-    When PET data are used the daily PET values can be adjusted with a constant adjustment factor (PEADJ). This is calibratable
+    When ET data are used the daily ET values can be adjusted with a constant adjustment factor (PEADJ). This is calibratable
     """
 
 class ComputeParameters(BaseModel):

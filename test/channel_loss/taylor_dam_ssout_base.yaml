@@ -1,4 +1,4 @@
-# uv run python -m nwm_routing -f -V4 taylor_dam.yaml
+# uv run python -m nwm_routing -f -V4 taylor_dam_ssout_base.yaml
 #--------------------------------------------------------------------------------
 log_parameters:
     #----------
@@ -28,6 +28,7 @@ network_topology_parameters:
             cs : 'ChSlp'
             alt: 'alt'
             lake_id: 'lake_id'
+            divide_id: 'divide_id'  # required for ET mapping
             mainstem: 'mainstem'
     waterbody_parameters:
       #----------
@@ -47,10 +48,14 @@ compute_parameters:
         #----------
         qts_subdivisions            : 12
         dt                          : 300 # [sec]
+        et_input_folder            : channel_forcing/et/
+        et_file_pattern_filter     : "cat-*"
         qlat_input_folder           : channel_forcing/qlat/
         qlat_file_pattern_filter    : "*NEXOUT.parquet"
         nts                         : 2304 #288 for 1day THIS HAS TO MATCH THE SIMULATION TIME PERIOD
         max_loop_size               : 288 # [hr]  
+        ssout                       : 0.005
+        peadj                       : 0.0
     data_assimilation_parameters:
         streamflow_da:
     #        #----------
@@ -67,7 +72,7 @@ compute_parameters:
 #--------------------------------------------------------------------------------
 output_parameters:
   stream_output:
-      stream_output_directory: output/base_output/
+      stream_output_directory: output/ssout_base/
       stream_output_time: -1 # [hr]
       stream_output_type: '.nc'
       stream_output_internal_frequency: 60

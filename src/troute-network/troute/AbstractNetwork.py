@@ -31,7 +31,7 @@ class AbstractNetwork(ABC):
                 "_independent_networks", "_reaches_by_tw", "_flowpath_dict",
                 "_reverse_network", "_q0", "_t0", "_link_lake_crosswalk",
                 "_usgs_lake_gage_crosswalk", "_usace_lake_gage_crosswalk", "_rfc_lake_gage_crosswalk",
-                "_qlateral", "_et", "_break_segments", "_segment_index", "_coastal_boundary_depth_df",
+                "_qlateral", "_eloss", "_use_et_channel_loss", "_break_segments", "_segment_index", "_coastal_boundary_depth_df",
                 "supernetwork_parameters", "waterbody_parameters","data_assimilation_parameters",
                 "restart_parameters", "compute_parameters", "forcing_parameters",
                 "hybrid_parameters", "preprocessing_parameters", "output_parameters",
@@ -46,7 +46,8 @@ class AbstractNetwork(ABC):
         self._q0 = None
         self._t0 = None
         self._qlateral = None
-        self._et = None
+        self._eloss = None
+        self._use_et_channel_loss = False
         self._link_gage_df = None
         #qlat_const = forcing_parameters.get("qlat_const", 0)
         #FIXME qlat_const
@@ -107,8 +108,8 @@ class AbstractNetwork(ABC):
         qlat_file_value_col          = self.forcing_parameters.get("qlat_file_value_col", "q_lateral")
         qlat_file_gw_bucket_flux_col = self.forcing_parameters.get("qlat_file_gw_bucket_flux_col", "qBucket")
         qlat_file_terrain_runoff_col = self.forcing_parameters.get("qlat_file_terrain_runoff_col", "qSfcLatRunoff")
-        pet_index_name               = self.forcing_parameters.get("pet_file_index_col", "divide_id")
-        pet_var_name                 = self.forcing_parameters.get("pet_file_value_col", "ACTUAL_ET")  # Using Actual ET from the evapotranspiration module
+        et_index_name               = self.forcing_parameters.get("et_file_index_col", "divide_id")
+        et_var_name                 = self.forcing_parameters.get("et_file_value_col", "ACTUAL_ET")  # Using Actual ET from the evapotranspiration module
 
     
         # TODO: find a better way to deal with these defaults and overrides.
@@ -120,8 +121,8 @@ class AbstractNetwork(ABC):
         run["qlat_file_value_col"]          = run.get("qlat_file_value_col", qlat_file_value_col)
         run["qlat_file_gw_bucket_flux_col"] = run.get("qlat_file_gw_bucket_flux_col", qlat_file_gw_bucket_flux_col)
         run["qlat_file_terrain_runoff_col"] = run.get("qlat_file_terrain_runoff_col", qlat_file_terrain_runoff_col)
-        run["pet_index_name"]               = run.get("pet_index_name", pet_index_name)
-        run["pet_var_name"]                 = run.get("pet_var_name", pet_var_name)
+        run["et_index_name"]               = run.get("et_index_name", et_index_name)
+        run["et_var_name"]                 = run.get("et_var_name", et_var_name)
 
         
         #---------------------------------------------------------------------------
@@ -143,22 +144,31 @@ class AbstractNetwork(ABC):
                 )
 
         #---------------------------------------------------------------------------
-        # Assemble catchment PET data
+        # Assemble catchment ET data for channel loss
         #---------------------------------------------------------------------------
 
-        # Place holder, if reading qlats from a file use this.
-        # TODO: add an option for reading qlat data from BMI/model engine
-        start_time = time.time()
-        LOG.info("Creating a DataFrame of pet forcings ...")
+        if self._use_et_channel_loss:
+            start_time = time.time()
+            LOG.info("Creating a DataFrame of ET forcings ...")
 
-        self.build_et_array(
-            run,
-        )
+            self.build_et_array(
+                run,
+            )
+
+            # Saving ELoss outputs to disk for validation purposes
+            self._eloss.to_csv(self.forcing_parameters["et_input_folder"] / f"peadj_{self.forcing_parameters['peadj']}_eloss_calculated_values.csv")
+            
+            LOG.debug(
+                "ET DataFrame creation complete in %s seconds." \
+                    % (time.time() - start_time)
+                    )
+        else:
+            # Setting ET to all zeros since we won't be using
+            self._eloss = pd.DataFrame(0.0, index=self._qlateral.index, columns=self._qlateral.columns)
         
-        LOG.debug(
-            "ET DataFrame creation complete in %s seconds." \
-                % (time.time() - start_time)
-                )
+        # Dropping divide_id as it is no longer needed since catchment ET data has been mapped to wb-id
+        if "divide_id" in self._dataframe:
+            self._dataframe = self._dataframe.drop(columns=["divide_id"])
 
         #---------------------------------------------------------------------
         # Assemble coastal coupling data [WIP]
@@ -314,11 +324,19 @@ class AbstractNetwork(ABC):
         return self._qlateral
 
     @property
-    def et(self):
+    def eloss(self):
         """
-        
+        Channel loss as defined by:
+        ELOSS = (ET * PEADJ) * 0.27778/TIMINT * Aw
         """
-        return self._et
+        return self._eloss
+
+    @property
+    def use_et_channel_loss(self):
+        """
+        A boolean to describe if channel loss is being used
+        """
+        return self._use_et_channel_loss
 
     @property
     def q0(self):
@@ -777,7 +795,7 @@ class AbstractNetwork(ABC):
         stream_output = self.output_parameters.get('stream_output', None)
         run_sets           = forcing_parameters.get("qlat_forcing_sets", None)
         qlat_input_folder  = forcing_parameters.get("qlat_input_folder", None)
-        pet_input_folder   = forcing_parameters.get("pet_input_folder", None)
+        et_input_folder   = forcing_parameters.get("et_input_folder", None)
         nts                = forcing_parameters.get("nts", None)
         max_loop_size      = forcing_parameters.get("max_loop_size", 12)
         dt                 = forcing_parameters.get("dt", None)
@@ -790,18 +808,20 @@ class AbstractNetwork(ABC):
         except AssertionError:
             raise AssertionError("Aborting simulation because the qlat_input_folder:", qlat_input_folder,"does not exist. Please check the the nexus_input_folder variable is correctly entered in the .yaml control file") from None
 
-        try:
-            pet_input_folder = pathlib.Path(pet_input_folder)
-            assert pet_input_folder.is_dir() == True
-        except TypeError:
-            raise TypeError("Aborting simulation because no pet_input_folder is specified in the forcing_parameters section of the .yaml control file.") from None
-        except AssertionError:
-            raise AssertionError("Aborting simulation because the pet_input_folder:", pet_input_folder,"does not exist. Please check the the nexus_input_folder variable is correctly entered in the .yaml control file") from None
+        if et_input_folder is not None:
+            self._use_et_channel_loss = True
+            try:
+                et_input_folder = pathlib.Path(et_input_folder)
+                assert et_input_folder.is_dir() == True
+            except TypeError:
+                raise TypeError("Aborting simulation because no et_input_folder is specified in the forcing_parameters section of the .yaml control file.") from None
+            except AssertionError:
+                raise AssertionError("Aborting simulation because the et_input_folder:", et_input_folder,"does not exist. Please check the the nexus_input_folder variable is correctly entered in the .yaml control file") from None
 
         forcing_glob_filter = forcing_parameters["qlat_file_pattern_filter"]
         binary_folder = forcing_parameters.get('binary_nexus_file_folder', None)
 
-        pet_glob_filter = forcing_parameters["pet_file_pattern_filter"]
+        et_glob_filter = forcing_parameters["et_file_pattern_filter"]
 
         if forcing_glob_filter=="nex-*" and binary_folder:
             print("Reformating qlat nexus files as hourly binary files...")
@@ -958,18 +978,19 @@ class AbstractNetwork(ABC):
                 k += max_loop_size
                 j += 1
 
-        if pet_glob_filter=="cat-*":  # will be called if using NGEN catchment files (cat-<CATCHMENT_ID>.csv)
-            print("Reformating pet catchment files into xr dataset")
-            pet_files = pet_input_folder.glob(pet_glob_filter)
-            
-            pet_ds = cat_files_to_binary(pet_files)
-            forcing_parameters["pet_input_folder"] = pet_input_folder
-            forcing_parameters["pet_file_pattern_filter"] = pet_glob_filter
+        if self._use_et_channel_loss:
+            if et_glob_filter=="cat-*":  # will be called if using NGEN catchment files (cat-<CATCHMENT_ID>.csv)
+                print("Reformating ET catchment files into xr dataset")
+                et_files = et_input_folder.glob(et_glob_filter)
+                
+                et_ds = cat_files_to_binary(et_files)
+                forcing_parameters["et_input_folder"] = et_input_folder
+                forcing_parameters["et_file_pattern_filter"] = et_glob_filter
 
-            for i in range(len(run_sets)):
-                run_sets[i]["pet_forcing_ds"] = pet_ds
-        elif pet_glob_filter is not None:
-            raise NotImplementedError("PET reads are only implemented for catchment files at this time with a `cat-*` filter")
+                for i in range(len(run_sets)):
+                    run_sets[i]["et_forcing_ds"] = et_ds
+            elif et_glob_filter is not None:
+                raise NotImplementedError("ET reads are only implemented for catchment files at this time with a `cat-*` filter")
 
         return run_sets
     
