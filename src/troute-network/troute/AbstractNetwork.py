@@ -1087,13 +1087,6 @@ def cat_files_to_binary(cat_files):
     # Assign the divide_ids as coordinates for the catchment dimension
     combined_ds = combined_ds.assign_coords(divide_id=divide_ids)
     
-    # # Generate output filename and save to file
-    # start_time = pd.to_datetime(combined_ds.time.values[0]).strftime('%Y%m%d%H%M')
-    # end_time = pd.to_datetime(combined_ds.time.values[-1]).strftime('%Y%m%d%H%M')
-    # output_file_name = f"{start_time}_{end_time}_cat_vars.nc"
-    
-    # combined_ds.to_netcdf(binary_folder / output_file_name)
-    
     return combined_ds
 
 def get_id_from_filename(file_name):
