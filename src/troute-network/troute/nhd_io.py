@@ -1685,109 +1685,64 @@ def lastobs_df_output(
 def write_waterbody_netcdf(
     wbdy_output_dir,
     waterbody_df,
-    values,
-    time,
+    inflow_df,
+    outflow_df,
+    elev_df,
+    time_index,
+    t0,
     dt,
-    run_start,
-    run_end,
+    nts,
 ):
     """
-    Write waterbody results to a timestamped NetCDF file.
-    Instead of creating one file per timestep, this function
-    appends each timestep to the same file (with an unlimited time dimension).
-
-    Parameters
-    ----------
-    wbdy_output_dir : str
-        Directory where NetCDF file will be saved
-    waterbody_df : pandas.DataFrame
-        DataFrame containing waterbody information (feature_id, lat, lon, etc.)
-    values : dict
-        Dictionary of arrays containing waterbody results (inflow, outflow, etc.)
-    time : datetime
-        Current model time
-    dt : int
-        Model time step in seconds
-    run_start : datetime
-        Start of the model run
-    run_end : datetime
-        End of the model run
+    Write all timesteps for waterbody inflow/outflow/elevation into ONE NetCDF file.
+    The filename includes the run start time (t0).
     """
 
+    # dynamic filename: troute_output_<YYYYMMDDHHMM>.nc
+    timestamp_str = t0.strftime("%Y%m%d%H%M")
+    output_file = Path(wbdy_output_dir) / f"troute_output_{timestamp_str}.nc"
 
-    # Build filename once based on run_start (so all timesteps go into one file)
-    fname = f"LAKEOUT_{run_start.strftime('%Y%m%d%H%M')}.nc"
-    fpath = os.path.join(wbdy_output_dir, fname)
+    with netCDF4.Dataset(output_file, "w", format="NETCDF4") as ds:
+        # dimensions
+        nwaterbodies = len(waterbody_df.index)
+        ds.createDimension("time", None)  # unlimited
+        ds.createDimension("waterbody", nwaterbodies)
 
-    # If file doesn't exist, create it with dimensions/variables
-    if not os.path.exists(fpath):
-        ds = nc.Dataset(fpath, "w", format="NETCDF4")
-
-        # Define dimensions
-        ds.createDimension("time", None)  # unlimited for appending
-        ds.createDimension("feature_id", len(waterbody_df))
-
-        # Define variables
+        # variables
         times = ds.createVariable("time", "f8", ("time",))
         times.units = "seconds since 1970-01-01 00:00:00"
         times.calendar = "gregorian"
 
-        feature_ids = ds.createVariable("feature_id", "i4", ("feature_id",))
-        feature_ids[:] = waterbody_df.index.astype("int32")
+        inflow_var = ds.createVariable("inflow", "f4", ("time", "waterbody"), zlib=True, fill_value=np.nan)
+        outflow_var = ds.createVariable("outflow", "f4", ("time", "waterbody"), zlib=True, fill_value=np.nan)
+        elev_var   = ds.createVariable("water_sfc_elev", "f4", ("time", "waterbody"), zlib=True, fill_value=np.nan)
 
-        # Static attributes
-        if "lat" in waterbody_df and "lon" in waterbody_df:
-            lats = ds.createVariable("latitude", "f8", ("feature_id",))
-            lats.units = "degrees_north"
-            lats[:] = waterbody_df["lat"].values
+        # metadata
+        inflow_var.long_name = "inflow discharge"
+        inflow_var.units = "m3/s"
 
-            lons = ds.createVariable("longitude", "f8", ("feature_id",))
-            lons.units = "degrees_east"
-            lons[:] = waterbody_df["lon"].values
+        outflow_var.long_name = "outflow discharge"
+        outflow_var.units = "m3/s"
 
-        # Reservoir type if available
-        if "reservoir_type" in waterbody_df:
-            rtype = ds.createVariable("reservoir_type", "i4", ("feature_id",))
-            rtype[:] = waterbody_df["reservoir_type"].values
+        elev_var.long_name = "water surface elevation"
+        elev_var.units = "m"
 
-        # Create time-varying variables
-        inflow = ds.createVariable("inflow", "f8", ("time", "feature_id"))
-        inflow.units = "m3 s-1"
+        # write data
+        start = time.time()
+        for n, ts in enumerate(time_index):
+            from datetime import timedelta
+            current_time = t0 + timedelta(seconds=dt * ts)
+            times[n] = netCDF4.date2num(
+                current_time,
+                units=times.units,
+                calendar=times.calendar,
+            )
+            inflow_var[n, :] = inflow_df.iloc[:, n].values
+            outflow_var[n, :] = outflow_df.iloc[:, n].values
+            elev_var[n, :] = elev_df.iloc[:, n].values
 
-        outflow = ds.createVariable("outflow", "f8", ("time", "feature_id"))
-        outflow.units = "m3 s-1"
-
-        elev = ds.createVariable("water_sfc_elev", "f8", ("time", "feature_id"))
-        elev.units = "m"
-
-        if "lake_area" in values:
-            area = ds.createVariable("lake_area", "f8", ("time", "feature_id"))
-            area.units = "m2"
-
-        # CRS attribute (if provided in df)
-        if "crs" in waterbody_df.attrs:
-            ds.setncattr("crs", waterbody_df.attrs["crs"])
-
-    else:
-        ds = nc.Dataset(fpath, "a")
-        inflow = ds.variables["inflow"]
-        outflow = ds.variables["outflow"]
-        elev = ds.variables["water_sfc_elev"]
-        if "lake_area" in values and "lake_area" in ds.variables:
-            area = ds.variables["lake_area"]
-        times = ds.variables["time"]
-
-    # Append current timestep
-    t_index = len(times)
-    times[t_index] = nc.date2num(time, units=times.units, calendar=times.calendar)
-
-    inflow[t_index, :] = np.array(values["inflow"])
-    outflow[t_index, :] = np.array(values["outflow"])
-    elev[t_index, :] = np.array(values["water_sfc_elev"])
-    if "lake_area" in values and "lake_area" in ds.variables:
-        area[t_index, :] = np.array(values["lake_area"])
-
-    ds.close()
+        LOG.info(f"Finished writing NetCDF {output_file} with {len(time_index)} timesteps "
+                 f"and {nwaterbodies} waterbodies in {time.time()-start:.2f} seconds")
 
 
 def write_flowveldepth_csv_pkl(stream_output_directory, file_name,
