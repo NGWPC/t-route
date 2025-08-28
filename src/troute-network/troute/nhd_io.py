@@ -1691,7 +1691,6 @@ def write_waterbody_netcdf(
     time_index,
     t0,
     dt,
-    nts,
 ):
     """
     Write all timesteps for waterbody inflow/outflow/elevation into ONE NetCDF file.
@@ -1702,12 +1701,14 @@ def write_waterbody_netcdf(
     timestamp_str = t0.strftime("%Y%m%d%H%M")
     output_file = Path(wbdy_output_dir) / f"troute_output_{timestamp_str}.nc"
 
+    nwaterbodies = len(waterbody_df.index)
+    nts = inflow_df.shape[1]
+    time_index = list(range(nts))
+
+    start = time.time()
     with netCDF4.Dataset(output_file, "w", format="NETCDF4") as ds:
-        # dimensions
-        nwaterbodies = len(waterbody_df.index)
         ds.createDimension("time", None)  # unlimited
         ds.createDimension("waterbody", nwaterbodies)
-
         # variables
         times = ds.createVariable("time", "f8", ("time",))
         times.units = "seconds since 1970-01-01 00:00:00"
@@ -1716,30 +1717,20 @@ def write_waterbody_netcdf(
         inflow_var = ds.createVariable("inflow", "f4", ("time", "waterbody"), zlib=True, fill_value=np.nan)
         outflow_var = ds.createVariable("outflow", "f4", ("time", "waterbody"), zlib=True, fill_value=np.nan)
         elev_var   = ds.createVariable("water_sfc_elev", "f4", ("time", "waterbody"), zlib=True, fill_value=np.nan)
-
         # metadata
         inflow_var.long_name = "inflow discharge"
         inflow_var.units = "m3/s"
-
         outflow_var.long_name = "outflow discharge"
         outflow_var.units = "m3/s"
-
         elev_var.long_name = "water surface elevation"
         elev_var.units = "m"
 
-        # write data
-        start = time.time()
-        for n, ts in enumerate(time_index):
-            from datetime import timedelta
-            current_time = t0 + timedelta(seconds=dt * ts)
-            times[n] = netCDF4.date2num(
-                current_time,
-                units=times.units,
-                calendar=times.calendar,
-            )
+        for n in range(nts):
+            current_time = t0 + timedelta(seconds=dt * n)
+            times[n] = netCDF4.date2num(current_time, units=times.units, calendar=times.calendar)
             inflow_var[n, :] = inflow_df.iloc[:, n].values
             outflow_var[n, :] = outflow_df.iloc[:, n].values
-            elev_var[n, :] = elev_df.iloc[:, n].values
+            elev_var[n, :] = elev_df.iloc[:, n].values                            
 
         LOG.info(f"Finished writing NetCDF {output_file} with {len(time_index)} timesteps "
                  f"and {nwaterbodies} waterbodies in {time.time()-start:.2f} seconds")

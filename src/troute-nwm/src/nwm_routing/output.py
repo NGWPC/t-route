@@ -324,8 +324,7 @@ def nwm_output_generator(
         else:
             output_waterbodies_df = waterbodies_df
             output_waterbody_types_df = waterbody_types_df
-        #extract time steps
-        time_index, tmp_variable = map(list,zip(*i_df.columns.tolist())) 
+
         LOG.info("Writing a single waterbody NetCDF file with multiple timesteps to folder: "+str(Path(wbdyo).resolve()))
         start = time.time()
         nhd_io.write_waterbody_netcdf(
@@ -334,10 +333,8 @@ def nwm_output_generator(
             inflow_df = i_df,
             outflow_df = q_df,
             elev_df = d_df,
-            time_index=time_index,
             t0 = t0,
             dt = dt,
-            nts = nts,
         )
         LOG.info("Waterbody NetCDF file written to folder: "+str(Path(wbdyo).resolve()))     
         LOG.debug("writing LAKEOUT file took a total time of %s seconds." % (time.time() - start))
