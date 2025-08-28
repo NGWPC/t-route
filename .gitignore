@@ -80,4 +80,10 @@ bower_components/
 src/vendor/
 dist/
 
+# Build dirs #
+##############
 build/
+
+# .vscode files #
+#################
+.vscode/
