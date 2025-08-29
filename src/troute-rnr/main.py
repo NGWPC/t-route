@@ -4,9 +4,10 @@ import logging
 import shutil
 import socket
 
+import geopandas as gpd
 import httpx
 import pika
-from icefabric_tools import rnr
+from icefabric.modules import get_rnr_segment
 from nwm_routing.__main__ import main_v04 as t_route
 from pydantic import ValidationError
 from troute_rnr import format, read
@@ -83,9 +84,11 @@ def run(
             inputs = read.read_rfc_flows(site_data, settings)
             if inputs is not None:
                 try:
-                    rnr.get_rnr_segment(
-                        settings.catalog, inputs.reach.id, settings.tmp_geopackage
-                    )  # Writes the rnr geopackage to disk
+                    layers = get_rnr_segment(
+                        settings.catalog, inputs.reach.id
+                    )
+                    for table, layer in layers.items():
+                        gpd.GeoDataFrame(layer).to_file(settings.tmp_geopackage, layer=table, driver="GPKG") # Writes the rnr geopackage to disk
                     yaml_file_path, tmp_flow_files_path = format.format_config(inputs, settings)
                 except IndexError:
                     print(
