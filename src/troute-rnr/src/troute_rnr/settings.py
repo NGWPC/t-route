@@ -2,7 +2,6 @@ import configparser
 import os
 from pathlib import Path
 
-from icefabric_manage import build
 from pyiceberg.catalog import load_catalog
 
 
@@ -61,7 +60,6 @@ class Settings:
         }
 
         self.catalog = load_catalog("hydrofabric", **self.catalog_settings)
-        build(self.catalog, Path(f"{self.data_dir.resolve()}/parquet"))
 
         self.base_config_path = module_dir / "base_files/base_config.yaml"
         self.tmp_config = module_dir / "base_files/tmp_config.yaml"

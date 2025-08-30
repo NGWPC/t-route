@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 import xarray as xr
-from icefabric_tools import table_to_geopandas
+from icefabric.helpers import table_to_geopandas
 from troute_rnr.settings import Settings
 
 
