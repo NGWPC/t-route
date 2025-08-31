@@ -122,7 +122,7 @@ def format_config(inputs: ProcessedData, settings: Settings) -> tuple[Path, Path
         The path to the YAML config file and flow files directory
     """
     reach = inputs.reach
-    network = pl.scan_parquet(settings.data_dir / "network.parquet")
+    network = pl.scan_parquet(settings.data_dir / "parquet/network.parquet")
 
     hy_id = find_origin(network_table=network, identifier=reach.id).split("-")[1]
     tmp_flow_files_path = settings.tmp_flow_files_path / inputs.lid

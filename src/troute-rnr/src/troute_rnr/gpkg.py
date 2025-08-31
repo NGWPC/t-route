@@ -48,16 +48,16 @@ def get_rnr_segment(data_dir: Path, reach_id: str) -> dict[str, pd.DataFrame | g
     dict[str, pd.DataFrame | gpd.GeoDataFrame]
         a dictionary of dataframes and geodataframes containing HF layers
     """
-    network = pl.scan_parquet(data_dir / "network.parquet")
+    network = pl.scan_parquet(data_dir / "parquet/network.parquet")
     origin_row = network.filter(pl.col("hf_id") == reach_id).collect()
 
-    flowpaths = pl.scan_parquet(data_dir / "flowpaths.parquet")
-    lakes = pl.scan_parquet(data_dir / "lakes.parquet")
-    hydrolocations = pl.scan_parquet(data_dir / "hydrolocations.parquet")
-    divides = pl.scan_parquet(data_dir / "divides.parquet")
-    nexus = pl.scan_parquet(data_dir / "nexus.parquet")
-    flowpath_attr = pl.scan_parquet(data_dir / "flowpath-attributes.parquet")
-    pois = pl.scan_parquet(data_dir / "pois.parquet")
+    flowpaths = pl.scan_parquet(data_dir / "parquet/flowpaths.parquet")
+    lakes = pl.scan_parquet(data_dir / "parquet/lakes.parquet")
+    hydrolocations = pl.scan_parquet(data_dir / "parquet/hydrolocations.parquet")
+    divides = pl.scan_parquet(data_dir / "parquet/divides.parquet")
+    nexus = pl.scan_parquet(data_dir / "parquet/nexus.parquet")
+    flowpath_attr = pl.scan_parquet(data_dir / "parquet/flowpath-attributes.parquet")
+    pois = pl.scan_parquet(data_dir / "parquet/pois.parquet")
 
     mainstem_features = network.filter(
         (pl.col("hf_mainstem") == origin_row["hf_mainstem"].first())
