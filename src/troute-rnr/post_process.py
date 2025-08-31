@@ -70,7 +70,7 @@ def post_process(settings: Settings) -> None:
 
     # Reading in the hydrofabric
     print("Reading the hydrofabric")
-    flowpaths = to_geopandas(pd.read_parquet(settings.data_dir / "flowpaths.parquet"))
+    flowpaths = to_geopandas(pd.read_parquet(settings.data_dir / "parquet/flowpaths.parquet"))
     flowpaths = flowpaths.set_index("id")
     write_file = False
 
