@@ -7,12 +7,12 @@ import geopandas as gpd
 import lxml.etree
 import numpy as np
 import pandas as pd
+import polars as pl
 import xarray as xr
 import yaml
-from icefabric.hydrofabric import find_origin
-from icefabric.schemas import IdType
 
 from troute_rnr import write
+from troute_rnr.gpkg import find_origin
 from troute_rnr.schemas.nwps import ProcessedData, SiteData
 from troute_rnr.schemas.weather import Site
 from troute_rnr.settings import Settings
@@ -122,10 +122,9 @@ def format_config(inputs: ProcessedData, settings: Settings) -> tuple[Path, Path
         The path to the YAML config file and flow files directory
     """
     reach = inputs.reach
-    network = settings.catalog.load_table("hydrofabric.network").to_polars()
-    hy_id = (
-        find_origin(network_table=network, identifier=reach.id, id_type=IdType.ID)["id"].values[0].split("-")[1]
-    )
+    network = pl.scan_parquet(settings.data_dir / "network.parquet")
+
+    hy_id = find_origin(network_table=network, identifier=reach.id).split("-")[1]
     tmp_flow_files_path = settings.tmp_flow_files_path / inputs.lid
     tmp_flow_files_path.mkdir(exist_ok=True)
     write.write_flow_files(hy_id, reach, tmp_flow_files_path)

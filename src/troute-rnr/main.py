@@ -7,14 +7,12 @@ import socket
 import geopandas as gpd
 import httpx
 import pika
-from icefabric.modules import get_rnr_segment
 from nwm_routing.__main__ import main_v04 as t_route
 from pydantic import ValidationError
 from troute_rnr import format, read
+from troute_rnr.gpkg import get_rnr_segment
 from troute_rnr.settings import Settings
 from troute_rnr.utils import get
-
-settings = Settings()
 
 
 def reset_logging():
@@ -49,6 +47,7 @@ def run(
     properties: pika.spec.BasicProperties,
     body: bytes,
     hml_message_counter: MessageCounter | None,
+    settings: Settings,
 ) -> None:
     """The main function for the T-Route replace and route module
 
@@ -64,6 +63,8 @@ def run(
         The message content body
     hml_message_counter: MessageCounter | None
         the number of forecasts to run for
+    settings: Settings
+        the settings of RnR
     """
     hml = json.loads(body.decode())
     print(f"Reading forecast for {hml['rdf']}, issued at {hml['issuance_time']}")
@@ -84,11 +85,11 @@ def run(
             inputs = read.read_rfc_flows(site_data, settings)
             if inputs is not None:
                 try:
-                    layers = get_rnr_segment(
-                        settings.catalog, inputs.reach.id
-                    )
+                    layers = get_rnr_segment(settings.data_dir, inputs.reach.id)
                     for table, layer in layers.items():
-                        gpd.GeoDataFrame(layer).to_file(settings.tmp_geopackage, layer=table, driver="GPKG") # Writes the rnr geopackage to disk
+                        gpd.GeoDataFrame(layer).to_file(
+                            settings.tmp_geopackage, layer=table, driver="GPKG"
+                        )  # Writes the rnr geopackage to disk
                     yaml_file_path, tmp_flow_files_path = format.format_config(inputs, settings)
                 except IndexError:
                     print(
@@ -102,6 +103,8 @@ def run(
                     format.format_output_nc(site_data, inputs, yaml_file_path)
                 except IndexError:
                     print(f"T-Route inflow formatting error for {inputs.lid}. Skipping Routing")
+                except TypeError:
+                    print("Error with YAML file when running t-route")
                 print("Closing tmp files")
                 yaml_file_path.unlink()
                 settings.tmp_geopackage.unlink()
@@ -110,7 +113,7 @@ def run(
                 reset_logging()
 
     except KeyError:
-        print(f"Sites not found. Status: {sites_response['status']}")
+        print(f"Sites not found. Status: {sites_response}")
         pass
     finally:
         # Acknowledging message since all HML files are read
@@ -155,7 +158,7 @@ def consume(settings: Settings, hml_message_counter: MessageCounter | None = Non
         channel.basic_consume(
             queue=settings.flooded_data_queue,
             on_message_callback=lambda ch, method, properties, body: run(
-                ch, method, properties, body, hml_message_counter
+                ch, method, properties, body, hml_message_counter, settings
             ),
         )
         try:
