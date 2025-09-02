@@ -2,8 +2,6 @@ import configparser
 import os
 from pathlib import Path
 
-from pyiceberg.catalog import load_catalog
-
 
 class Settings:
     """The global settings object for Troute-rnr.
@@ -53,13 +51,6 @@ class Settings:
         self.user = self.config["DEFAULT"]["user"]
 
         self.data_dir = (project_root / "data").resolve()
-        self.catalog_settings = {
-            "type": "sql",
-            "uri": f"sqlite:///{str(self.data_dir / 'warehouse/pyiceberg_catalog.db')}",  # Note the three slashes for absolute path
-            "warehouse": f"file://{str(self.data_dir.resolve())}/warehouse",  # Use resolved absolute path
-        }
-
-        self.catalog = load_catalog("hydrofabric", **self.catalog_settings)
 
         self.base_config_path = module_dir / "base_files/base_config.yaml"
         self.tmp_config = module_dir / "base_files/tmp_config.yaml"

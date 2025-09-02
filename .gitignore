@@ -87,3 +87,11 @@ build/
 # .vscode files #
 #################
 .vscode/
+
+# UV lock #
+###########
+uv.lock
+
+# data #
+########
+data/
