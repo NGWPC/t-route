@@ -1,6 +1,6 @@
 [project]
 description = "T-Route replace and route capabilities for water.noaa.gov"
-version = "2025.6.0"
+version = "2025.9.0"
 readme = "README.md"
 requires-python = ">=3.9"
 name = "troute_rnr"
@@ -15,7 +15,7 @@ dependencies = [
     "pytest==8.3.2",
     "pyyaml==6.0.2",
     "netcdf4==1.7.2",
-    "icefabric @ git+https://github.com/NGWPC/icefabric.git",
+    "polars==1.32.3",
 ]
 
 [build-system]

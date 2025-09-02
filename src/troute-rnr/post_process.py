@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 import xarray as xr
-from icefabric.helpers import table_to_geopandas
+from troute_rnr.gpkg import to_geopandas
 from troute_rnr.settings import Settings
 
 
@@ -70,7 +70,7 @@ def post_process(settings: Settings) -> None:
 
     # Reading in the hydrofabric
     print("Reading the hydrofabric")
-    flowpaths = table_to_geopandas(settings.catalog.load_table("hydrofabric.flowpaths"))
+    flowpaths = to_geopandas(pd.read_parquet(settings.data_dir / "parquet/flowpaths.parquet"))
     flowpaths = flowpaths.set_index("id")
     write_file = False
 
