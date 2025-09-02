@@ -1688,7 +1688,6 @@ def write_waterbody_netcdf(
     inflow_df,
     outflow_df,
     elev_df,
-    time_index,
     t0,
     dt,
 ):
