@@ -324,8 +324,9 @@ def nwm_output_generator(
         
     # handle duplicate waterbody IDs
         if not duplicate_ids_df.empty:
-            output_waterbodies_df = waterbodies_df.rename(index=dict(duplicate_ids_df[['synthetic_ids','lake_id']].values))
-            output_waterbody_types_df = waterbody_types_df.rename(index=dict(duplicate_ids_df[['synthetic_ids','lake_id']].values))
+            renamer = dict(duplicate_ids_df[["synthetic_ids", "lake_id"]].values)
+            output_waterbodies_df = waterbodies_df.rename(index=renamer)
+            output_waterbody_types_df = waterbody_types_df.rename(index=renamer)
         else:
             output_waterbodies_df = waterbodies_df
             output_waterbody_types_df = waterbody_types_df
@@ -342,6 +343,14 @@ def nwm_output_generator(
             dt = dt,
             filepath = output_filename,
         )
+        try:
+            legacy_files = list(Path(wbdyo).glob("*.LAKEOUT.nc"))
+            for f in legacy_files:
+                f.unlink(missing_ok=True)
+            if legacy_files:
+                LOG.info("Removed %d legacy per-timestep LAKEOUT files, keeping only %s", len(legacy_files), output_filename.name)
+        except Exception as exc:
+            LOG.warning("Could not purge legacy LAKEOUT files: %s", exc)
         LOG.info("Waterbody NetCDF file written to folder: "+str(Path(wbdyo).resolve()))     
         LOG.debug("writing LAKEOUT file took a total time of %s seconds." % (time.time() - start))
     elif wbdyo:
