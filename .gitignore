@@ -79,3 +79,19 @@ bower_components/
 .grunt/
 src/vendor/
 dist/
+# build artifacts / local backups
+*.bak
+test/LowerColorado_TX_v4/configs/backup_yaml/
+
+# run outputs
+test/LowerColorado_TX_v4/output/**
+test/LowerColorado_TX_v4/restart/**
+test/LowerColorado_TX_v4/lastobs/**
+# build artifacts / local backups
+*.bak
+test/LowerColorado_TX_v4/configs/backup_yaml/
+
+# run outputs
+test/LowerColorado_TX_v4/output/**
+test/LowerColorado_TX_v4/restart/**
+test/LowerColorado_TX_v4/lastobs/**
