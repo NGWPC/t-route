@@ -327,6 +327,7 @@ def nwm_output_generator(
 
         LOG.info("Writing a single waterbody NetCDF file with multiple timesteps to folder: "+str(Path(wbdyo).resolve()))
         start = time.time()
+	output_filename = Path(wbdyo) / f"troute_output_{t0.strftime('%Y%m%d%H%M')}.nc"
         nhd_io.write_waterbody_netcdf(
             wbdy_output_dir = wbdyo,
             waterbody_df = output_waterbodies_df,
@@ -335,6 +336,7 @@ def nwm_output_generator(
             elev_df = d_df,
             t0 = t0,
             dt = dt,
+            filepath = output_filename,
         )
         LOG.info("Waterbody NetCDF file written to folder: "+str(Path(wbdyo).resolve()))     
         LOG.debug("writing LAKEOUT file took a total time of %s seconds." % (time.time() - start))

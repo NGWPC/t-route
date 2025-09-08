@@ -1683,13 +1683,13 @@ def lastobs_df_output(
     ds.to_netcdf(str(output_path))
 
 def write_waterbody_netcdf(
-    wbdy_output_dir,
     waterbody_df,
     inflow_df,
     outflow_df,
     elev_df,
     t0,
     dt,
+    filepath,
 ):
     """
     Write all timesteps for waterbody inflow/outflow/elevation into ONE NetCDF file.
@@ -1697,8 +1697,7 @@ def write_waterbody_netcdf(
     """
 
     # dynamic filename: troute_output_<YYYYMMDDHHMM>.nc
-    timestamp_str = t0.strftime("%Y%m%d%H%M")
-    output_file = Path(wbdy_output_dir) / f"troute_output_{timestamp_str}.nc"
+    output_file = Path(filepath)
 
     nwaterbodies = len(waterbody_df.index)
     nts = inflow_df.shape[1]
