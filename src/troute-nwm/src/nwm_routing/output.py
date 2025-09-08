@@ -186,8 +186,13 @@ def nwm_output_generator(
     chrto = output_parameters.get("chrtout_output", None)
     test = output_parameters.get("test_output", None)
     chano = output_parameters.get("chanobs_output", None)
-    wbdyo = output_parameters.get("lakeout_output", None)
     stream_output = output_parameters.get("stream_output", None)
+    wbdyo = output_parameters.get("lakeout_output", None)
+    if not wbdyo:
+        if stream_output and isinstance(stream_output, dict) and 'stream_output_directory' in stream_output:
+            wbdyo - stream_output['stream_output_directory']
+        else:
+            wbdyo = "output"
     lastobso = output_parameters.get("lastobs_output", None)
         
     if csv_output:
@@ -327,9 +332,8 @@ def nwm_output_generator(
 
         LOG.info("Writing a single waterbody NetCDF file with multiple timesteps to folder: "+str(Path(wbdyo).resolve()))
         start = time.time()
-	output_filename = Path(wbdyo) / f"troute_output_{t0.strftime('%Y%m%d%H%M')}.nc"
+        output_filename = Path(wbdyo) / f"troute_output_{t0.strftime('%Y%m%d%H%M')}.nc"
         nhd_io.write_waterbody_netcdf(
-            wbdy_output_dir = wbdyo,
             waterbody_df = output_waterbodies_df,
             inflow_df = i_df,
             outflow_df = q_df,
