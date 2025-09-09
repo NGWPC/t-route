@@ -1,6 +1,6 @@
 import json
-import logging
 import os
+import re
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -8,6 +8,7 @@ from itertools import chain
 from pathlib import Path
 from pprint import pformat
 
+import fiona
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -20,89 +21,116 @@ from troute.nhd_network import extract_connections, reachable, reverse_dict, rev
 from .AbstractNetwork import AbstractNetwork
 from .rfc_lake_gage_crosswalk import get_great_lakes_climatology, get_rfc_lake_gage_crosswalk
 
-LOG = logging.getLogger("")
-
 __verbose__ = False
 __showtiming__ = False
 
 
+def find_layer_name(layers, pattern):
+    """
+    Find a layer name in the list of layers that matches the regex pattern.
+    """
+    for layer in layers:
+        if re.search(pattern, layer, re.IGNORECASE):
+            return layer
+    return None
+
+
 def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
-    # Establish which layers we will read. We'll always need the flowpath tables
-    layers = ["flowpaths", "flowpath-attributes"]
+    # Retrieve available layers from the GeoPackage
+    available_layers = fiona.listlayers(file_path)
 
-    # If waterbodies are being simulated, read lakes table
+    # patterns for the layers we want to find
+    layer_patterns = {
+        "flowpaths": r"flow[-_]?paths?|flow[-_]?lines?",
+        "flowpath_attributes": r"flow[-_]?path[-_]?attributes?|flow[-_]?line[-_]?attributes?",
+        "lakes": r"lakes?",
+        "nexus": r"nexus?",
+        "network": r"network",
+        "hydrolocations": r"hydrolocations?",
+    }
+
+    # Match available layers to the patterns
+    matched_layers = {key: find_layer_name(available_layers, pattern) for key, pattern in layer_patterns.items()}
+
+    layers_to_read = ["flowpaths", "flowpath_attributes", "hydrolocations"]
+
     if waterbody_parameters.get("break_network_at_waterbodies", False):
-        layers.append("lakes")
-        layers.append("nexus")
-        layers.append("hydrolocations")
+        layers_to_read.extend(["lakes", "nexus"])
 
-    # If any DA is activated, read network table as well for gage information
     data_assimilation_parameters = compute_parameters.get("data_assimilation_parameters", {})
-    streamflow_nudging = data_assimilation_parameters.get("streamflow_da", {}).get("streamflow_nudging", False)
-    usgs_da = data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_usgs", False)
-    usace_da = data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_usace", False)
-    rfc_da = (
-        data_assimilation_parameters.get("reservoir_da", {})
-        .get("reservoir_rfc_da", {})
-        .get("reservoir_rfc_forecasts", False)
-    )
-    if any([streamflow_nudging, usgs_da, usace_da, rfc_da]):
-        layers.append("network")
+    if any(
+        [
+            data_assimilation_parameters.get("streamflow_da", {}).get("streamflow_nudging", False),
+            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_usgs", False),
+            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_usace", False),
+            data_assimilation_parameters.get("reservoir_da", {})
+            .get("reservoir_rfc_da", {})
+            .get("reservoir_rfc_forecasts", False),
+        ]
+    ):
+        layers_to_read.append("network")
 
-    # If diffusive is activated, read nexus table for lat/lon information
     hybrid_parameters = compute_parameters.get("hybrid_parameters", {})
-    hybrid_routing = hybrid_parameters.get("run_hybrid_routing", False)
-    if hybrid_routing & ("nexus" not in layers):
-        layers.append("nexus")
+    if hybrid_parameters.get("run_hybrid_routing", False) and "nexus" not in layers_to_read:
+        layers_to_read.append("nexus")
 
-    # Retrieve geopackage information:
+    # Function that read a layer from the geopackage
+    def read_layer(layer_name):
+        if layer_name:
+            try:
+                return gpd.read_file(file_path, layer=layer_name)
+            except Exception as e:
+                print(f"Error reading {layer_name}: {e}")
+                return pd.DataFrame()
+        return pd.DataFrame()
+
+    # Retrieve geopackage information using matched layer names
     if cpu_pool > 1:
-        with Parallel(n_jobs=len(layers)) as parallel:
-            jobs = []
-            for layer in layers:
-                jobs.append(
-                    delayed(gpd.read_file)
-                    # (f, qlat_file_value_col, gw_bucket_col, terrain_ro_col)
-                    # delayed(nhd_io.get_ql_from_csv)
-                    (filename=file_path, layer=layer)
-                )
-            gpkg_list = parallel(jobs)
-        table_dict = {layers[i]: gpkg_list[i] for i in range(len(layers))}
-        flowpaths = pd.merge(
-            table_dict.get("flowpaths"), table_dict.get("flowpath-attributes"), on="id", suffixes=("", "_y")
-        )
-        lakes = table_dict.get("lakes", pd.DataFrame())
-        network = table_dict.get("network", pd.DataFrame())
-        nexus = table_dict.get("nexus", pd.DataFrame())
+        with Parallel(n_jobs=min(cpu_pool, len(layers_to_read))) as parallel:
+            gpkg_list = parallel(delayed(read_layer)(matched_layers[layer]) for layer in layers_to_read)
+
+        table_dict = {layers_to_read[i]: gpkg_list[i] for i in range(len(layers_to_read))}
     else:
-        flowpaths = gpd.read_file(file_path, layer="flowpaths")
-        flowpath_attributes = gpd.read_file(file_path, layer="flowpath-attributes")
-        flowpaths = pd.merge(flowpaths, flowpath_attributes, on="id", suffixes=("", "_y"))
-        # If waterbodies are being simulated, read lakes table
-        lakes = pd.DataFrame()
-        if "lakes" in layers:
-            lakes = gpd.read_file(file_path, layer="lakes")
-        # If any DA is activated, read network table as well for gage information
-        network = pd.DataFrame()
-        if "network" in layers:
-            network = gpd.read_file(file_path, layer="network")
-        # If diffusive is activated, read nexus table for lat/lon information
-        nexus = pd.DataFrame()
-        if "nexus" in layers:
-            nexus = gpd.read_file(file_path, layer="nexus")
+        table_dict = {layer: read_layer(matched_layers[layer]) for layer in layers_to_read}
+
+    # Handle different key column names between flowpaths and flowpath_attributes
+    flowpaths_df = table_dict.get("flowpaths", pd.DataFrame())
+    flowpath_attributes_df = table_dict.get("flowpath_attributes", pd.DataFrame())
+
+    # Check if 'link' column exists and rename it to 'id'
+    if "link" in flowpath_attributes_df.columns:
+        # v2.2 Hydrofabric files have both a link and an id in flowpath_attributes
+        # Dropping columns that are duplicated in the two dataframes
+        if "id" in flowpath_attributes_df.columns:
+            flowpath_attributes_df.drop(columns=["id"], inplace=True)
+        if "toid" in flowpath_attributes_df.columns:
+            flowpath_attributes_df.drop(columns=["toid"], inplace=True)
+        if "vpuid" in flowpath_attributes_df.columns:
+            flowpath_attributes_df.drop(columns=["vpuid"], inplace=True)
+        if "geometry" in flowpath_attributes_df.columns:
+            flowpath_attributes_df.drop(columns=["geometry"], inplace=True)
+        flowpath_attributes_df.rename(columns={"link": "id"}, inplace=True)
+
+    # Merge flowpaths and flowpath_attributes
+    flowpaths = pd.merge(flowpaths_df, flowpath_attributes_df, on="id", how="inner", suffixes=("", "_y"))
+
+    lakes = table_dict.get("lakes", pd.DataFrame())
+    network = table_dict.get("network", pd.DataFrame())
+    nexus = table_dict.get("nexus", pd.DataFrame())
 
     # add an "id" column to lakes, by merging with hydrolocations based on "hl_link" (i.e, lake_id in lakes)
     # also, add hl_uri to nexus, by merging with hydrolocations based on nex_id (i.e, id in nexus)
-    if "hydrolocations" in layers:
-        hydro = gpd.read_file(file_path, layer="hydrolocations")
+    if "hydrolocations" in table_dict:
+        hydro = table_dict["hydrolocations"]
 
         # Filter out non-integer hl_link values and convert to integer (assuming valid lake_id values are integers)
         hydro = hydro[hydro["hl_link"].apply(lambda x: str(x).replace(".", "", 1).isdigit())]
         hydro["hl_link"] = hydro["hl_link"].astype(int)
 
-        # Convert lake_id to integer and merge with hydrolocations
-        lakes["lake_id"] = lakes["lake_id"].astype(int)
-        lakes = lakes.merge(hydro[["hl_link", "id"]], left_on="lake_id", right_on="hl_link", how="left")
+        if not lakes.empty: 
+            # Convert lake_id to integer and merge with hydrolocations
+            lakes["lake_id"] = lakes["lake_id"].astype(int)
+            lakes = lakes.merge(hydro[["hl_link", "id", "hl_reference"]], left_on="lake_id", right_on="hl_link", how="left")
 
         # add hl_uri to nexus
         nexus = nexus.merge(hydro[["nex_id", "hl_uri"]], left_on="id", right_on="nex_id", how="left")
@@ -252,7 +280,11 @@ def load_bmi_data(
 class HYFeaturesNetwork(AbstractNetwork):
     """ """
 
-    __slots__ = ["_upstream_terminal", "_nexus_latlon", "_duplicate_ids_df"]
+    __slots__ = [
+        "_upstream_terminal",
+        "_nexus_latlon",
+        "_duplicate_ids_df",
+    ]
 
     def __init__(
         self,
@@ -285,7 +317,7 @@ class HYFeaturesNetwork(AbstractNetwork):
         self.showtiming = showtiming
 
         if self.verbose:
-            LOG.info("creating supernetwork connections set")
+            print("creating supernetwork connections set")
         if self.showtiming:
             start_time = time.time()
 
@@ -319,6 +351,8 @@ class HYFeaturesNetwork(AbstractNetwork):
             # Preprocess network objects
             self.preprocess_network(flowpaths, nexus)
 
+            self.crosswalk_nex_flowpath_poi(flowpaths, nexus)
+
             # Preprocess waterbody objects
             self.preprocess_waterbodies(lakes, nexus)
 
@@ -333,9 +367,9 @@ class HYFeaturesNetwork(AbstractNetwork):
                     quit()
 
         if self.verbose:
-            LOG.info("supernetwork connections set complete")
+            print("supernetwork connections set complete")
         if self.showtiming:
-            LOG.info("... in %s seconds." % (time.time() - start_time))
+            print("... in %s seconds." % (time.time() - start_time))
 
         super().__init__(from_files, value_dict)
 
@@ -446,6 +480,15 @@ class HYFeaturesNetwork(AbstractNetwork):
         # to the model engine/coastal models
         self._nexus_latlon = nexus
 
+    def crosswalk_nex_flowpath_poi(self, flowpaths, nexus):
+        mask_flowpaths = flowpaths["toid"].str.startswith(("nex-", "tnex-"))
+        filtered_flowpaths = flowpaths[mask_flowpaths]
+        self._nexus_dict = filtered_flowpaths.groupby("toid")["id"].apply(list).to_dict()  ##{id: toid}
+        if "poi_id" in nexus.columns:
+            self._poi_nex_dict = nexus.groupby("poi_id")["id"].apply(list).to_dict()
+        else:
+            self._poi_nex_dict = None
+
     def preprocess_waterbodies(self, lakes, nexus):
         # If waterbodies are being simulated, create waterbody dataframes and dictionaries
         if not lakes.empty:
@@ -467,8 +510,8 @@ class HYFeaturesNetwork(AbstractNetwork):
 
             id = self.waterbody_dataframe["id"].str.split("-", expand=True).iloc[:, 1]
             self._waterbody_df.loc[:, "id"] = id
-            self._waterbody_df["id"] = self._waterbody_df.id.astype(float).astype(int)
-            self._waterbody_df["lake_id"] = self.waterbody_dataframe.lake_id.astype(float).astype(int)
+            self._waterbody_df.loc[:, "id"] = self._waterbody_df.id.astype(float).astype(int)
+            self._waterbody_df.loc[:, "lake_id"] = self.waterbody_dataframe.lake_id.astype(float).astype(int)
             self._waterbody_df = self.waterbody_dataframe.set_index("lake_id").drop_duplicates().sort_index()
 
             # Drop any waterbodies that do not have parameters
@@ -563,9 +606,13 @@ class HYFeaturesNetwork(AbstractNetwork):
                 )
                 gl_wbody_df.index.name = self.waterbody_dataframe.index.name
 
-                self._waterbody_df = pd.concat([self.waterbody_dataframe, gl_wbody_df])
+                self._waterbody_df = pd.concat([self.waterbody_dataframe, gl_wbody_df]).sort_index()
+
+                self._gl_climatology_df = get_great_lakes_climatology()
+
             else:
                 gl_dict = {}
+                self._gl_climatology_df = pd.DataFrame()
 
             self._waterbody_types_df = pd.DataFrame(
                 data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
@@ -595,6 +642,7 @@ class HYFeaturesNetwork(AbstractNetwork):
             self._waterbody_type_specified = False
             self._link_lake_crosswalk = None
             self._duplicate_ids_df = pd.DataFrame()
+            self._gl_climatology_df = pd.DataFrame()
 
         self._dataframe = self.dataframe.drop("waterbody", axis=1).drop_duplicates()
 
@@ -608,10 +656,8 @@ class HYFeaturesNetwork(AbstractNetwork):
             gages_df["id"] = gages_df["id"].str.split("-", expand=True).loc[:, 1].astype(float).astype(int)
             # split the hl_uri column into type and value
             gages_df[["type", "value"]] = gages_df.hl_uri.str.split("-", expand=True, n=1)
-            # normalize type to lowercase for consistent filtering
-            gages_df["type"] = gages_df["type"].str.lower()
-            # filter for 'gages' only
-            gages_df = gages_df[gages_df["type"].isin(["gages", "nid"])]
+            # filter for 'Gages' only
+            gages_df = gages_df[gages_df["type"].isin(["Gages", "NID"])]
             # Some IDs have multiple gages associated with them. This will expand the dataframe so
             # there is a unique row per gage ID. Also adds lake ids to the dataframe for creating
             # lake-gage crosswalk dataframes.
@@ -638,6 +684,10 @@ class HYFeaturesNetwork(AbstractNetwork):
                 .rename_axis(None, axis=0)
                 .to_dict()
             )
+
+            # FIXME: temporary solution, add canadian gage crosswalk dataframe. This should come from
+            # the hydrofabric.
+            self._canadian_gage_link_df = pd.DataFrame(columns=["gages", "link"]).set_index("link")
 
             # Find furthest downstream gage and create our lake_gage_df to make crosswalk dataframes.
             lake_gage_hydroseq_df = gages_df[~gages_df["lake_id"].isnull()][["lake_id", "value", "hydroseq"]].rename(
