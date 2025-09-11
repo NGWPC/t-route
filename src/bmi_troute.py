@@ -188,8 +188,8 @@ class bmi_troute(Bmi):
         self._values['waterbody_connections__link'] = np.zeros(0)
         self._values['waterbody_connections__lake'] = np.zeros(0)
 
-        self._values['land_surface_water_source__volume_flow_rate'] = np.zeros(0)
-        self._values['land_surface_water_source__id'] = np.zeros(0)
+        self._values['land_surface_water_source__volume_flow_rate'] = np.zeros(0, dtype=float)
+        self._values['land_surface_water_source__id'] = np.zeros(0, dtype=np.intc)
         self._values['coastal_boundary_depth'] = np.zeros(0)
 
         self._values['depthArray_coastal'] = np.zeros(0)
@@ -342,8 +342,15 @@ class bmi_troute(Bmi):
         """
         #val = self.get_value_ptr(var_name)
         #val[:] = src.reshape(val.shape)
-        
-        self._values[var_name] = src
+
+        # special case for changing data size 
+        if var_name.endswith("__count"):
+            source_var_name = var_name[:-7]
+            source = self._values.get(source_var_name)
+            if isinstance(source, np.ndarray):
+                source.resize(int(src[0]))
+        else:
+            self._values[var_name] = src
 
     def get_value(self, var_name):
         """Copy of values.
@@ -370,7 +377,13 @@ class bmi_troute(Bmi):
         array_like
             Value array.
         """
-        return self._values[var_name]
+        if var_name.endswith("__count"):
+            source_var_name = var_name[:-7]
+            source = self._values[source_var_name]
+            count = len(source)
+            return np.array([count], dtype=int)
+        else:
+            return self._values[var_name]
 
     def get_start_time(self):
         """Start time of model."""
