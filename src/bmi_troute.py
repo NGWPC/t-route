@@ -3,6 +3,7 @@ import yaml
 import numpy as np
 from bmipy import Bmi
 from pathlib import Path
+from datetime import datetime
 
 # Here is the model we want to run
 from troute_model import troute_model
@@ -211,19 +212,19 @@ class bmi_troute(Bmi):
         #TODO: coordinate with model engine team on order of values here. this is a 1d array
         # that cycles through variables first, then time steps, then segment ids.
         self._values['fvd_results'] = np.zeros(0)
-        self._values['fvd_index'] = np.zeros(0)
+        self._values['fvd_index'] = np.zeros(0, dtype=int)
         self._values['lakeout'] = np.zeros(0)
-        self._values['lakeout_index'] = np.zeros(0)
+        self._values['lakeout_index'] = np.zeros(0, dtype=int)
         self._values['q0'] = np.zeros(0)
-        self._values['q0_index'] = np.zeros(0)
+        self._values['q0_index'] = np.zeros(0, dtype=int)
         self._values['t0'] = np.zeros(0)
         self._values['waterbody_df'] = np.zeros(0)
-        self._values['waterbody_df_index'] = np.zeros(0)
+        self._values['waterbody_df_index'] = np.zeros(0, dtype=int)
         self._values['lastobs_df'] = np.zeros(0)
-        self._values['lastobs_df_index'] = np.zeros(0)
+        self._values['lastobs_df_index'] = np.zeros(0, dtype=int)
 
         # Diffusive domain tailwater locations
-        self._values['diffusive_tw_ids'] = np.zeros(0)
+        self._values['diffusive_tw_ids'] = np.zeros(0, dtype=int)
         self._values['diffusive_tw_latitude'] = np.zeros(0)
         self._values['diffusive_tw_longitude'] = np.zeros(0)
         
@@ -234,32 +235,33 @@ class bmi_troute(Bmi):
         self._values['rfc_timeseries_df'] = np.zeros(0)
         self._values['lastobs_df'] = np.zeros(0)
         self._values['nudging'] = np.zeros(0)
-        self._values['nudging_ids'] = np.zeros(0)
+        self._values['nudging_ids'] = np.zeros(0, dtype=int)
+        self._values["dateNull"] = datetime.min
 
         # Data assimilation for BMI compliant arrays containing data frames
         #
         # usgs_df
         self._values['datesSecondsArray_usgs'] = np.zeros(0)
-        self._values['nDates_usgs'] = np.zeros(0)
+        self._values['nDates_usgs'] = 0
         self._values['stationArray_usgs'] = np.zeros(0)
         self._values['stationStringLengthArray_usgs'] = np.zeros(0)
-        self._values['nStations_usgs'] = np.zeros(0)
+        self._values['nStations_usgs'] = 0
         self._values['usgs_Array'] = np.zeros(0)
         #
         # reservoir_usgs_df
         self._values['datesSecondsArray_reservoir_usgs'] = np.zeros(0)
-        self._values['nDates_reservoir_usgs'] = np.zeros(0)
+        self._values['nDates_reservoir_usgs'] = 0
         self._values['stationArray_reservoir_usgs'] = np.zeros(0)
         self._values['stationStringLengthArray_reservoir_usgs'] = np.zeros(0)
-        self._values['nStations_reservoir_usgs'] = np.zeros(0)
+        self._values['nStations_reservoir_usgs'] = 0
         self._values['usgs_reservoir_Array'] = np.zeros(0)
-        #
+        #  
         # reservoir_usace_df
         self._values['datesSecondsArray_reservoir_usace'] = np.zeros(0)
-        self._values['nDates_reservoir_usace'] = np.zeros(0)
+        self._values['nDates_reservoir_usace'] = 0
         self._values['stationArray_reservoir_usace'] = np.zeros(0)
         self._values['stationStringLengthArray_reservoir_usace'] = np.zeros(0)
-        self._values['nStations_reservoir_usace'] = np.zeros(0)
+        self._values['nStations_reservoir_usace'] = 0
         self._values['usace_reservoir_Array'] = np.zeros(0)
         #
         # RFC dataframe
@@ -329,7 +331,7 @@ class bmi_troute(Bmi):
             
         self._model.run(self._values, until)
 
-    def set_value(self, var_name, src):
+    def set_value(self, var_name: str, src):
         """
         Set model values
         
@@ -348,8 +350,15 @@ class bmi_troute(Bmi):
             source_var_name = var_name[:-7]
             source = self._values.get(source_var_name)
             if isinstance(source, np.ndarray):
-                source.resize(int(src[0]))
+                self._values[source_var_name] = np.resize(source, int(src[0]))
         else:
+            # try to maintain value type
+            if isinstance(src, np.ndarray) and len(src) == 1:
+                current = self._values.get(var_name)
+                if isinstance(current, datetime):
+                    src = datetime.fromtimestamp(src[0])
+                elif isinstance(current, (int, float)):
+                    src = src[0]
             self._values[var_name] = src
 
     def get_value(self, var_name):
@@ -366,7 +375,7 @@ class bmi_troute(Bmi):
         output_df = self.get_value_ptr(var_name)
         return output_df
 
-    def get_value_ptr(self, var_name):
+    def get_value_ptr(self, var_name: str):
         """Reference to values.
         Parameters
         ----------
@@ -380,10 +389,20 @@ class bmi_troute(Bmi):
         if var_name.endswith("__count"):
             source_var_name = var_name[:-7]
             source = self._values[source_var_name]
-            count = len(source)
-            return np.array([count], dtype=int)
+            if isinstance(source, (np.ndarray, list)):
+                count = len(source)
+            else:
+                count = 1
+            return np.array([count], dtype=np.intc)
         else:
-            return self._values[var_name]
+            value = self._values[var_name]
+            if isinstance(value, (int, float)):
+                value = np.array([value], dtype=type(value))
+            elif isinstance(value, datetime):
+                value = np.array([value.timestamp()], dtype=float)
+            elif not isinstance(value, np.ndarray):
+                value = np.array(value)
+            return value
 
     def get_start_time(self):
         """Start time of model."""

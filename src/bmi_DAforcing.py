@@ -3,6 +3,7 @@
 import numpy as np
 from bmipy import Bmi
 from pathlib import Path
+from datetime import datetime
 
 # Here is the model we want to run
 from model_DAforcing import DAforcing_model
@@ -309,7 +310,7 @@ class bmi_DAforcing(Bmi):
         self._values['lakeout_ids'] = np.zeros(0)
         self._values['nudging'] = np.zeros(0)
         self._values['nudging_ids'] = np.zeros(0)
-        self._values['t-route_model_time'] = np.zeros(0)
+        self._values['t-route_model_time'] = np.zeros(1, dtype=float)
 
     def get_value(self, var_name):
         """Copy of values.
@@ -326,13 +327,13 @@ class bmi_DAforcing(Bmi):
         output_df = self.get_value_ptr(var_name)
         return output_df
         '''
-        return self._values[var_name]
+        return self.get_value_ptr(var_name)
 
     def update(self):
         """Advance model by one time step."""
         self._model.run(self._values)
 
-    def set_value(self, var_name, src):
+    def set_value(self, var_name: str, src):
         """
         Set model values
         
@@ -351,8 +352,15 @@ class bmi_DAforcing(Bmi):
             source_var_name = var_name[:-7]
             source = self._values.get(source_var_name)
             if isinstance(source, np.ndarray):
-                source.resize(int(src[0]))
+                self._values[source_var_name] = np.resize(source, int(src[0]))
         else:
+            # try to maintain value type
+            if isinstance(src, np.ndarray) and len(src) == 1:
+                current = self._values.get(var_name)
+                if isinstance(current, datetime):
+                    src = datetime.fromtimestamp(src[0])
+                elif isinstance(current, (int, float)):
+                    src = src[0]
             self._values[var_name] = src
 
     def update_until(self, until):
@@ -476,7 +484,7 @@ class bmi_DAforcing(Bmi):
         """
         return int(np.prod(self._model.shape))
 
-    def get_value_ptr(self, var_name):
+    def get_value_ptr(self, var_name: str) -> np.ndarray:
         """Reference to values.
         Parameters
         ----------
@@ -490,10 +498,20 @@ class bmi_DAforcing(Bmi):
         if var_name.endswith("__count"):
             source_var_name = var_name[:-7]
             source = self._values[source_var_name]
-            count = len(source)
-            return np.array([count], dtype=int)
+            if isinstance(source, (np.ndarray, list)):
+                count = len(source)
+            else:
+                count = 1
+            return np.array([count], dtype=np.intc)
         else:
-            return self._values[var_name]
+            value = self._values[var_name]
+            if isinstance(value, (int, float)):
+                value = np.array([value], dtype=type(value))
+            elif isinstance(value, datetime):
+                value = np.array([value.timestamp()], dtype=float)
+            elif not isinstance(value, np.ndarray):
+                value = np.array(value)
+            return value
 
     def get_value_at_indices(self, var_name, dest, indices):
         """Get values at particular indices.
