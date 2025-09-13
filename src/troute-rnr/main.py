@@ -1,6 +1,9 @@
+"""The entrypoint to RnR"""
+
 import argparse
 import json
 import logging
+import os
 import shutil
 import socket
 
@@ -102,7 +105,9 @@ def run(
                 print("Configs are built. Running T-Route")
                 try:
                     t_route(["-f", str(yaml_file_path)])
-                    format.format_output_nc(site_data, inputs, yaml_file_path)
+                    format.format_output_nc(
+                        site_data, inputs, yaml_file_path, s3_path=settings.troute_output_path
+                    )
                 except IndexError:
                     print(f"T-Route inflow formatting error for {inputs.lid}. Skipping Routing")
                 except TypeError:
@@ -182,6 +187,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-hml-files", type=int, help="The number of hml files to be read from the message queue"
     )
+    parser.add_argument("--iac", type=bool, default=False, help="If this code is to be run through IaC")
     args = parser.parse_args()
     if args.num_hml_files is None:
         print(" [*] Running T-Route for all messages in the queue")
@@ -189,14 +195,35 @@ if __name__ == "__main__":
         print(f" [*] Running T-Route for {args.num_hml_files} forecasts")
     hml_message_counter = MessageCounter(args.num_hml_files)
     settings = Settings()
-    layers = {
-        "network": pl.scan_parquet(settings.data_dir / "parquet/network.parquet"),
-        "flowpaths": pl.scan_parquet(settings.data_dir / "parquet/flowpaths.parquet"),
-        "lakes": pl.scan_parquet(settings.data_dir / "parquet/lakes.parquet"),
-        "hydrolocations": pl.scan_parquet(settings.data_dir / "parquet/hydrolocations.parquet"),
-        "divides": pl.scan_parquet(settings.data_dir / "parquet/divides.parquet"),
-        "nexus": pl.scan_parquet(settings.data_dir / "parquet/nexus.parquet"),
-        "flowpath_attr": pl.scan_parquet(settings.data_dir / "parquet/flowpath-attributes.paruet"),
-        "pois": pl.scan_parquet(settings.data_dir / "parquet/pois.parquet"),
-    }
+    if args.iac:
+        troute_output_path = os.getenv("APP_OUTPUT_S3_KEY")
+        if not troute_output_path:
+            raise FileNotFoundError("APP_OUTPUT_S3_KEY environment variable not set")
+
+        hydrofabric_path = os.getenv("HYDROFABRIC_S3_KEY")
+        if not hydrofabric_path:
+            raise FileNotFoundError("HYDROFABRIC_S3_KEY environment variable not set")
+        layers = {
+            "network": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/network.parquet"),
+            "flowpaths": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/flowpaths.parquet"),
+            "lakes": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/lakes.parquet"),
+            "hydrolocations": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/hydrolocations.parquet"),
+            "divides": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/divides.parquet"),
+            "nexus": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/nexus.parquet"),
+            "flowpath_attr": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/flowpath_attr.parquet"),
+            "pois": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/pois.parquet"),
+        }
+        settings.troute_output_path = troute_output_path
+    else:
+        layers = {
+            "network": pl.scan_parquet(settings.data_dir / "parquet/network.parquet"),
+            "flowpaths": pl.scan_parquet(settings.data_dir / "parquet/flowpaths.parquet"),
+            "lakes": pl.scan_parquet(settings.data_dir / "parquet/lakes.parquet"),
+            "hydrolocations": pl.scan_parquet(settings.data_dir / "parquet/hydrolocations.parquet"),
+            "divides": pl.scan_parquet(settings.data_dir / "parquet/divides.parquet"),
+            "nexus": pl.scan_parquet(settings.data_dir / "parquet/nexus.parquet"),
+            "flowpath_attr": pl.scan_parquet(settings.data_dir / "parquet/flowpath-attributes.paruet"),
+            "pois": pl.scan_parquet(settings.data_dir / "parquet/pois.parquet"),
+        }
+        settings.troute_output_path = None
     consume(settings, layers, hml_message_counter=hml_message_counter)
