@@ -1,12 +1,16 @@
+"""The entrypoint to RnR"""
+
 import argparse
 import json
 import logging
+import os
 import shutil
 import socket
 
 import geopandas as gpd
 import httpx
 import pika
+import polars as pl
 from nwm_routing.__main__ import main_v04 as t_route
 from pydantic import ValidationError
 from troute_rnr import format, read
@@ -48,6 +52,7 @@ def run(
     body: bytes,
     hml_message_counter: MessageCounter | None,
     settings: Settings,
+    layers: dict[str, pl.LazyFrame],
 ) -> None:
     """The main function for the T-Route replace and route module
 
@@ -85,8 +90,8 @@ def run(
             inputs = read.read_rfc_flows(site_data, settings)
             if inputs is not None:
                 try:
-                    layers = get_rnr_segment(settings.data_dir, inputs.reach.id)
-                    for table, layer in layers.items():
+                    rnr_layers = get_rnr_segment(layers, inputs.reach.id)
+                    for table, layer in rnr_layers.items():
                         gpd.GeoDataFrame(layer).to_file(
                             settings.tmp_geopackage, layer=table, driver="GPKG"
                         )  # Writes the rnr geopackage to disk
@@ -100,7 +105,9 @@ def run(
                 print("Configs are built. Running T-Route")
                 try:
                     t_route(["-f", str(yaml_file_path)])
-                    format.format_output_nc(site_data, inputs, yaml_file_path)
+                    format.format_output_nc(
+                        site_data, inputs, yaml_file_path, s3_path=settings.troute_output_path
+                    )
                 except IndexError:
                     print(f"T-Route inflow formatting error for {inputs.lid}. Skipping Routing")
                 except TypeError:
@@ -123,7 +130,9 @@ def run(
             hml_message_counter.increment()
 
 
-def consume(settings: Settings, hml_message_counter: MessageCounter | None = None) -> None:
+def consume(
+    settings: Settings, layers: dict[str, pl.LazyFrame], hml_message_counter: MessageCounter | None = None
+) -> None:
     """
     The message consumer interfacing with RabbitMQ
 
@@ -158,7 +167,7 @@ def consume(settings: Settings, hml_message_counter: MessageCounter | None = Non
         channel.basic_consume(
             queue=settings.flooded_data_queue,
             on_message_callback=lambda ch, method, properties, body: run(
-                ch, method, properties, body, hml_message_counter, settings
+                ch, method, properties, body, hml_message_counter, settings, layers
             ),
         )
         try:
@@ -178,10 +187,43 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-hml-files", type=int, help="The number of hml files to be read from the message queue"
     )
+    parser.add_argument("--iac", type=bool, default=False, help="If this code is to be run through IaC")
     args = parser.parse_args()
     if args.num_hml_files is None:
         print(" [*] Running T-Route for all messages in the queue")
     else:
         print(f" [*] Running T-Route for {args.num_hml_files} forecasts")
     hml_message_counter = MessageCounter(args.num_hml_files)
-    consume(Settings(), hml_message_counter=hml_message_counter)
+    settings = Settings()
+    if args.iac:
+        troute_output_path = os.getenv("APP_OUTPUT_S3_KEY")
+        if not troute_output_path:
+            raise FileNotFoundError("APP_OUTPUT_S3_KEY environment variable not set")
+
+        hydrofabric_path = os.getenv("HYDROFABRIC_S3_KEY")
+        if not hydrofabric_path:
+            raise FileNotFoundError("HYDROFABRIC_S3_KEY environment variable not set")
+        layers = {
+            "network": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/network.parquet"),
+            "flowpaths": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/flowpaths.parquet"),
+            "lakes": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/lakes.parquet"),
+            "hydrolocations": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/hydrolocations.parquet"),
+            "divides": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/divides.parquet"),
+            "nexus": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/nexus.parquet"),
+            "flowpath_attr": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/flowpath_attr.parquet"),
+            "pois": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/pois.parquet"),
+        }
+        settings.troute_output_path = troute_output_path
+    else:
+        layers = {
+            "network": pl.scan_parquet(settings.data_dir / "parquet/network.parquet"),
+            "flowpaths": pl.scan_parquet(settings.data_dir / "parquet/flowpaths.parquet"),
+            "lakes": pl.scan_parquet(settings.data_dir / "parquet/lakes.parquet"),
+            "hydrolocations": pl.scan_parquet(settings.data_dir / "parquet/hydrolocations.parquet"),
+            "divides": pl.scan_parquet(settings.data_dir / "parquet/divides.parquet"),
+            "nexus": pl.scan_parquet(settings.data_dir / "parquet/nexus.parquet"),
+            "flowpath_attr": pl.scan_parquet(settings.data_dir / "parquet/flowpath-attributes.paruet"),
+            "pois": pl.scan_parquet(settings.data_dir / "parquet/pois.parquet"),
+        }
+        settings.troute_output_path = None
+    consume(settings, layers, hml_message_counter=hml_message_counter)

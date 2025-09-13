@@ -1,7 +1,5 @@
 """A file to hold all replace and route (RnR) geospatial scripts"""
 
-from pathlib import Path
-
 import geopandas as gpd
 import pandas as pd
 import polars as pl
@@ -33,7 +31,9 @@ def to_geopandas(df: pd.DataFrame, crs: str = "EPSG:5070") -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(df, geometry=gpd.GeoSeries.from_wkb(df["geometry"]), crs=crs)
 
 
-def get_rnr_segment(data_dir: Path, reach_id: str) -> dict[str, pd.DataFrame | gpd.GeoDataFrame]:
+def get_rnr_segment(
+    layers: dict[str, pl.LazyFrame], reach_id: str
+) -> dict[str, pd.DataFrame | gpd.GeoDataFrame]:
     """Returns a geopackage subset from the hydrofabric based on RnR rules
 
     Parameters
@@ -48,16 +48,16 @@ def get_rnr_segment(data_dir: Path, reach_id: str) -> dict[str, pd.DataFrame | g
     dict[str, pd.DataFrame | gpd.GeoDataFrame]
         a dictionary of dataframes and geodataframes containing HF layers
     """
-    network = pl.scan_parquet(data_dir / "parquet/network.parquet")
-    origin_row = network.filter(pl.col("hf_id") == reach_id).collect()
+    network = layers["network"]
+    flowpaths = layers["flowpaths"]
+    lakes = layers["lakes"]
+    hydrolocations = layers["hydrolocations"]
+    divides = layers["divides"]
+    nexus = layers["nexus"]
+    flowpath_attr = layers["flowpath_attr"]
+    pois = layers["pois"]
 
-    flowpaths = pl.scan_parquet(data_dir / "parquet/flowpaths.parquet")
-    lakes = pl.scan_parquet(data_dir / "parquet/lakes.parquet")
-    hydrolocations = pl.scan_parquet(data_dir / "parquet/hydrolocations.parquet")
-    divides = pl.scan_parquet(data_dir / "parquet/divides.parquet")
-    nexus = pl.scan_parquet(data_dir / "parquet/nexus.parquet")
-    flowpath_attr = pl.scan_parquet(data_dir / "parquet/flowpath-attributes.parquet")
-    pois = pl.scan_parquet(data_dir / "parquet/pois.parquet")
+    origin_row = network.filter(pl.col("hf_id") == reach_id).collect()
 
     mainstem_features = network.filter(
         (pl.col("hf_mainstem") == origin_row["hf_mainstem"].first())
