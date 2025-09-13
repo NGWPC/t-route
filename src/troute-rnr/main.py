@@ -222,7 +222,7 @@ if __name__ == "__main__":
             "hydrolocations": pl.scan_parquet(settings.data_dir / "parquet/hydrolocations.parquet"),
             "divides": pl.scan_parquet(settings.data_dir / "parquet/divides.parquet"),
             "nexus": pl.scan_parquet(settings.data_dir / "parquet/nexus.parquet"),
-            "flowpath_attr": pl.scan_parquet(settings.data_dir / "parquet/flowpath-attributes.paruet"),
+            "flowpath_attr": pl.scan_parquet(settings.data_dir / "parquet/flowpath-attributes.parquet"),
             "pois": pl.scan_parquet(settings.data_dir / "parquet/pois.parquet"),
         }
         settings.troute_output_path = None
