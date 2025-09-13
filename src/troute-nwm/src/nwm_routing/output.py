@@ -327,7 +327,11 @@ def nwm_output_generator(
         num_files = i_df.shape[1]
         LOG.info("Output of "+str(num_files)+" waterbody files to be written to folder: "+str(Path(wbdyo).resolve()))     
         start = time.time()
-        for i in range(i_df.shape[1]):              
+        LOG.info("Range = " + str(range(i_df.shape[1])))
+        LOG.info(list(i_df.columns))
+        
+        #for i in range(i_df.shape[1]):              
+        for i in range(2):              
             nhd_io.write_waterbody_netcdf(
                 wbdyo, 
                 i_df.iloc[:,[i]],
@@ -338,8 +342,30 @@ def nwm_output_generator(
                 t0, 
                 dt, 
                 nts,
-                time_index[i],
+                time_index[i]
             )
+
+        try:    
+            nhd_io.write_single_waterbody_netcdf(
+                wbdyo, 
+                i_df,
+                q_df,
+                d_df,
+                output_waterbodies_df,
+                output_waterbody_types_df,
+                t0, 
+                dt, 
+                nts,
+                time_index
+            )
+        except Exception as e:
+            print("Error in writing to single netcdf: " + str(e))
+        
+        try:
+            nhd_io.combine_lakeouts_to_single_netcdf(wbdyo,'_combined_lakeout')
+        except Exception as e:
+            print("Error in combining lakeout netcdf: " + str(e))
+
         LOG.info("Output of "+str(num_files)+" waterbody files written to folder: "+str(Path(wbdyo).resolve()))     
         LOG.debug("writing LAKEOUT files took a total time of %s seconds." % (time.time() - start))
     elif wbdyo:
