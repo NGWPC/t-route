@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-aws = ["s3fs==2025.9.0"]
+iac = ["s3fs==2025.9.0"]
 
 [build-system]
 requires = ["hatchling"]
