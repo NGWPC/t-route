@@ -1,6 +1,9 @@
+"""the local main.py code written to support terraform IaC"""
+
 import argparse
 import json
 import logging
+import os
 import shutil
 import socket
 
@@ -14,6 +17,14 @@ from troute_rnr import format, read
 from troute_rnr.gpkg import get_rnr_segment
 from troute_rnr.settings import Settings
 from troute_rnr.utils import get
+
+troute_output_path = os.getenv("APP_OUTPUT_S3_KEY")
+if not troute_output_path:
+    raise FileNotFoundError("APP_OUTPUT_S3_KEY environment variable not set")
+
+hydrofabric_path = os.getenv("HYDROFABRIC_S3_KEY")
+if not hydrofabric_path:
+    raise FileNotFoundError("HYDROFABRIC_S3_KEY environment variable not set")
 
 
 def reset_logging():
@@ -102,7 +113,7 @@ def run(
                 print("Configs are built. Running T-Route")
                 try:
                     t_route(["-f", str(yaml_file_path)])
-                    format.format_output_nc(site_data, inputs, yaml_file_path)
+                    format.format_output_nc(site_data, inputs, yaml_file_path, s3_path=troute_output_path)
                 except IndexError:
                     print(f"T-Route inflow formatting error for {inputs.lid}. Skipping Routing")
                 except TypeError:
@@ -188,15 +199,14 @@ if __name__ == "__main__":
     else:
         print(f" [*] Running T-Route for {args.num_hml_files} forecasts")
     hml_message_counter = MessageCounter(args.num_hml_files)
-    settings = Settings()
     layers = {
-        "network": pl.scan_parquet(settings.data_dir / "parquet/network.parquet"),
-        "flowpaths": pl.scan_parquet(settings.data_dir / "parquet/flowpaths.parquet"),
-        "lakes": pl.scan_parquet(settings.data_dir / "parquet/lakes.parquet"),
-        "hydrolocations": pl.scan_parquet(settings.data_dir / "parquet/hydrolocations.parquet"),
-        "divides": pl.scan_parquet(settings.data_dir / "parquet/divides.parquet"),
-        "nexus": pl.scan_parquet(settings.data_dir / "parquet/nexus.parquet"),
-        "flowpath_attr": pl.scan_parquet(settings.data_dir / "parquet/flowpath-attributes.paruet"),
-        "pois": pl.scan_parquet(settings.data_dir / "parquet/pois.parquet"),
+        "network": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/network.parquet"),
+        "flowpaths": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/flowpaths.parquet"),
+        "lakes": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/lakes.parquet"),
+        "hydrolocations": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/hydrolocations.parquet"),
+        "divides": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/divides.parquet"),
+        "nexus": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/nexus.parquet"),
+        "flowpath_attr": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/flowpath_attr.parquet"),
+        "pois": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/pois.parquet"),
     }
-    consume(settings, layers, hml_message_counter=hml_message_counter)
+    consume(Settings(), layers, hml_message_counter=hml_message_counter)

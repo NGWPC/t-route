@@ -8,6 +8,7 @@ import lxml.etree
 import numpy as np
 import pandas as pd
 import polars as pl
+import s3fs
 import xarray as xr
 import yaml
 
@@ -188,7 +189,9 @@ def format_xml(product_text: str) -> list[Site]:
     return sites
 
 
-def format_output_nc(site_data: SiteData, inputs: ProcessedData, yaml_file_path: Path) -> None:
+def format_output_nc(
+    site_data: SiteData, inputs: ProcessedData, yaml_file_path: Path, s3_path: str | None
+) -> None:
     """Formats the output .nc file to contain flood/RFC metadata
 
     Parameters
@@ -233,4 +236,10 @@ def format_output_nc(site_data: SiteData, inputs: ProcessedData, yaml_file_path:
     ds.attrs["state"] = site_data.state.abbreviation
     ds.attrs["name"] = site_data.name
 
-    ds.to_netcdf(full_output_path)
+    if s3_path is None:
+        ds.to_netcdf(full_output_path)
+    else:
+        fs = s3fs.S3FileSystem()
+        fs.touch(s3_path)
+        full_output_path = f"{s3_path}/{output_file_name}"
+        ds.to_netcdf(full_output_path)
