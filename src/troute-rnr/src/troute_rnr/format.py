@@ -241,6 +241,6 @@ def format_output_nc(
         import s3fs
 
         fs = s3fs.S3FileSystem()
+        full_output_path = f"{s3_path}/{site_data.lid}"
         fs.touch(s3_path)
-        full_output_path = f"{s3_path}/{output_file_name}"
-        ds.to_netcdf(full_output_path)
+        ds.to_netcdf(f"{full_output_path}/{output_file_name}")
