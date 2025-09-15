@@ -199,6 +199,7 @@ if __name__ == "__main__":
     hml_message_counter = MessageCounter(args.num_hml_files)
     settings = Settings()
     if args.iac:
+        bucket_name = os.getenv("APP_BUCKET_NAME")
         troute_output_path = os.getenv("APP_OUTPUT_S3_KEY")
         if not troute_output_path:
             raise FileNotFoundError("APP_OUTPUT_S3_KEY environment variable not set")
@@ -207,16 +208,18 @@ if __name__ == "__main__":
         if not hydrofabric_path:
             raise FileNotFoundError("HYDROFABRIC_S3_KEY environment variable not set")
         layers = {
-            "network": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/network.parquet"),
-            "flowpaths": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/flowpaths.parquet"),
-            "lakes": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/lakes.parquet"),
-            "hydrolocations": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/hydrolocations.parquet"),
-            "divides": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/divides.parquet"),
-            "nexus": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/nexus.parquet"),
-            "flowpath_attr": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/flowpath_attr.parquet"),
-            "pois": pl.scan_parquet(f"{hydrofabric_path.rstrip('/')}/pois.parquet"),
+            "network": pl.scan_parquet(f"s3://{bucket_name}/{hydrofabric_path}/network.parquet"),
+            "flowpaths": pl.scan_parquet(f"s3://{bucket_name}/{hydrofabric_path}/flowpaths.parquet"),
+            "lakes": pl.scan_parquet(f"s3://{bucket_name}/{hydrofabric_path}/lakes.parquet"),
+            "hydrolocations": pl.scan_parquet(
+                f"s3://{bucket_name}/{hydrofabric_path}/hydrolocations.parquet"
+            ),
+            "divides": pl.scan_parquet(f"s3://{bucket_name}/{hydrofabric_path}/divides.parquet"),
+            "nexus": pl.scan_parquet(f"s3://{bucket_name}/{hydrofabric_path}/nexus.parquet"),
+            "flowpath_attr": pl.scan_parquet(f"s3://{bucket_name}/{hydrofabric_path}/flowpath_attr.parquet"),
+            "pois": pl.scan_parquet(f"s3://{bucket_name}/{hydrofabric_path}/pois.parquet"),
         }
-        settings.troute_output_path = troute_output_path
+        settings.troute_output_path = f"s3://{bucket_name}/{troute_output_path}"
     else:
         layers = {
             "network": pl.scan_parquet(settings.data_dir / "parquet/network.parquet"),
