@@ -112,6 +112,9 @@ def run(
                     print(f"T-Route inflow formatting error for {inputs.lid}. Skipping Routing")
                 except TypeError:
                     print("Error with YAML file when running t-route")
+                except Exception as e:  # noqa: BLE001
+                    # Catching all T-route exceptions in this line
+                    print(f"T-route failed: {e}")
                 print("Closing tmp files")
                 yaml_file_path.unlink()
                 settings.tmp_geopackage.unlink()
