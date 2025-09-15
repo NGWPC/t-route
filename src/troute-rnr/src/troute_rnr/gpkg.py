@@ -76,7 +76,7 @@ def get_rnr_segment(
 
     if filtered_lakes.shape[0] > 0:
         # Ensuring we break connectivity at lakes
-        lake_ids = filtered_lakes["hf_id"].filter(filtered_lakes["hf_id"].is_not_null()).collect()
+        lake_ids = filtered_lakes["hf_id"].filter(filtered_lakes["hf_id"].is_not_null())
         network_rows = mainstem_features.filter(pl.col("hf_id").is_in(lake_ids.implode()))
         upstream_lake = network_rows[
             "hf_hydroseq"
