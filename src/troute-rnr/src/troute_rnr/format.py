@@ -8,7 +8,6 @@ import lxml.etree
 import numpy as np
 import pandas as pd
 import polars as pl
-import s3fs
 import xarray as xr
 import yaml
 
@@ -239,6 +238,8 @@ def format_output_nc(
     if s3_path is None:
         ds.to_netcdf(full_output_path)
     else:
+        import s3fs
+
         fs = s3fs.S3FileSystem()
         fs.touch(s3_path)
         full_output_path = f"{s3_path}/{output_file_name}"
