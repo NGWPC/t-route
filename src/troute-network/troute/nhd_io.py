@@ -2053,15 +2053,6 @@ def write_waterbody_netcdf(
                 }
             )
 
-def combine_lakeouts_to_single_netcdf(
-    wbdy_filepath, 
-    combined_name
-):
-    netcDF_path = str(wbdy_filepath) + '/*LAKEOUT.nc'
-    ds = xr.open_mfdataset(netcDF_path,combine = 'nested', concat_dim="time")
-    combined_file = str(wbdy_filepath) + '/' + combined_name + '.nc'
-    ds.to_netcdf(combined_file)
-
 def write_single_waterbody_netcdf(
     wbdy_filepath, 
     i_df,
