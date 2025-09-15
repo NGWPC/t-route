@@ -2003,7 +2003,7 @@ def write_waterbody_netcdf(
                     varname = "outflow",
                     datatype = "f4",
                     dimensions = ("feature_id"),
-                    fill_value = np.nan
+                    fill_value = -999900 #np.nan
                 )
             outflow[:] = q_df.q.tolist()
             f['outflow'].setncatts(
@@ -2057,21 +2057,8 @@ def combine_lakeouts_to_single_netcdf(
     wbdy_filepath, 
     combined_name
 ):
-    
-    '''
-    Combines all the LAKEOUT netCDF files into a single netCDF file
-        
-    Arguments
-    -------------
-        wbdy_filepath (Path or string) - directory where the LAKEOUT netcdf files are present
-        combined_name (string) - name of the combined netcdf file
-        
-    Returns
-    -------------
-    '''
-    
-    netcDF_path = str(wbdy_filepath) + '/2014*.nc'
-    ds = xr.open_mfdataset(netcDF_path,combine = 'by_coords', concat_dim="time")
+    netcDF_path = str(wbdy_filepath) + '/*LAKEOUT.nc'
+    ds = xr.open_mfdataset(netcDF_path,combine = 'nested', concat_dim="time")
     combined_file = str(wbdy_filepath) + '/' + combined_name + '.nc'
     ds.to_netcdf(combined_file)
 
@@ -2089,11 +2076,12 @@ def write_single_waterbody_netcdf(
 ):
    
     # array of simulation time
-    wbdy_time = np.array([t0 + timedelta(seconds = (time_index[i] + 1) * dt) for i in range(2)]) #time_index
+    wbdy_time = np.array([t0 + timedelta(seconds = (time_index[i] + 1) * dt) for i in range(len(time_index))]) #time_index
     
-    max_i_vals = i_df.max().to_numpy()
-    max_q_vals = q_df.max().to_numpy()
-    max_d_vals = d_df.max().to_numpy()
+    #get the max of all the values for each timestep and store them in a list. 
+    max_i_vals = i_df.max().to_numpy().tolist()
+    max_q_vals = q_df.max().to_numpy().tolist()
+    max_d_vals = d_df.max().to_numpy().tolist()
 
     if wbdy_filepath:
 
@@ -2105,11 +2093,11 @@ def write_single_waterbody_netcdf(
         waterbody_types_df = waterbody_types_df.sort_index()
         wbdy_type = waterbody_types_df.reservoir_type.to_numpy(dtype = 'int32')
 
-        num_files = 2 #i_df.shape[1]
+        num_files = i_df.shape[1]
 
         # open netCDF4 Dataset in write mode
         with netCDF4.Dataset(
-            filename = str(wbdy_filepath) + '/' + '_combined.LAKEOUT.nc',
+            filename = str(wbdy_filepath) + '/' + '_single.nc',
             mode = 'w',
             format = "NETCDF4"
         ) as f:
@@ -2190,7 +2178,7 @@ def write_single_waterbody_netcdf(
             LATITUDE = f.createVariable(
                 varname = "latitude",
                 datatype = 'f4',
-                dimensions = ("feature_id",),
+                dimensions = ("latitude",),
                 fill_value = np.nan
             )
             LATITUDE[:] = waterbodies_df.lat.tolist()
@@ -2206,7 +2194,7 @@ def write_single_waterbody_netcdf(
             LONGITUDE = f.createVariable(
                 varname = "longitude",
                 datatype = 'f4',
-                dimensions = ("feature_id",),
+                dimensions = ("longitude",),
                 fill_value = np.nan
             )
             LONGITUDE[:] = waterbodies_df.lon.tolist()
@@ -2260,7 +2248,7 @@ def write_single_waterbody_netcdf(
             inflow = f.createVariable(
                     varname = "inflow",
                     datatype = "f4",
-                    dimensions = ("feature_id",),
+                    dimensions = ("time","latitude","longitude","feature_id"),
                     fill_value = -999900
                 )
 
@@ -2282,8 +2270,8 @@ def write_single_waterbody_netcdf(
             outflow = f.createVariable(
                     varname = "outflow",
                     datatype = "f4",
-                    dimensions = ("feature_id",),
-                    fill_value = np.nan
+                    dimensions = ("time","latitude","longitude","feature_id"),
+                    fill_value = -999900 #np.nan
                 )
             outflow[:] = max_q_vals
             f['outflow'].setncatts(
@@ -2303,7 +2291,7 @@ def write_single_waterbody_netcdf(
             depth = f.createVariable(
                     varname = "water_sfc_elev",
                     datatype = "f4",
-                    dimensions = ("feature_id",),
+                    dimensions = ("time","latitude","longitude","feature_id"),
                     fill_value = np.nan
                 )
             depth[:] = max_d_vals
@@ -2313,6 +2301,23 @@ def write_single_waterbody_netcdf(
                     'units': 'm',
                     'comment': 'If reservoir_type = 4, water_sfc_elev is invalid because this value corresponds only to level pool',
                     'coordinates': 'latitude longitude'
+                }
+            )
+
+            # =========== GLOBAL ATTRIBUTES ===============  
+            f.setncatts(
+                {
+                    'TITLE': 'OUTPUT FROM T-ROUTE',
+                    'featureType': 'timeSeries',
+                    'proj4': '+proj=lcc +units=m +a=6370000.0 +b=6370000.0 +lat_1=30.0 +lat_2=60.0 +lat_0=40.0 +lon_0=-97.0 +x_0=0 +y_0=0 +k_0=1.0 +nadgrids=@',
+                    'model_initialization_time': t0.strftime('%Y-%m-%d_%H:%M:%S'),
+                    'station_dimension': 'lake_id',
+                    'model_output_valid_time': wbdy_time[0].strftime('%Y-%m-%d_%H:%M:%S'),
+                    'model_total_valid_times': nts,
+                    'Conventions': 'CF-1.6',
+                    'code_version': '',
+                    'model_output_type': 'reservoir',
+                    'model_configuration': ''
                 }
             )
 
