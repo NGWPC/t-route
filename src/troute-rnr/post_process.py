@@ -81,7 +81,7 @@ def post_process(settings: Settings) -> None:
                 file_timestamp = extract_timestamp_from_filename(nc_file.name)
                 # Filter files created within the last 24 hours
                 if (
-                    file_timestamp and twenty_four_hours_ago <= file_timestamp <= current_time
+                    file_timestamp and file_timestamp >= twenty_four_hours_ago
                 ):  # Searches for files with timestamps within the past 24 hours
                     ds = xr.open_dataset(nc_file, engine="netcdf4")
                     write_file = True

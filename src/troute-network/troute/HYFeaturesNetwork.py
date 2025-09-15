@@ -120,7 +120,7 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
 
     # add an "id" column to lakes, by merging with hydrolocations based on "hl_link" (i.e, lake_id in lakes)
     # also, add hl_uri to nexus, by merging with hydrolocations based on nex_id (i.e, id in nexus)
-    if "hydrolocations" in table_dict:
+    if "hydrolocations" in table_dict and not table_dict["hydrolocations"].empty:
         hydro = table_dict["hydrolocations"]
 
         # Filter out non-integer hl_link values and convert to integer (assuming valid lake_id values are integers)
