@@ -358,8 +358,6 @@ def nwm_output_generator(
             time_index
         )
 
-        nhd_io.combine_lakeouts_to_single_netcdf(wbdyo,'__combined_lakeout')
-        
         LOG.info("Output of "+str(num_files)+" waterbody files written to folder: "+str(Path(wbdyo).resolve()))     
         LOG.debug("writing LAKEOUT files took a total time of %s seconds." % (time.time() - start))
     elif wbdyo:
