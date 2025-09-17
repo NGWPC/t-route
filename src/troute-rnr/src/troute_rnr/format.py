@@ -1,5 +1,7 @@
 """Module for handling NWM data processing and NWPS integrations."""
 
+import logging
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -16,6 +18,12 @@ from troute_rnr.gpkg import find_origin
 from troute_rnr.schemas.nwps import ProcessedData, SiteData
 from troute_rnr.schemas.weather import Site
 from troute_rnr.settings import Settings
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", stream=sys.stdout
+)
+
+log = logging.getLogger(__name__)
 
 
 def edit_yaml(original_file: Path, params: dict[str, str], restart_file: Path) -> Path:
@@ -241,6 +249,7 @@ def format_output_nc(
         import s3fs
 
         fs = s3fs.S3FileSystem()
-        full_output_path = f"{s3_path}/{site_data.lid}"
+        s3_output_path = f"{s3_path}/{site_data.lid}"
         fs.touch(s3_path)
-        ds.to_netcdf(f"{full_output_path}/{output_file_name}")
+        log.info(f"Writing file to {s3_output_path}/{output_file_name}")
+        ds.to_netcdf(f"{s3_output_path}/{output_file_name}")
