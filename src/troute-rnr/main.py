@@ -10,7 +10,6 @@ import ssl
 import sys
 from urllib.parse import urlparse
 
-import boto3
 import geopandas as gpd
 import httpx
 import pika
@@ -168,6 +167,8 @@ def consume(
     """
     try:
         if is_iac:
+            import boto3
+
             secret_arn = os.getenv("RABBITMQ_SECRET_ARN")
             region = os.getenv("AWS_REGION", "us-east-1")
             rabbit_mq_endpoint = os.getenv("RABBITMQ_ENDPOINT")
