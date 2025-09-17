@@ -19,7 +19,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-iac = ["s3fs==2025.9.0"]
+iac = [
+    "boto3==1.40.33",
+    "s3fs==2025.9.0",
+]
 
 [build-system]
 requires = ["hatchling"]

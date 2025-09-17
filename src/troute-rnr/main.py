@@ -6,7 +6,11 @@ import logging
 import os
 import shutil
 import socket
+import ssl
+import sys
+from urllib.parse import urlparse
 
+import boto3
 import geopandas as gpd
 import httpx
 import pika
@@ -17,6 +21,12 @@ from troute_rnr import format, read
 from troute_rnr.gpkg import get_rnr_segment
 from troute_rnr.settings import Settings
 from troute_rnr.utils import get
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", stream=sys.stdout
+)
+
+log = logging.getLogger(__name__)
 
 
 def reset_logging():
@@ -38,9 +48,9 @@ class MessageCounter:
     def increment(self):
         """A counter method"""
         self.count += 1
-        print(f"Processed message {self.count}/{self.max_messages}")
+        log.info(f"Processed message {self.count}/{self.max_messages}")
         if self.count >= self.max_messages:
-            print(f"Reached maximum messages ({self.max_messages}). Stopping consumer...")
+            log.info(f"Reached maximum messages ({self.max_messages}). Stopping consumer...")
             if self.channel:
                 self.channel.stop_consuming()
 
@@ -72,7 +82,7 @@ def run(
         the settings of RnR
     """
     hml = json.loads(body.decode())
-    print(f"Reading forecast for {hml['rdf']}, issued at {hml['issuance_time']}")
+    log.info(f"Reading forecast for {hml['rdf']}, issued at {hml['issuance_time']}")
     sites_response = get(hml["rdf"], headers=settings.headers).json()
     try:
         sites = format.format_xml(sites_response["productText"])
@@ -97,25 +107,25 @@ def run(
                         )  # Writes the rnr geopackage to disk
                     yaml_file_path, tmp_flow_files_path = format.format_config(inputs, settings)
                 except IndexError:
-                    print(
+                    log.error(
                         "Cannot find river segments downstream of the RFC point. RnR not available; skipping"
                     )
                     continue
 
-                print("Configs are built. Running T-Route")
+                log.info("Configs are built. Running T-Route")
                 try:
                     t_route(["-f", str(yaml_file_path)])
                     format.format_output_nc(
                         site_data, inputs, yaml_file_path, s3_path=settings.troute_output_path
                     )
                 except IndexError:
-                    print(f"T-Route inflow formatting error for {inputs.lid}. Skipping Routing")
+                    log.error(f"T-Route inflow formatting error for {inputs.lid}. Skipping Routing")
                 except TypeError:
-                    print("Error with YAML file when running t-route")
+                    log.error("Error with YAML file when running t-route")
                 except Exception as e:  # noqa: BLE001
                     # Catching all T-route exceptions in this line
-                    print(f"T-route failed: {e}")
-                print("Closing tmp files")
+                    log.error(f"T-route failed: {e}")
+                log.info("Closing tmp files")
                 yaml_file_path.unlink()
                 settings.tmp_geopackage.unlink()
                 shutil.rmtree(tmp_flow_files_path)
@@ -123,7 +133,7 @@ def run(
                 reset_logging()
 
     except KeyError:
-        print(f"Sites not found. Status: {sites_response}")
+        log.error(f"Sites not found. Status: {sites_response}")
         pass
     finally:
         # Acknowledging message since all HML files are read
@@ -134,7 +144,10 @@ def run(
 
 
 def consume(
-    settings: Settings, layers: dict[str, pl.LazyFrame], hml_message_counter: MessageCounter | None = None
+    settings: Settings,
+    layers: dict[str, pl.LazyFrame],
+    hml_message_counter: MessageCounter | None = None,
+    is_iac: bool = False,
 ) -> None:
     """
     The message consumer interfacing with RabbitMQ
@@ -154,16 +167,48 @@ def consume(
         If connection attempt times out
     """
     try:
-        # Set connection parameters with timeout
-        connection_params = pika.URLParameters(settings.pika_url)
-        connection_params.socket_timeout = 10  # 10-second timeout for connection
+        if is_iac:
+            secret_arn = os.getenv("RABBITMQ_SECRET_ARN")
+            region = os.getenv("AWS_REGION", "us-east-1")
+            rabbit_mq_endpoint = os.getenv("RABBITMQ_ENDPOINT")
 
-        # Attempt connection with timeout
-        connection = pika.BlockingConnection(connection_params)
-        channel = connection.channel()
+            if secret_arn is None:
+                raise ValueError("Cannot find RABBITMQ_SECRET_ARN")
+            if rabbit_mq_endpoint is None:
+                raise ValueError("Cannot find RABBITMQ_ENDPOINT")
+
+            client = boto3.client("secretsmanager", region_name=region)
+            secret_value = client.get_secret_value(SecretId=secret_arn)
+            secret = json.loads(secret_value["SecretString"])
+            user = secret["username"]
+            pwd = secret["password"]
+            creds = pika.PlainCredentials(user, pwd)
+            url = urlparse(settings.rabbit_mq_endpoint)
+            context = ssl.create_default_context()
+            vhost = url.path.strip("/") if url.path.strip("/") else "/"
+            conn = pika.BlockingConnection(
+                pika.ConnectionParameters(
+                    host=url.hostname,
+                    port=url.port,
+                    virtual_host=vhost,
+                    credentials=creds,
+                    ssl_options=pika.SSLOptions(context),
+                    heartbeat=30,
+                    blocked_connection_timeout=300,
+                )
+            )
+            channel = conn.channel()
+        else:
+            # Set connection parameters with timeout
+            connection_params = pika.URLParameters(settings.pika_url)
+            connection_params.socket_timeout = 10  # 10-second timeout for connection
+
+            # Attempt connection with timeout
+            connection = pika.BlockingConnection(connection_params)
+            channel = connection.channel()
         channel.queue_declare(queue=settings.flooded_data_queue, durable=True)
-        print(f" [*] Waiting for messages from Queue on URL: {settings.pika_url}.")
-        print(" [*] Be sure HML files are populated in the Message Queue")
+        log.info(f" [*] Waiting for messages from Queue on URL: {settings.pika_url}.")
+        log.info(" [*] Be sure HML files are populated in the Message Queue")
         channel.basic_qos(prefetch_count=1)
         hml_message_counter.channel = channel
 
@@ -176,13 +221,13 @@ def consume(
         try:
             channel.start_consuming()
         except KeyboardInterrupt:
-            print("\n [*] Stopping consumer due to keyboard interrupt...")
+            log.error("\n [*] Stopping consumer due to keyboard interrupt...")
             channel.stop_consuming()
-        print(f" [*] Processed {hml_message_counter.max_messages} forecasts. Closing connection.")
+        log.info(f" [*] Processed {hml_message_counter.max_messages} forecasts. Closing connection.")
         connection.close()
     except (pika.exceptions.AMQPConnectionError, socket.timeout) as e:
-        print(f" [!] Failed to connect to RabbitMQ: {e}")
-        print(" [!] Service is not running - check RabbitMQ connection from Hydrovis")
+        log.error(f" [!] Failed to connect to RabbitMQ: {e}")
+        log.error(" [!] Service is not running - check RabbitMQ connection from Hydrovis")
 
 
 if __name__ == "__main__":
@@ -193,9 +238,9 @@ if __name__ == "__main__":
     parser.add_argument("--iac", type=bool, default=False, help="If this code is to be run through IaC")
     args = parser.parse_args()
     if args.num_hml_files is None:
-        print(" [*] Running T-Route for all messages in the queue")
+        log.info(" [*] Running T-Route for all messages in the queue")
     else:
-        print(f" [*] Running T-Route for {args.num_hml_files} forecasts")
+        log.info(f" [*] Running T-Route for {args.num_hml_files} forecasts")
     hml_message_counter = MessageCounter(args.num_hml_files)
     settings = Settings()
     if args.iac:
@@ -232,4 +277,4 @@ if __name__ == "__main__":
             "pois": pl.scan_parquet(settings.data_dir / "parquet/pois.parquet"),
         }
         settings.troute_output_path = None
-    consume(settings, layers, hml_message_counter=hml_message_counter)
+    consume(settings, layers, hml_message_counter=hml_message_counter, is_iac=args.iac)
