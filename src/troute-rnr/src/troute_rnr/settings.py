@@ -61,7 +61,7 @@ class Settings:
         self.restart_path.mkdir(exist_ok=True)
 
         self.output_files_path = project_root / "data/output/"
-        self.output_files_path.mkdir(exist_ok=True)
+        self.output_files_path.mkdir(parents=True, exist_ok=True)
 
         if os.getenv("RABBITMQ_HOST"):
             self.rabbitmq_host = os.getenv("RABBITMQ_HOST")
