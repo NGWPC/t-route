@@ -325,26 +325,25 @@ def nwm_output_generator(
             output_waterbodies_df = waterbodies_df
             output_waterbody_types_df = waterbody_types_df
         num_files = i_df.shape[1]
-        LOG.info("Output of "+str(num_files)+" waterbody files to be written to folder: "+str(Path(wbdyo).resolve()))     
+        LOG.info("Single NetCDF Output of "+str(num_files)+" timesteps to be written to folder: "+str(Path(wbdyo).resolve()))     
         start = time.time()
-        LOG.info("Range = " + str(range(i_df.shape[1])))
-        LOG.info(list(i_df.columns))
-        
-        for i in range(i_df.shape[1]):              
-            nhd_io.write_waterbody_netcdf(
-                wbdyo, 
-                i_df.iloc[:,[i]],
-                q_df.iloc[:,[i]],
-                d_df.iloc[:,[i]],
-                output_waterbodies_df,
-                output_waterbody_types_df,
-                t0, 
-                dt, 
-                nts,
-                time_index[i]
-            )
+
+        #Suppress the following function call if you don't need individual timestep netcdfs.
+        #This function can potentially be useful for debugging.
+        # for i in range(i_df.shape[1]):              
+        #     nhd_io.write_waterbody_netcdf(
+        #         wbdyo, 
+        #         i_df.iloc[:,[i]],
+        #         q_df.iloc[:,[i]],
+        #         d_df.iloc[:,[i]],
+        #         output_waterbodies_df,
+        #         output_waterbody_types_df,
+        #         t0, 
+        #         dt, 
+        #         nts,
+        #         time_index[i]
+        #     )
  
-           
         nhd_io.write_single_waterbody_netcdf(
             wbdyo, 
             i_df,
@@ -358,7 +357,7 @@ def nwm_output_generator(
             time_index
         )
 
-        LOG.info("Output of "+str(num_files)+" waterbody files written to folder: "+str(Path(wbdyo).resolve()))     
+        LOG.info("Single NetCDF Output of "+str(num_files)+" timesteps written to folder: "+str(Path(wbdyo).resolve()))     
         LOG.debug("writing LAKEOUT files took a total time of %s seconds." % (time.time() - start))
     elif wbdyo:
         LOG.warning("Requested LAKEOUT files not written. waterbodies_df is empty. Verify gage basin has a waterbody.")
