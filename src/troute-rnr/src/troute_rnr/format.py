@@ -47,8 +47,9 @@ def edit_yaml(original_file: Path, params: dict[str, str], restart_file: Path) -
     with open(original_file) as file:
         data = yaml.safe_load(file)
 
+    params["output_folder"]
     output_dir = params["output_folder"] / params["lid"]
-    output_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     data["network_topology_parameters"]["supernetwork_parameters"]["geo_file_path"] = str(
         params["geo_file_path"]

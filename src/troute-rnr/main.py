@@ -236,7 +236,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num-hml-files", type=int, help="The number of hml files to be read from the message queue"
     )
-    parser.add_argument("--iac", type=bool, default=False, help="If this code is to be run through IaC")
+    parser.add_argument("--iac", action="store_true", help="If true this code is to be run as IaC")
     args = parser.parse_args()
     if args.num_hml_files is None:
         log.info(" [*] Running T-Route for all messages in the queue")
