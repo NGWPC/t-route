@@ -184,7 +184,7 @@ def consume(
             user = secret["username"]
             pwd = secret["password"]
             creds = pika.PlainCredentials(user, pwd)
-            url = urlparse(settings.rabbit_mq_endpoint)
+            url = urlparse(rabbit_mq_endpoint)
             context = ssl.create_default_context()
             vhost = url.path.strip("/") if url.path.strip("/") else "/"
             conn = pika.BlockingConnection(
