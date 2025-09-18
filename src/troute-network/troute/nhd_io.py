@@ -845,8 +845,7 @@ def read_netcdfs(paths, dim, transform_func=None):
 
     datasets = [process_one_path(p) for p in paths]
     combined = xr.concat(datasets, dim, combine_attrs = "override")
-    return combined
-    
+    return combined    
 
 
 def preprocess_time_station_index(xd):
@@ -2003,7 +2002,7 @@ def write_waterbody_netcdf(
                     varname = "outflow",
                     datatype = "f4",
                     dimensions = ("feature_id"),
-                    fill_value = -999900 #np.nan
+                    fill_value = np.nan
                 )
             outflow[:] = q_df.q.tolist()
             f['outflow'].setncatts(
@@ -2303,7 +2302,6 @@ def write_single_waterbody_netcdf(
                     'proj4': '+proj=lcc +units=m +a=6370000.0 +b=6370000.0 +lat_1=30.0 +lat_2=60.0 +lat_0=40.0 +lon_0=-97.0 +x_0=0 +y_0=0 +k_0=1.0 +nadgrids=@',
                     'model_initialization_time': t0.strftime('%Y-%m-%d_%H:%M:%S'),
                     'station_dimension': 'lake_id',
-                    'model_output_valid_time': wbdy_time[0].strftime('%Y-%m-%d_%H:%M:%S'),
                     'model_total_valid_times': nts,
                     'Conventions': 'CF-1.6',
                     'code_version': '',
