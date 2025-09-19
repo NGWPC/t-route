@@ -22,10 +22,6 @@ from troute_rnr.logging import log_function_debug
 from troute_rnr.settings import Settings
 from troute_rnr.utils import get
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", stream=sys.stdout
-)
-
 log = logging.getLogger(__name__)
 
 
@@ -241,7 +237,22 @@ if __name__ == "__main__":
         "--num-hml-files", type=int, help="The number of hml files to be read from the message queue"
     )
     parser.add_argument("--iac", action="store_true", help="If true this code is to be run as IaC")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+
     args = parser.parse_args()
+
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.getLogger().setLevel(log_level)
+
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+
+    log = logging.getLogger(__name__)
+
     if args.num_hml_files is None:
         log.info(" [*] Running T-Route for all messages in the queue")
     else:
@@ -249,13 +260,6 @@ if __name__ == "__main__":
     hml_message_counter = MessageCounter(args.num_hml_files)
     settings = Settings()
     if args.iac:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            stream=sys.stdout,
-        )
-
-        log = logging.getLogger(__name__)
         bucket_name = os.getenv("APP_BUCKET_NAME")
         troute_output_path = os.getenv("APP_OUTPUT_S3_KEY")
         if not troute_output_path:

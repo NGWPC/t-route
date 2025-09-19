@@ -1,14 +1,9 @@
 import logging
-import sys
 
 import numpy as np
 import pandas as pd
 
 from troute_rnr.logging import log_function_debug
-
-logging.basicConfig(
-    level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", stream=sys.stdout
-)
 
 log = logging.getLogger(__name__)
 
