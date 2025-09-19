@@ -277,7 +277,9 @@ if __name__ == "__main__":
             ),
             "divides": pl.scan_parquet(f"s3://{bucket_name}/{hydrofabric_path}/divides.parquet"),
             "nexus": pl.scan_parquet(f"s3://{bucket_name}/{hydrofabric_path}/nexus.parquet"),
-            "flowpath_attr": pl.scan_parquet(f"s3://{bucket_name}/{hydrofabric_path}/flowpath_attr.parquet"),
+            "flowpath_attr": pl.scan_parquet(
+                f"s3://{bucket_name}/{hydrofabric_path}/flowpath-attributes.parquet"
+            ),
             "pois": pl.scan_parquet(f"s3://{bucket_name}/{hydrofabric_path}/pois.parquet"),
         }
         settings.troute_output_path = f"s3://{bucket_name}/{troute_output_path}"
