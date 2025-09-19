@@ -18,6 +18,7 @@ from nwm_routing.__main__ import main_v04 as t_route
 from pydantic import ValidationError
 from troute_rnr import format, read
 from troute_rnr.gpkg import get_rnr_segment
+from troute_rnr.logging import log_function_debug
 from troute_rnr.settings import Settings
 from troute_rnr.utils import get
 
@@ -28,6 +29,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+@log_function_debug()
 def reset_logging():
     """T-Route sets the logging level to INFO. This resets to WARNING"""
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -54,6 +56,7 @@ class MessageCounter:
                 self.channel.stop_consuming()
 
 
+@log_function_debug()
 def run(
     ch: pika.channel.Channel,
     method: pika.spec.Basic.Deliver,
@@ -142,6 +145,7 @@ def run(
             hml_message_counter.increment()
 
 
+@log_function_debug()
 def consume(
     settings: Settings,
     layers: dict[str, pl.LazyFrame],
@@ -245,6 +249,13 @@ if __name__ == "__main__":
     hml_message_counter = MessageCounter(args.num_hml_files)
     settings = Settings()
     if args.iac:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            stream=sys.stdout,
+        )
+
+        log = logging.getLogger(__name__)
         bucket_name = os.getenv("APP_BUCKET_NAME")
         troute_output_path = os.getenv("APP_OUTPUT_S3_KEY")
         if not troute_output_path:

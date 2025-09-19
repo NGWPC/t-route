@@ -15,17 +15,19 @@ import yaml
 
 from troute_rnr import write
 from troute_rnr.gpkg import find_origin
+from troute_rnr.logging import log_function_debug
 from troute_rnr.schemas.nwps import ProcessedData, SiteData
 from troute_rnr.schemas.weather import Site
 from troute_rnr.settings import Settings
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", stream=sys.stdout
+    level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", stream=sys.stdout
 )
 
 log = logging.getLogger(__name__)
 
 
+@log_function_debug()
 def edit_yaml(original_file: Path, params: dict[str, str], restart_file: Path) -> Path:
     """A function to dynamically edit the T-Route config
 
@@ -68,6 +70,7 @@ def edit_yaml(original_file: Path, params: dict[str, str], restart_file: Path) -
     return tmp_yaml
 
 
+@log_function_debug()
 def create_initial_start_file(params: dict[str, str], settings: Settings) -> Path:
     """Creating the initial start/restart files
 
@@ -114,6 +117,7 @@ def create_initial_start_file(params: dict[str, str], settings: Settings) -> Pat
     return restart_file
 
 
+@log_function_debug()
 def format_config(inputs: ProcessedData, settings: Settings) -> tuple[Path, Path]:
     """
     Create the configuration required for T-Route.
@@ -166,6 +170,7 @@ def format_config(inputs: ProcessedData, settings: Settings) -> tuple[Path, Path
     return yaml_file_path, tmp_flow_files_path
 
 
+@log_function_debug()
 def format_xml(product_text: str) -> list[Site]:
     """
     Format product text from HML into valid XML segments.
@@ -197,6 +202,7 @@ def format_xml(product_text: str) -> list[Site]:
     return sites
 
 
+@log_function_debug()
 def format_output_nc(
     site_data: SiteData, inputs: ProcessedData, yaml_file_path: Path, s3_path: str | None
 ) -> None:

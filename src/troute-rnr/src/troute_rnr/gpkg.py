@@ -1,10 +1,22 @@
 """A file to hold all replace and route (RnR) geospatial scripts"""
 
+import logging
+import sys
+
 import geopandas as gpd
 import pandas as pd
 import polars as pl
 
+from troute_rnr.logging import log_function_debug
 
+logging.basicConfig(
+    level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", stream=sys.stdout
+)
+
+log = logging.getLogger(__name__)
+
+
+@log_function_debug()
 def to_geopandas(df: pd.DataFrame, crs: str = "EPSG:5070") -> gpd.GeoDataFrame:
     """Converts the geometries in a pandas df to a geopandas dataframe
 
@@ -31,6 +43,7 @@ def to_geopandas(df: pd.DataFrame, crs: str = "EPSG:5070") -> gpd.GeoDataFrame:
     return gpd.GeoDataFrame(df, geometry=gpd.GeoSeries.from_wkb(df["geometry"]), crs=crs)
 
 
+@log_function_debug()
 def get_rnr_segment(
     layers: dict[str, pl.LazyFrame], reach_id: str
 ) -> dict[str, pd.DataFrame | gpd.GeoDataFrame]:
@@ -126,6 +139,7 @@ def get_rnr_segment(
     return layers
 
 
+@log_function_debug()
 def find_origin(
     network_table: pl.LazyFrame,
     identifier: str | float,
