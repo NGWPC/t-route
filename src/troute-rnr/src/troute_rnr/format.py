@@ -113,7 +113,9 @@ def create_initial_start_file(params: dict[str, str], settings: Settings) -> Pat
 
 
 @log_function_debug()
-def format_config(inputs: ProcessedData, settings: Settings) -> tuple[Path, Path]:
+def format_config(
+    inputs: ProcessedData, settings: Settings, layers: dict[str, pl.LazyFrame]
+) -> tuple[Path, Path]:
     """
     Create the configuration required for T-Route.
 
@@ -130,7 +132,7 @@ def format_config(inputs: ProcessedData, settings: Settings) -> tuple[Path, Path
         The path to the YAML config file and flow files directory
     """
     reach = inputs.reach
-    network = pl.scan_parquet(settings.data_dir / "parquet/network.parquet")
+    network = layers["network"]
 
     hy_id = find_origin(network_table=network, identifier=reach.id).split("-")[1]
     tmp_flow_files_path = settings.tmp_flow_files_path / inputs.lid

@@ -103,7 +103,7 @@ def run(
                         gpd.GeoDataFrame(layer).to_file(
                             settings.tmp_geopackage, layer=table, driver="GPKG"
                         )  # Writes the rnr geopackage to disk
-                    yaml_file_path, tmp_flow_files_path = format.format_config(inputs, settings)
+                    yaml_file_path, tmp_flow_files_path = format.format_config(inputs, settings, layers)
                 except IndexError:
                     log.error(
                         "Cannot find river segments downstream of the RFC point. RnR not available; skipping"
