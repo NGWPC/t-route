@@ -1,16 +1,26 @@
 """Module for handling NWM data processing and NWPS integrations."""
 
+import logging
+import sys
 from datetime import datetime
 
 import httpx
 from pydantic import ValidationError
 
+from troute_rnr.logging import log_function_debug
 from troute_rnr.schemas.nwps import ProcessedData, Reach, SiteData
 from troute_rnr.schemas.weather import Site
 from troute_rnr.settings import Settings
 from troute_rnr.utils import get
 
+logging.basicConfig(
+    level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", stream=sys.stdout
+)
 
+log = logging.getLogger(__name__)
+
+
+@log_function_debug()
 def convert_to_m3_per_sec(forecast: list[float], unit: str) -> tuple[list[float], str]:
     """Convert forecast units to m3/s.
 
@@ -34,6 +44,7 @@ def convert_to_m3_per_sec(forecast: list[float], unit: str) -> tuple[list[float]
         raise ValueError(f"Unit conversion not supported for {unit}")
 
 
+@log_function_debug()
 def read_site_data(site: Site, settings: Settings) -> SiteData | None:
     """Retrieves gauge data from the NWPS API for a specific site and validates it meets flood criteria.
 
@@ -82,6 +93,7 @@ def read_site_data(site: Site, settings: Settings) -> SiteData | None:
         raise httpx.HTTPStatusError(msg) from e
 
 
+@log_function_debug()
 def read_rfc_flows(forecast: SiteData, settings: Settings) -> ProcessedData | None:
     """
     Pull National Water Model inputs for a given forecast.
