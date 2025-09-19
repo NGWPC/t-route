@@ -252,8 +252,10 @@ def format_output_nc(
     else:
         import boto3
 
+        ds.to_netcdf(full_output_path)
+
         s3_client = boto3.client("s3")
 
-        output_s3_key = f"{settings.troute_output_path}/{site_data.lid}"
-        s3_client.upload_file(Filename=output_file_name, Bucket=settings.bucket_name, Key=output_s3_key)
-        log.info(f"Wrote {output_file_name} to {settings.bucket_name} with key: {output_s3_key}")
+        output_s3_key = f"{settings.troute_output_path}/{site_data.lid}/{output_file_name}"
+        s3_client.upload_file(Filename=str(full_output_path), Bucket=settings.bucket_name, Key=output_s3_key)
+        log.info(f"Wrote {output_file_name} to s3://{settings.bucket_name}/{output_s3_key}")
