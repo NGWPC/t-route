@@ -201,7 +201,7 @@ def format_xml(product_text: str) -> list[Site]:
 
 @log_function_debug()
 def format_output_nc(
-    site_data: SiteData, inputs: ProcessedData, yaml_file_path: Path, s3_path: str | None
+    site_data: SiteData, inputs: ProcessedData, yaml_file_path: Path, settings: Settings
 ) -> None:
     """Formats the output .nc file to contain flood/RFC metadata
 
@@ -247,13 +247,15 @@ def format_output_nc(
     ds.attrs["state"] = site_data.state.abbreviation
     ds.attrs["name"] = site_data.name
 
-    if s3_path is None:
+    if settings.bucket_name is None:
         ds.to_netcdf(full_output_path)
     else:
-        import s3fs
+        import boto3
 
-        fs = s3fs.S3FileSystem()
-        s3_output_path = f"{s3_path}/{site_data.lid}"
-        fs.touch(s3_path)
-        log.info(f"Writing file to {s3_output_path}/{output_file_name}")
-        ds.to_netcdf(f"{s3_output_path}/{output_file_name}")
+        ds.to_netcdf(full_output_path)
+
+        s3_client = boto3.client("s3")
+
+        output_s3_key = f"{settings.troute_output_path}/{site_data.lid}/{output_file_name}"
+        s3_client.upload_file(Filename=str(full_output_path), Bucket=settings.bucket_name, Key=output_s3_key)
+        log.info(f"Wrote {output_file_name} to s3://{settings.bucket_name}/{output_s3_key}")

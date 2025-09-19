@@ -24,6 +24,8 @@ from troute_rnr.utils import get
 
 log = logging.getLogger(__name__)
 
+GLOBAL_LOG_LEVEL = logging.INFO
+
 
 @log_function_debug()
 def reset_logging():
@@ -32,6 +34,9 @@ def reset_logging():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpcore.connection").setLevel(logging.WARNING)
     logging.getLogger("httpcore.http11").setLevel(logging.WARNING)
+
+    global GLOBAL_LOG_LEVEL
+    logging.getLogger().setLevel(GLOBAL_LOG_LEVEL)
 
 
 class MessageCounter:
@@ -113,9 +118,7 @@ def run(
                 log.info("Configs are built. Running T-Route")
                 try:
                     t_route(["-f", str(yaml_file_path)])
-                    format.format_output_nc(
-                        site_data, inputs, yaml_file_path, s3_path=settings.troute_output_path
-                    )
+                    format.format_output_nc(site_data, inputs, yaml_file_path, settings)
                 except IndexError:
                     log.error(f"T-Route inflow formatting error for {inputs.lid}. Skipping Routing")
                 except TypeError:
@@ -241,11 +244,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    log_level = logging.DEBUG if args.debug else logging.INFO
-    logging.getLogger().setLevel(log_level)
+    GLOBAL_LOG_LEVEL = logging.DEBUG if args.debug else logging.INFO
+    logging.getLogger().setLevel(GLOBAL_LOG_LEVEL)
 
     logging.basicConfig(
-        level=log_level,
+        level=GLOBAL_LOG_LEVEL,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         stream=sys.stdout,
         force=True,
@@ -282,7 +285,8 @@ if __name__ == "__main__":
             ),
             "pois": pl.scan_parquet(f"s3://{bucket_name}/{hydrofabric_path}/pois.parquet"),
         }
-        settings.troute_output_path = f"s3://{bucket_name}/{troute_output_path}"
+        settings.bucket_name = bucket_name
+        settings.troute_output_path = troute_output_path
     else:
         layers = {
             "network": pl.scan_parquet(settings.data_dir / "parquet/network.parquet"),
@@ -294,5 +298,6 @@ if __name__ == "__main__":
             "flowpath_attr": pl.scan_parquet(settings.data_dir / "parquet/flowpath-attributes.parquet"),
             "pois": pl.scan_parquet(settings.data_dir / "parquet/pois.parquet"),
         }
+        settings.bucket_name = None
         settings.troute_output_path = None
     consume(settings, layers, hml_message_counter=hml_message_counter, is_iac=args.iac)
