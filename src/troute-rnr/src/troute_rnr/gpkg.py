@@ -1,17 +1,12 @@
 """A file to hold all replace and route (RnR) geospatial scripts"""
 
 import logging
-import sys
 
 import geopandas as gpd
 import pandas as pd
 import polars as pl
 
 from troute_rnr.logging import log_function_debug
-
-logging.basicConfig(
-    level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", stream=sys.stdout
-)
 
 log = logging.getLogger(__name__)
 

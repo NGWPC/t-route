@@ -1,7 +1,6 @@
 """Module for handling NWM data processing and NWPS integrations."""
 
 import logging
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -19,10 +18,6 @@ from troute_rnr.logging import log_function_debug
 from troute_rnr.schemas.nwps import ProcessedData, SiteData
 from troute_rnr.schemas.weather import Site
 from troute_rnr.settings import Settings
-
-logging.basicConfig(
-    level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", stream=sys.stdout
-)
 
 log = logging.getLogger(__name__)
 
