@@ -329,7 +329,7 @@ def nwm_output_generator(
         start = time.time()
 
         #Suppress the following function call if you don't need individual timestep netcdfs.
-        #This function can potentially be useful for debugging.
+        #This function can potentially be useful for debugging. So left it here and in nhd_io.py
         # for i in range(i_df.shape[1]):              
         #     nhd_io.write_waterbody_netcdf(
         #         wbdyo, 
