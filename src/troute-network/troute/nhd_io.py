@@ -2087,7 +2087,7 @@ def write_single_waterbody_netcdf(
 
         # open netCDF4 Dataset in write mode
         with netCDF4.Dataset(
-            filename = str(wbdy_filepath) + '/' + '_single.nc',
+            filename = str(wbdy_filepath) + '/' + str(wbdy_feature_id) + '.LAKEOUT.nc',
             mode = 'w',
             format = "NETCDF4"
         ) as f:
