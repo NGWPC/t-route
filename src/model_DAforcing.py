@@ -135,21 +135,22 @@ class DAforcing_model():
                                                                  900, #15 minutes
                                                                  cpu_pool,)
 
+            # Produce list of datetimes to search for timeseries files
+            rfc_parameters = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_rfc_da', {})
+            lookback_hrs = rfc_parameters.get('reservoir_rfc_forecasts_lookback_hours')
+            offset_hrs = rfc_parameters.get('reservoir_rfc_forecasts_offset_hours')
+            timeseries_end = start_datetime + timedelta(hours=offset_hrs)
+            timeseries_start = timeseries_end - timedelta(hours=lookback_hrs)
+            delta = timedelta(hours=1)
+            timeseries_dates = []
+            while timeseries_start <= timeseries_end:
+                timeseries_dates.append(timeseries_start.strftime('%Y-%m-%d_%H'))
+                timeseries_start += delta
+            rfc_forecast_persist_days = rfc_parameters.get('reservoir_rfc_forecast_persist_days')
+            final_persist_datetime = start_datetime + timedelta(days=rfc_forecast_persist_days)
+
             # RFC Observations
             if rfc:
-                # Produce list of datetimes to search for timeseries files
-                rfc_parameters = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_rfc_da', {})
-                lookback_hrs = rfc_parameters.get('reservoir_rfc_forecasts_lookback_hours')
-                offset_hrs = rfc_parameters.get('reservoir_rfc_forecasts_offset_hours')
-                timeseries_end = start_datetime + timedelta(hours=offset_hrs)
-                timeseries_start = timeseries_end - timedelta(hours=lookback_hrs)
-                delta = timedelta(hours=1)
-                timeseries_dates = []
-                while timeseries_start <= timeseries_end:
-                    timeseries_dates.append(timeseries_start.strftime('%Y-%m-%d_%H'))
-                    timeseries_start += delta
-                rfc_forecast_persist_days = rfc_parameters.get('reservoir_rfc_forecast_persist_days')
-                final_persist_datetime = start_datetime + timedelta(days=rfc_forecast_persist_days)
                 rfc_timeseries_path = str(rfc_parameters.get('reservoir_rfc_forecasts_time_series_path'))
                 self._rfc_timeseries_df = _read_timeseries_files(rfc_timeseries_path, timeseries_dates, start_datetime, final_persist_datetime)
 
