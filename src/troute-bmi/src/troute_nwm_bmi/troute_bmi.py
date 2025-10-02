@@ -4,6 +4,7 @@ from bmipy import Bmi
 
 from .troute_model import Model
 
+_COUNT_SUFFIX = "__count"
 
 _VAR_NAME_UNITS_MAP = {
     'land_surface_water_source__volume_flow_rate': ['streamflow_cms', 'm3 s-1'],
@@ -50,12 +51,9 @@ class BmiTroute(Bmi):
         src : array_like
             Array of new values.
         """
-        #val = self.get_value_ptr(var_name)
-        #val[:] = src.reshape(val.shape)
-
         # special case for changing data size 
-        if var_name.endswith("__count"):
-            source_var_name = var_name[:-7]
+        if var_name.endswith(_COUNT_SUFFIX):
+            source_var_name = var_name[:-len(_COUNT_SUFFIX)]
             source = self._values.get(source_var_name)
             self._values[source_var_name] = np.resize(source, int(src[0]))
         else:
@@ -86,8 +84,8 @@ class BmiTroute(Bmi):
         array_like
             Value array.
         """
-        if var_name.endswith("__count"):
-            source_var_name = var_name[:-7]
+        if var_name.endswith(_COUNT_SUFFIX):
+            source_var_name = var_name[:-len(_COUNT_SUFFIX)]
             source = self._values[source_var_name]
             return np.array([len(source)], dtype=np.int64)
         else:
