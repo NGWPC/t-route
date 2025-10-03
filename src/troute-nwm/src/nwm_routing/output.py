@@ -383,8 +383,9 @@ def nwm_output_generator(
             nts,
             time_index_list
         )
-        LOG.info("There are no waterbodies in the basin. Single NetCDF Output with all zero values written to folder: "+str(Path(wbdyo).resolve()))
-        #LOG.warning("Requested LAKEOUT files not written. waterbodies_df is empty. Verify gage basin has a waterbody.")
+        LOG.warning("lakeout_output specified with no waterbodies in the basin.")
+        LOG.info("Waterbody output (troute_lakeout.nc) written to folder: "+str(Path(wbdyo).resolve()))
+        
     
     if rsrto:
 
