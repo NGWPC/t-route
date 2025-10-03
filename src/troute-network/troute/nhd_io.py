@@ -2076,9 +2076,6 @@ def write_single_waterbody_netcdf(
         max_q_vals = q_df.max().to_numpy().tolist()
         max_d_vals = d_df.max().to_numpy().tolist()
 
-        wbdy_time = np.array([t0 + timedelta(seconds = (time_index[i] + 1) * dt) for i in range(len(time_index))]) #time_index
-        num_timesteps = len(wbdy_time) #for number of timesteps
-
         # array of segment linkIDs at gage locations. Results from these segments will be written
         waterbodies_df = waterbodies_df[['lat','lon','crs']].sort_index()
         wbdy_feature_id = waterbodies_df.index.to_numpy(dtype = "int64")
