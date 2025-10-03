@@ -314,10 +314,14 @@ def nwm_output_generator(
     if test:
         flowveldepth.to_pickle(Path(test))
     
+    #dropping all data from waterbodies_df for testing. The line below should be deleted before merging.
+    #waterbodies_df = pd.DataFrame(columns=waterbodies_df.columns)
+
     if wbdyo and not waterbodies_df.empty:
         LOG.debug("Writing waterbody output.")
         
         time_index, tmp_variable = map(list,zip(*i_df.columns.tolist()))
+        LOG.info(i_df.head(5))
         if not duplicate_ids_df.empty:
             output_waterbodies_df = waterbodies_df.rename(index=dict(duplicate_ids_df[['synthetic_ids','lake_id']].values))
             output_waterbody_types_df = waterbody_types_df.rename(index=dict(duplicate_ids_df[['synthetic_ids','lake_id']].values))
@@ -356,11 +360,31 @@ def nwm_output_generator(
             nts,
             time_index
         )
-
         LOG.info("Single NetCDF Output of "+str(num_files)+" timesteps written to folder: "+str(Path(wbdyo).resolve()))     
         LOG.debug("writing LAKEOUT files took a total time of %s seconds." % (time.time() - start))
-    elif wbdyo:
-        LOG.warning("Requested LAKEOUT files not written. waterbodies_df is empty. Verify gage basin has a waterbody.")
+    elif wbdyo and waterbodies_df.empty:
+        #this portion of the code is used to create lakeout nc files with zero values.
+        df_empty = pd.DataFrame() #empty dataframes for all inputs
+
+        #use one of the nexus output files to read the timestep datetimes
+        pattern = "nex-*.csv"
+        first_nex_file = next(Path(wbdyo).glob(pattern))
+        df = pd.read_csv(first_nex_file)
+        time_index_list = df.iloc[:,1].str.strip().tolist()
+        nhd_io.write_single_waterbody_netcdf(
+            wbdyo, 
+            df_empty,
+            df_empty,
+            df_empty,
+            df_empty,
+            df_empty,
+            t0, 
+            dt, 
+            nts,
+            time_index_list
+        )
+        LOG.info("There are no waterbodies in the basin. Single NetCDF Output with all zero values written to folder: "+str(Path(wbdyo).resolve()))
+        #LOG.warning("Requested LAKEOUT files not written. waterbodies_df is empty. Verify gage basin has a waterbody.")
     
     if rsrto:
 
