@@ -314,7 +314,6 @@ def nwm_output_generator(
     if test:
         flowveldepth.to_pickle(Path(test))
     
- 
     if wbdyo: #if lakeout_output is present in the YAML file
         start_time = time.time()
         num_timesteps = 0
@@ -383,7 +382,9 @@ def nwm_output_generator(
         LOG.info("Wrote "+str(num_timesteps)+" timesteps to waterbody netcdf output.") 
         LOG.info("Waterbody output written to folder: "+str(Path(wbdyo).resolve()))
         LOG.info("Writing LAKEOUT netcdf file took a total time of %s seconds." % (end_time - start_time))    
-    
+    elif not waterbodies_df.empty:
+        LOG.warning("At least 1 waterbody present in basin but lakeout_output not specified in t-route config YAML file. Waterbody data not saved.")
+
     if rsrto:
 
         LOG.info("- writing restart files")
