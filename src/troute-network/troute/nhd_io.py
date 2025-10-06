@@ -2064,7 +2064,7 @@ def write_single_waterbody_netcdf(
     nts,
     time_index
 ):
-   
+    netcdfname = 'troute_lakeout_' + t0.strftime('%Y%m%d%H%M') + '.nc'
 
     if not i_df.empty:
         # array of simulation time
@@ -2096,7 +2096,7 @@ def write_single_waterbody_netcdf(
 
     # open netCDF4 Dataset in write mode
     with netCDF4.Dataset(
-        filename = str(wbdy_filepath) + '/' + 'troute_lakeout.nc',
+        filename = str(wbdy_filepath) + '/' + netcdfname,
         mode = 'w',
         format = "NETCDF4"
     ) as f:
