@@ -314,24 +314,19 @@ def nwm_output_generator(
     if test:
         flowveldepth.to_pickle(Path(test))
     
-    #dropping all data from waterbodies_df for testing. The line below should be deleted before merging.
-    #waterbodies_df = pd.DataFrame(columns=waterbodies_df.columns)
-
+    start = time.time()
+    LOG.info("Waterbody output to be written to folder: "+str(Path(wbdyo).resolve()))   
+    num_timesteps = 0
     if wbdyo and not waterbodies_df.empty:
-        LOG.debug("Writing waterbody output.")
-        
         time_index, tmp_variable = map(list,zip(*i_df.columns.tolist()))
-        LOG.info(i_df.head(5))
         if not duplicate_ids_df.empty:
             output_waterbodies_df = waterbodies_df.rename(index=dict(duplicate_ids_df[['synthetic_ids','lake_id']].values))
             output_waterbody_types_df = waterbody_types_df.rename(index=dict(duplicate_ids_df[['synthetic_ids','lake_id']].values))
         else:
             output_waterbodies_df = waterbodies_df
             output_waterbody_types_df = waterbody_types_df
-        num_files = i_df.shape[1]
-        LOG.info("Single NetCDF Output of "+str(num_files)+" timesteps to be written to folder: "+str(Path(wbdyo).resolve()))     
-        start = time.time()
-
+        num_timesteps = i_df.shape[1]
+        
         #Suppress the following function call if you don't need individual timestep netcdfs.
         #This function can potentially be useful for debugging. So left it here and in nhd_io.py
         # for i in range(i_df.shape[1]):              
@@ -360,8 +355,6 @@ def nwm_output_generator(
             nts,
             time_index
         )
-        LOG.info("Single NetCDF Output of "+str(num_files)+" timesteps written to folder: "+str(Path(wbdyo).resolve()))     
-        LOG.debug("writing LAKEOUT files took a total time of %s seconds." % (time.time() - start))
     elif wbdyo and waterbodies_df.empty:
         #this portion of the code is used to create lakeout nc files with zero values.
         df_empty = pd.DataFrame() #empty dataframes for all inputs
@@ -371,6 +364,7 @@ def nwm_output_generator(
         first_nex_file = next(Path(wbdyo).glob(pattern))
         df = pd.read_csv(first_nex_file)
         time_index_list = df.iloc[:,1].str.strip().tolist()
+        num_timesteps = len(time_index_list)
         nhd_io.write_single_waterbody_netcdf(
             wbdyo, 
             df_empty,
@@ -384,8 +378,9 @@ def nwm_output_generator(
             time_index_list
         )
         LOG.warning("lakeout_output specified with no waterbodies in the basin.")
-        LOG.info("Waterbody output (troute_lakeout.nc) written to folder: "+str(Path(wbdyo).resolve()))
-        
+    LOG.info("Wrote "+str(num_timesteps)+" timesteps to waterbody netcdf output.") 
+    LOG.info("Waterbody output written to folder: "+str(Path(wbdyo).resolve()))
+    LOG.debug("Writing LAKEOUT netcdf file took a total time of %s seconds." % (time.time() - start))    
     
     if rsrto:
 
