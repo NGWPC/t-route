@@ -159,7 +159,7 @@ class Model:
         self._data_assimilation.update_after_compute(run_results, self.dt * nts)
 
         nwm_output_generator(
-            run={"t0": self._network.t0, "dt": self.dt, "nts": nts},
+            run={"t0": self._network.t0, "dt": self.dt, "nts": nts, "timesteps": sorted(self._df_data)},
             results=run_results,
             supernetwork_parameters=self.supernetwork_parameters,
             output_parameters=self.output_parameters,

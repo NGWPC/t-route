@@ -359,11 +359,14 @@ def nwm_output_generator(
             #this portion of the code is used to create lakeout nc files with zero values.
             df_empty = pd.DataFrame() #empty dataframes for all inputs
 
-            #use one of the nexus output files to read the timestep datetimes
-            pattern = "nex-*.csv"
-            first_nex_file = next(Path(wbdyo).glob(pattern))
-            df = pd.read_csv(first_nex_file)
-            time_index_list = df.iloc[:,1].str.strip().tolist()
+            # attempt to get timesteps from run data
+            time_index_list = run.get("timesteps", None)
+            if not isinstance(time_index_list, list):
+                #use one of the nexus output files to read the timestep datetimes
+                pattern = "nex-*.csv"
+                first_nex_file = next(Path(wbdyo).glob(pattern))
+                df = pd.read_csv(first_nex_file)
+                time_index_list = df.iloc[:,1].str.strip().tolist()
             num_timesteps = len(time_index_list)
             nhd_io.write_single_waterbody_netcdf(
                 wbdyo, 
