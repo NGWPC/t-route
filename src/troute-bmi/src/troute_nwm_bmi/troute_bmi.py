@@ -1,4 +1,5 @@
 """Basic Model Interface implementation for NGEN t-route."""
+from __future__ import annotations
 import numpy as np
 from bmipy import Bmi
 
@@ -10,8 +11,18 @@ _VAR_NAME_UNITS_MAP = {
     'land_surface_water_source__volume_flow_rate': ['streamflow_cms', 'm3 s-1'],
 }
 
+_OUTPUT_VAR_NAMES = []
+
+_INPUT_VAR_NAMES = [
+    "land_surface_water_source__id",
+    "land_surface_water_source__volume_flow_rate",
+    "upstream_id",
+]
+
+
 class BmiTroute(Bmi):
     _model: Model
+    _values: dict[str, np.ndarray]
 
     def __init__(self):
         super().__init__()
@@ -26,18 +37,14 @@ class BmiTroute(Bmi):
         self._start_time = 0.0
         self._end_time = np.finfo("d").max
 
-
     def initialize(self, bmi_cfg_file):
         self._model = Model(bmi_cfg_file)
-        self._var_units_map = {
-            name: units[1] for name, units in _VAR_NAME_UNITS_MAP.items()
-        }
 
     def update(self):
         self._model.update(self._values)
     
     def update_until(self, time):
-        while self._time < time:
+        while self._model._time < time:
             self.update()
 
     def set_value(self, var_name: str, src):
@@ -59,7 +66,7 @@ class BmiTroute(Bmi):
         else:
             self._values[var_name] = src
 
-    def get_value(self, var_name):
+    def get_value(self, var_name: str):
         """Copy of values.
         Parameters
         ----------
@@ -70,8 +77,12 @@ class BmiTroute(Bmi):
         output_df : pd.DataFrame
             Copy of values.
         """
-        output_df = self.get_value_ptr(var_name)
-        return output_df
+        if var_name.endswith(_COUNT_SUFFIX):
+            source_var_name = var_name[:-len(_COUNT_SUFFIX)]
+            source = self._values[source_var_name]
+            return np.array([len(source)], dtype=np.int64)
+        else:
+            return np.copy(self._values[var_name])
 
     def get_value_ptr(self, var_name: str):
         """Reference to values.
@@ -84,12 +95,7 @@ class BmiTroute(Bmi):
         array_like
             Value array.
         """
-        if var_name.endswith(_COUNT_SUFFIX):
-            source_var_name = var_name[:-len(_COUNT_SUFFIX)]
-            source = self._values[source_var_name]
-            return np.array([len(source)], dtype=np.int64)
-        else:
-            return self._values[var_name]
+        return self._values[var_name]
 
     def get_start_time(self):
         """Start time of model."""
@@ -115,7 +121,7 @@ class BmiTroute(Bmi):
             self._model = None
 
     # BMI functions that are not being used yet...
-    def update_frac(self, time_frac):
+    def update_frac(self, time_frac: float):
         """Update model by a fraction of a time step.
         Parameters
         ----------
@@ -123,8 +129,9 @@ class BmiTroute(Bmi):
             Fraction fo a time step.
         """
         time_step = self.get_time_step()
-        self._model.dt = time_frac * time_step
-        self.update()
+        self._model.dt = int(time_frac * time_step)
+        if self._model.dt > 0:
+            self.update()
         self._model.dt = time_step
 
     def get_var_type(self, var_name):
@@ -138,9 +145,9 @@ class BmiTroute(Bmi):
         str
             Data type.
         """
-        return str(self.get_value_ptr(var_name).dtype)
+        return str(self.get_value(var_name).dtype)
 
-    def get_var_units(self, var_name):
+    def get_var_units(self, var_name: str):
         """Get units of variable.
         Parameters
         ----------
@@ -151,7 +158,7 @@ class BmiTroute(Bmi):
         str
             Variable units.
         """
-        return self._var_units_map[var_name]
+        return _VAR_NAME_UNITS_MAP[var_name][1]
 
     def get_var_nbytes(self, var_name):
         """Get units of variable.
@@ -164,7 +171,7 @@ class BmiTroute(Bmi):
         int
             Size of data array in bytes.
         """
-        return self.get_value_ptr(var_name).nbytes
+        return self.get_value(var_name).nbytes
 
     def get_var_itemsize(self, name):
         return np.dtype(self.get_var_type(name)).itemsize
@@ -183,9 +190,7 @@ class BmiTroute(Bmi):
         int
             Grid id.
         """
-        for grid_id, var_name_list in self._grids.items():
-            if var_name in var_name_list:
-                return grid_id
+        raise NotImplementedError("get_var_grid")
 
     def get_grid_rank(self, grid_id):
         """Rank of grid.
@@ -198,7 +203,7 @@ class BmiTroute(Bmi):
         int
             Rank of grid.
         """
-        return len(self._model.shape)
+        raise NotImplementedError("get_grid_rank")
 
     def get_grid_size(self, grid_id):
         """Size of grid.
@@ -211,7 +216,7 @@ class BmiTroute(Bmi):
         int
             Size of grid.
         """
-        return int(np.prod(self._model.shape))
+        raise NotImplementedError("get_grid_size")
 
     def get_value_at_indices(self, var_name, dest, indices):
         """Get values at particular indices.
@@ -247,43 +252,39 @@ class BmiTroute(Bmi):
 
     def get_component_name(self):
         """Name of the component."""
-        return self.__class__.__name__
+        return "T-Route"
 
     def get_input_item_count(self):
         """Get names of input variables."""
-        return len(self._input_var_names)
+        return len(_INPUT_VAR_NAMES)
 
     def get_output_item_count(self):
         """Get names of output variables."""
-        return len(self._output_var_names)
+        return len(_OUTPUT_VAR_NAMES)
 
     def get_input_var_names(self):
         """Get names of input variables."""
-        return self._input_var_names
+        return _INPUT_VAR_NAMES
 
     def get_output_var_names(self):
         """Get names of output variables."""
-        return self._output_var_names
+        return _OUTPUT_VAR_NAMES
 
     def get_grid_shape(self, grid_id, shape):
         """Number of rows and columns of uniform rectilinear grid."""
-        var_name = self._grids[grid_id][0]
-        shape[:] = self.get_value_ptr(var_name).shape
-        return shape
+        raise NotImplementedError("get_grid_shape")
 
     def get_grid_spacing(self, grid_id, spacing):
         """Spacing of rows and columns of uniform rectilinear grid."""
-        spacing[:] = self._model.spacing
-        return spacing
+        raise NotImplementedError("get_grid_spacing")
 
     def get_grid_origin(self, grid_id, origin):
         """Origin of uniform rectilinear grid."""
-        origin[:] = self._model.origin
-        return origin
+        raise NotImplementedError("get_grid_origin")
 
     def get_grid_type(self, grid_id):
         """Type of grid."""
-        return self._grid_type[grid_id]
+        raise NotImplementedError("get_grid_type")
 
     def get_grid_edge_count(self, grid):
         raise NotImplementedError("get_grid_edge_count")

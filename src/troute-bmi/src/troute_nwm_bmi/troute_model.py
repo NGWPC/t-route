@@ -16,6 +16,8 @@ from nwm_routing.output import nwm_output_generator
 
 
 class Model:
+    dt: int
+
     def __init__(self, config_file: str):
         self._time = 0.0
 
@@ -150,7 +152,7 @@ class Model:
             flowveldepth_interorder=flowveldepth_interorder,
         )
 
-        # create initial conditions for next loop itteration
+        # create initial conditions for next loop iteration
         # self._network.new_t0(self.dt, nts)
         self._network.new_q0(run_results)
         self._network.update_waterbody_water_elevation()
