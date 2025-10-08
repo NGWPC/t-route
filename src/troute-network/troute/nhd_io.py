@@ -845,7 +845,7 @@ def read_netcdfs(paths, dim, transform_func=None):
 
     datasets = [process_one_path(p) for p in paths]
     combined = xr.concat(datasets, dim, combine_attrs = "override")
-    return combined
+    return combined    
 
 
 def preprocess_time_station_index(xd):
