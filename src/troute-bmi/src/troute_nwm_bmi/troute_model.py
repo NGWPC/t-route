@@ -13,7 +13,7 @@ import troute.hyfeature_network_utilities as hnu
 
 import nwm_routing.__main__ as nwm_routing
 from nwm_routing.output import nwm_output_generator
-
+from nwm_routing.log_level_set import log_level_set
 
 class Model:
     dt: int
@@ -24,6 +24,8 @@ class Model:
         with open(config_file) as reader:
             data = yaml.load(reader, Loader=yaml.SafeLoader)
         self._config: dict = Config.with_strict_mode(**data).dict()
+
+        log_level_set(self.log_parameters)
 
         self.dt = int(self.forcing_parameters["dt"])
 
@@ -160,8 +162,14 @@ class Model:
         # update reservoir parameters and lastobs_df
         self._data_assimilation.update_after_compute(run_results, self.dt * nts)
 
+        run_params = {
+            "t0": self._network.t0,
+            "dt": self.dt,
+            "nts": nts,
+            "timesteps": self._waterbodies_timesteps(),
+        }
         nwm_output_generator(
-            run={"t0": self._network.t0, "dt": self.dt, "nts": nts, "timesteps": sorted(self._df_data)},
+            run=run_params,
             results=run_results,
             supernetwork_parameters=self.supernetwork_parameters,
             output_parameters=self.output_parameters,
@@ -246,4 +254,18 @@ class Model:
     @property
     def time(self) -> float:
         return self._time
+
+    def _waterbodies_timesteps(self):
+        """Sort the timestamps in the dataframe data dictionary, 
+        then convert them to a format that can be read by the empty waterbodies parser 
+        (YYYY-MM-DD hh:mm:ss)."""
+        timestamps: list[str] = sorted(self._df_data)
+        for i, ts in enumerate(timestamps):
+            year = ts[:4]
+            month = ts[4:6]
+            day = ts[6:8]
+            hour = ts[8:10]
+            minute = ts[10:]
+            timestamps[i] = f"{year}-{month}-{day} {hour}:{minute}:00"
+        return timestamps
 
