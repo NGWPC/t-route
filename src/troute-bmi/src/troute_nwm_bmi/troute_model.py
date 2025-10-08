@@ -1,4 +1,6 @@
 """Basic Model Interface backing model for NGEN t-route."""
+import logging
+import time
 import yaml
 import numpy as np
 import pandas as pd
@@ -15,10 +17,13 @@ import nwm_routing.__main__ as nwm_routing
 from nwm_routing.output import nwm_output_generator
 from nwm_routing.log_level_set import log_level_set
 
+LOG = logging.getLogger("")
+
 class Model:
     dt: int
 
     def __init__(self, config_file: str):
+        self._main_start_time = time.time()
         self._time = 0.0
 
         with open(config_file) as reader:
@@ -29,6 +34,7 @@ class Model:
 
         self.dt = int(self.forcing_parameters["dt"])
 
+        network_start_time = time.time()
         if self.supernetwork_parameters["network_type"] == "HYFeaturesNetwork":
             self._network = HYFeaturesNetwork(
                 supernetwork_parameters=self.supernetwork_parameters,
@@ -40,7 +46,8 @@ class Model:
                 hybrid_parameters=self.hybrid_parameters,
                 preprocessing_parameters=self.preprocessing_parameters,
                 output_parameters=self.output_parameters,
-                ## verbose and showtiming?
+                verbose=self.verbose,
+                showtiming=self.show_timing,
             )
         elif self.supernetwork_parameters["network_type"] == "NHDNetwork":
             self._network = NHDNetwork(
@@ -52,14 +59,17 @@ class Model:
                 data_assimilation_parameters=self.data_assimilation_parameters,
                 hybrid_parameters=self.hybrid_parameters,
                 output_parameters=self.output_parameters,
-                ## versbose and showtiming?
+                verbose=self.verbose,
+                showtiming=self.show_timing,
             )
         else:
             raise Exception("Supernetwork network type must be HYFeaturesNetwork or NHDNetwork")
+        network_creation_time = time.time() - network_start_time
 
         self._run_sets = self._network.build_forcing_sets()
 
         # Data data assimilation
+        forcing_start_time = time.time()
         if self.data_assimilation_parameters:
             self._da_sets = hnu.build_da_sets(self.data_assimilation_parameters, self._run_sets, self._network.t0)
         else:
@@ -73,6 +83,7 @@ class Model:
             value_dict=None,
             da_run=self._da_sets[0] if len(self._da_sets) else {},
         )
+        forcing_time = time.time() - forcing_start_time
 
         # Pass empty subnetwork list to nwm_route. These objects will be calculated/populated
         # on first iteration of for loop only. For additional loops this will be passed
@@ -80,6 +91,12 @@ class Model:
         self._subnetwork = [None, None, None]
 
         self._df_data = {}
+        self._timings = {
+            "forcing_time": forcing_time,
+            "route_time": 0.0,
+            "output_time": 0.0,
+            "network_creation_time": network_creation_time,
+        }
 
 
     def update(self, bmi_values: dict):
@@ -108,6 +125,7 @@ class Model:
         else:
             flowveldepth_interorder = {}
 
+        route_start_time = time.time()
         run_results, self._subnetwork = nwm_routing.nwm_route(
             downstream_connections=self._network.connections,
             upstream_connections=self._network.reverse_network,
@@ -153,6 +171,7 @@ class Model:
             from_files=False,
             flowveldepth_interorder=flowveldepth_interorder,
         )
+        self._timings["route_time"] = time.time() - route_start_time
 
         # create initial conditions for next loop iteration
         # self._network.new_t0(self.dt, nts)
@@ -162,6 +181,7 @@ class Model:
         # update reservoir parameters and lastobs_df
         self._data_assimilation.update_after_compute(run_results, self.dt * nts)
 
+        output_start_time = time.time()
         run_params = {
             "t0": self._network.t0,
             "dt": self.dt,
@@ -189,7 +209,10 @@ class Model:
             nexus_dict=self._network.nexus_dict,
             poi_crosswalk=self._network.poi_nex_dict or {},
         )
+        self._timings["output_time"] = time.time() - output_start_time
 
+        if self.show_timing:
+            self._log_times()
 
     @property
     def nts(self) -> int:
@@ -252,6 +275,19 @@ class Model:
         return self.output_parameters.get("wrf_hydro_parity_check", {})
 
     @property
+    def show_timing(self):
+        return bool(self.log_parameters.get("showtiming"))
+
+    @property
+    def verbose(self):
+        log_level = self.log_parameters.get("log_level")
+        if isinstance(log_level, str):
+            return log_level.upper() == "DEBUG"
+        elif isinstance(log_level, (int, float)):
+            return log_level == 10
+        return False
+
+    @property
     def time(self) -> float:
         return self._time
 
@@ -269,3 +305,18 @@ class Model:
             timestamps[i] = f"{year}-{month}-{day} {hour}:{minute}:00"
         return timestamps
 
+    def _log_times(self):
+        def sec_and_per(title, key: str):
+            seconds = round(self._timings[key], 2)
+            percent = round(self._timings[key] / process_time * 100, 2)
+            LOG.info(f"{title}: {seconds} secs, {percent} %")
+        process_time = time.time() - self._main_start_time
+        LOG.debug(f"Proesses complete in {process_time} seconds.")
+        LOG.info('************ TIMING SUMMARY ************')
+        LOG.info('----------------------------------------')
+        sec_and_per("Network graph construction", 'network_creation_time')
+        sec_and_per("Forcing array construction", "forcing_time")
+        sec_and_per("Routing computations", "route_time")
+        sec_and_per("Output writing", "output_time")
+        total_execution_time = round(sum(self._timings.values()), 2)
+        LOG.info(f"Total execution time: {total_execution_time} secs")
