@@ -2066,11 +2066,11 @@ def write_single_waterbody_netcdf(
 ):
     netcdfname = 'troute_lakeout_' + t0.strftime('%Y%m%d%H%M') + '.nc'
 
-    if not i_df.empty:
-        # array of simulation time
-        wbdy_time = np.array([t0 + timedelta(seconds = (time_index[i] + 1) * dt) for i in range(len(time_index))]) #time_index
-        num_timesteps = len(wbdy_time) #for number of timesteps
+    # array of simulation time
+    wbdy_time = np.array([t0 + timedelta(seconds = (time_index[i] + 1) * dt) for i in range(len(time_index))]) #time_index
+    num_timesteps = len(wbdy_time) #for number of timesteps
 
+    if not i_df.empty:
         #get the max of all the values for each timestep and store them in a list. 
         max_i_vals = i_df.max().to_numpy().tolist()
         max_q_vals = q_df.max().to_numpy().tolist()
@@ -2091,8 +2091,6 @@ def write_single_waterbody_netcdf(
 
         wbdy_feature_id = np.array([0], dtype="int32") 
         wbdy_type = np.array([0], dtype="int32") 
-        wbdy_time = np.array([datetime.strptime(time_index[i], "%Y-%m-%d %H:%M:%S") for i in range(len(time_index))]) #time_index
-        num_timesteps = len(wbdy_time)
 
     # open netCDF4 Dataset in write mode
     with netCDF4.Dataset(

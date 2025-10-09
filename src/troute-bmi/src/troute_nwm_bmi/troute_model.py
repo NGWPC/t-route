@@ -186,7 +186,6 @@ class Model:
             "t0": self.t0,
             "dt": self.dt,
             "nts": nts,
-            "timesteps": self._waterbodies_timesteps(),
         }
         nwm_output_generator(
             run=run_params,
@@ -294,18 +293,6 @@ class Model:
     @property
     def t0(self) -> datetime:
         return self._network.t0
-
-    def _waterbodies_timesteps(self):
-        """Timestamps for emtpy waterbodies is expected to be from `self._network.t0` to the end, 
-        only on the top of the hour in `YYYY-MM-DD hh:mm:ss` format."""
-        timesteps = []
-        t0 = self.t0
-        for ts in sorted(self._df_data):
-            dt = datetime.strptime(ts, "%Y%m%d%H%M")
-            if (dt >= t0) and (dt.minute == 0):
-                wb_timestep = dt.strftime("%Y-%m-%d %H:%M:%S")
-                timesteps.append(wb_timestep)
-        return timesteps
 
     def _log_times(self):
         def sec_and_per(title, key: str):
