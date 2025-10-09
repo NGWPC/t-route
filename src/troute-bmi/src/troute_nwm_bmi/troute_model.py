@@ -19,8 +19,6 @@ from nwm_routing.log_level_set import log_level_set
 
 LOG = logging.getLogger("")
 
-args = ["-f", "/home/ian.todd/runs/bmi-troute-test/12114500_troute_config_valid_best.yaml"]
-nwm_routing.main_v04(args)
 
 class Model:
     dt: int
