@@ -4,7 +4,7 @@ import time
 import yaml
 import numpy as np
 import pandas as pd
-from datetime import timedelta
+from datetime import timedelta, datetime
 from troute.config import Config
 
 from troute.NHDNetwork import NHDNetwork
@@ -18,6 +18,9 @@ from nwm_routing.output import nwm_output_generator
 from nwm_routing.log_level_set import log_level_set
 
 LOG = logging.getLogger("")
+
+args = ["-f", "/home/ian.todd/runs/bmi-troute-test/12114500_troute_config_valid_best.yaml"]
+nwm_routing.main_v04(args)
 
 class Model:
     dt: int
@@ -135,7 +138,7 @@ class Model:
             compute_kernel=self.compute_parameters.get("compute_kernel"),
             subnetwork_target_size=self.compute_parameters.get('subnetwork_target_size'),
             cpu_pool=self.cpu_pool,
-            t0=self._network.t0,
+            t0=self.t0,
             dt=self.dt,
             nts=nts,
             qts_subdivisions=qts_subdivisions,
@@ -174,7 +177,6 @@ class Model:
         self._timings["route_time"] = time.time() - route_start_time
 
         # create initial conditions for next loop iteration
-        # self._network.new_t0(self.dt, nts)
         self._network.new_q0(run_results)
         self._network.update_waterbody_water_elevation()
         
@@ -183,7 +185,7 @@ class Model:
 
         output_start_time = time.time()
         run_params = {
-            "t0": self._network.t0,
+            "t0": self.t0,
             "dt": self.dt,
             "nts": nts,
             "timesteps": self._waterbodies_timesteps(),
@@ -291,19 +293,21 @@ class Model:
     def time(self) -> float:
         return self._time
 
+    @property
+    def t0(self) -> datetime:
+        return self._network.t0
+
     def _waterbodies_timesteps(self):
-        """Sort the timestamps in the dataframe data dictionary, 
-        then convert them to a format that can be read by the empty waterbodies parser 
-        (YYYY-MM-DD hh:mm:ss)."""
-        timestamps: list[str] = sorted(self._df_data)
-        for i, ts in enumerate(timestamps):
-            year = ts[:4]
-            month = ts[4:6]
-            day = ts[6:8]
-            hour = ts[8:10]
-            minute = ts[10:]
-            timestamps[i] = f"{year}-{month}-{day} {hour}:{minute}:00"
-        return timestamps
+        """Timestamps for emtpy waterbodies is expected to be from `self._network.t0` to the end, 
+        only on the top of the hour in `YYYY-MM-DD hh:mm:ss` format."""
+        timesteps = []
+        t0 = self.t0
+        for ts in sorted(self._df_data):
+            dt = datetime.strptime(ts, "%Y%m%d%H%M")
+            if (dt >= t0) and (dt.minute == 0):
+                wb_timestep = dt.strftime("%Y-%m-%d %H:%M:%S")
+                timesteps.append(wb_timestep)
+        return timesteps
 
     def _log_times(self):
         def sec_and_per(title, key: str):
@@ -311,7 +315,7 @@ class Model:
             percent = round(self._timings[key] / process_time * 100, 2)
             LOG.info(f"{title}: {seconds} secs, {percent} %")
         process_time = time.time() - self._main_start_time
-        LOG.debug(f"Proesses complete in {process_time} seconds.")
+        LOG.debug(f"Processes complete in {process_time} seconds.")
         LOG.info('************ TIMING SUMMARY ************')
         LOG.info('----------------------------------------')
         sec_and_per("Network graph construction", 'network_creation_time')
