@@ -360,11 +360,7 @@ def nwm_output_generator(
             df_empty = pd.DataFrame() #empty dataframes for all inputs
 
             # simulate timestep creation from i_df creation
-            i_columns = pd.MultiIndex.from_product(
-                [range(nts), ["i"]]
-            ).to_flat_index()
-            timestep, variable = zip(*i_columns.tolist())
-            timestep_index = np.where(((np.array(list(set(list(timestep)))) + 1) * dt) % (dt * qts_subdivisions) == 0)
+            timestep_index = np.where(((np.array(list(range(nts))) + 1) * dt) % (dt * qts_subdivisions) == 0)
             time_index = sorted(set(timestep_index[0]))
             num_timesteps = len(time_index)
             nhd_io.write_single_waterbody_netcdf(
