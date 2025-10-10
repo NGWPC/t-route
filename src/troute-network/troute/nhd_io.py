@@ -2067,7 +2067,7 @@ def write_single_waterbody_netcdf(
     netcdfname = 'troute_lakeout_' + t0.strftime('%Y%m%d%H%M') + '.nc'
 
     # array of simulation time
-    wbdy_time = np.array([t0 + timedelta(seconds = (time_index[i] + 1) * dt) for i in range(len(time_index))]) #time_index
+    wbdy_time = np.array([t0 + timedelta(seconds = int(time_index[i] + 1) * dt) for i in range(len(time_index))]) #time_index
     num_timesteps = len(wbdy_time) #for number of timesteps
 
     if not i_df.empty:
