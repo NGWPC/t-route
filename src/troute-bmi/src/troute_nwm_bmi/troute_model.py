@@ -67,14 +67,16 @@ class Model:
             raise Exception("Supernetwork network type must be HYFeaturesNetwork or NHDNetwork")
         network_creation_time = time.time() - network_start_time
 
-        self._run_sets = self._network.build_forcing_sets()
-
         # Data data assimilation
         forcing_start_time = time.time()
+        da_run = {}
         if self.data_assimilation_parameters:
-            self._da_sets = hnu.build_da_sets(self.data_assimilation_parameters, self._run_sets, self._network.t0)
-        else:
-            self._da_sets = []
+            run_set = {
+                "nts": self.nts,
+                "final_timestamp": self.t0 + timedelta(seconds=self.nts * self.dt)
+            }
+            da_sets = hnu.build_da_sets(self.data_assimilation_parameters, [run_set], self._network.t0)
+            da_run = da_sets[0]
         self._data_assimilation = DataAssimilation(
             network=self._network,
             data_assimilation_parameters=self.data_assimilation_parameters,
@@ -82,7 +84,7 @@ class Model:
             waterbody_parameters=self.waterbody_parameters,
             from_files=True,
             value_dict=None,
-            da_run=self._da_sets[0] if len(self._da_sets) else {},
+            da_run=da_run,
         )
         forcing_time = time.time() - forcing_start_time
 
