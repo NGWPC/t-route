@@ -35,6 +35,7 @@ class Model:
 
         self.dt = int(self.forcing_parameters["dt"])
 
+        LOG.info("Creating network of type " + self.supernetwork_parameters.get("network_type"))
         network_start_time = time.time()
         if self.supernetwork_parameters["network_type"] == "HYFeaturesNetwork":
             self._network = HYFeaturesNetwork(
@@ -68,6 +69,7 @@ class Model:
         network_creation_time = time.time() - network_start_time
 
         # Data data assimilation
+        LOG.info("Creating DataAssimilation object")
         forcing_start_time = time.time()
         da_run = {}
         if self.data_assimilation_parameters:
@@ -76,7 +78,8 @@ class Model:
                 "final_timestamp": self.t0 + timedelta(seconds=self.nts * self.dt)
             }
             da_sets = hnu.build_da_sets(self.data_assimilation_parameters, [run_set], self._network.t0)
-            da_run = da_sets[0]
+            if da_sets:
+                da_run = da_sets[0]
         self._data_assimilation = DataAssimilation(
             network=self._network,
             data_assimilation_parameters=self.data_assimilation_parameters,
@@ -103,17 +106,21 @@ class Model:
 
 
     def update(self, bmi_values: dict):
+        start = time.time()
         qlat_values = bmi_values["land_surface_water_source__volume_flow_rate"]
-        time = self._network.t0 + timedelta(seconds=self.time)
-        timestamp = time.strftime("%Y%m%d%H%M")
+        step_time = self._network.t0 + timedelta(seconds=self.time)
+        timestamp = step_time.strftime("%Y%m%d%H%M")
         self._df_data[timestamp] = np.array(qlat_values)
         self._time += self.dt
+        self._timings["forcing_time"] += time.time() - start
 
 
     def run(self, bmi_values: dict):
         nts = self.nts
         qts_subdivisions = self.forcing_parameters.get('qts_subdivisions', 12)
 
+        LOG.info("Assembling forcing dataframe")
+        forcing_start_time = time.time()
         ## setup the qlats dataframe from the update() data
         qlats = pd.DataFrame(data=self._df_data, index=bmi_values["land_surface_water_source__id"])
         # Take flowpath ids entering NEXUS and replace NEXUS ids by the upstream flowpath ids
@@ -122,12 +129,14 @@ class Model:
         missing = self._network.segment_index[~self._network.segment_index.isin(qlats.index)]
         zeros = pd.DataFrame(data=0.0, index=missing, columns=qlats.columns)
         qlats = pd.concat([qlats, zeros]).sort_index()
+        self._timings["forcing_time"] += time.time() - forcing_start_time
 
         if len(bmi_values["upstream_id"]) > 0:
             flowveldepth_interorder = {bmi_values['upstream_id'][0]: {"results": bmi_values['upstream_fvd']}}
         else:
             flowveldepth_interorder = {}
 
+        LOG.info("Starting routing function")
         route_start_time = time.time()
         run_results, self._subnetwork = nwm_routing.nwm_route(
             downstream_connections=self._network.connections,
@@ -183,6 +192,7 @@ class Model:
         # update reservoir parameters and lastobs_df
         self._data_assimilation.update_after_compute(run_results, self.dt * nts)
 
+        LOG.info("Generating output")
         output_start_time = time.time()
         run_params = {
             "t0": self.t0,
