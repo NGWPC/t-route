@@ -145,7 +145,8 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
         if right_col != "nex_id":
             hydro = hydro.rename(columns={right_col: "nex_id"})
 
-        nexus = nexus.merge(hydro[["nex_id", "hl_uri"]], left_on="id", right_on="nex_id", how="left")
+        if not nexus.empty: 
+            nexus = nexus.merge(hydro[["nex_id", "hl_uri"]], left_on="id", right_on="nex_id", how="left")
 
     return flowpaths, lakes, network, nexus
 
