@@ -133,7 +133,18 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
             lakes["lake_id"] = lakes["lake_id"].astype(int)
             lakes = lakes.merge(hydro[["hl_link", "id", "hl_reference"]], left_on="lake_id", right_on="hl_link", how="left")
 
-        # add hl_uri to nexus
+        # hydrolocations may call the nexus key "nex_id" or simply "id"
+        if "nex_id" in hydro.columns:
+            right_col = "nex_id"
+        elif "id" in hydro.columns:
+            right_col = "id"
+        else:
+            raise KeyError("HYFeaturesNetwork: hydrolocations layer missing expected nexus id column. available: " + ", ".join(list(hydro.columns)))
+
+        # normalize to 'nex_id' for downstream code, then merge to get hl_uri for nexus
+        if right_col != "nex_id":
+            hydro = hydro.rename(columns={right_col: "nex_id"})
+
         nexus = nexus.merge(hydro[["nex_id", "hl_uri"]], left_on="id", right_on="nex_id", how="left")
 
     return flowpaths, lakes, network, nexus
