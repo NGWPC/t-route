@@ -28,7 +28,9 @@ class BmiTroute(Bmi):
         super().__init__()
         self._values = {
             "land_surface_water_source__id": np.zeros(0, dtype=np.intc),
+            "land_surface_water_source__id" + _COUNT_SUFFIX: np.zeros(1, dtype=np.int64),
             "land_surface_water_source__volume_flow_rate": np.zeros(0, dtype=float),
+            "land_surface_water_source__volume_flow_rate" + _COUNT_SUFFIX: np.zeros(1, dtype=np.int64),
             "upstream_id": np.zeros(0, dtype=int),
         }
         self._var_loc = "node"
@@ -63,8 +65,7 @@ class BmiTroute(Bmi):
             source_var_name = var_name[:-len(_COUNT_SUFFIX)]
             source = self._values.get(source_var_name)
             self._values[source_var_name] = np.resize(source, int(src[0]))
-        else:
-            self._values[var_name] = src
+        self._values[var_name][:] = src
 
     def get_value(self, var_name: str):
         """Copy of values.
@@ -77,12 +78,7 @@ class BmiTroute(Bmi):
         output_df : pd.DataFrame
             Copy of values.
         """
-        if var_name.endswith(_COUNT_SUFFIX):
-            source_var_name = var_name[:-len(_COUNT_SUFFIX)]
-            source = self._values[source_var_name]
-            return np.array([len(source)], dtype=np.int64)
-        else:
-            return np.copy(self._values[var_name])
+        return np.copy(self._values[var_name])
 
     def get_value_ptr(self, var_name: str):
         """Reference to values.

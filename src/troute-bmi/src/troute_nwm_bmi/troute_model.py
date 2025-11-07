@@ -69,7 +69,7 @@ class Model:
         network_creation_time = time.time() - network_start_time
 
         # Data data assimilation
-        LOG.info("Creating DataAssimilation object")
+        LOG.debug("Creating DataAssimilation object")
         forcing_start_time = time.time()
         da_run = {}
         if self.data_assimilation_parameters:
@@ -119,7 +119,7 @@ class Model:
         nts = self.nts
         qts_subdivisions = self.forcing_parameters.get('qts_subdivisions', 12)
 
-        LOG.info("Assembling forcing dataframe")
+        LOG.debug("Assembling forcing dataframe")
         forcing_start_time = time.time()
         ## setup the qlats dataframe from the update() data
         qlats = pd.DataFrame(data=self._df_data, index=bmi_values["land_surface_water_source__id"])
@@ -136,7 +136,7 @@ class Model:
         else:
             flowveldepth_interorder = {}
 
-        LOG.info("Starting routing function")
+        LOG.debug("Starting routing function")
         route_start_time = time.time()
         run_results, self._subnetwork = nwm_routing.nwm_route(
             downstream_connections=self._network.connections,
@@ -192,7 +192,7 @@ class Model:
         # update reservoir parameters and lastobs_df
         self._data_assimilation.update_after_compute(run_results, self.dt * nts)
 
-        LOG.info("Generating output")
+        LOG.debug("Generating output")
         output_start_time = time.time()
         run_params = {
             "t0": self.t0,
