@@ -6,10 +6,8 @@ import yaml
 
 import troute.nhd_io as nhd_io
 import troute.nhd_network_utilities_v02 as nnu
-from .log_level_set import log_level_set
+from .log_level_set import log_level_set, MODULE_NAME
 from troute.config import Config
-
-from nwm_routing.log_level_set import MODULE_NAME
 
 LOG = logging.getLogger(MODULE_NAME)
 

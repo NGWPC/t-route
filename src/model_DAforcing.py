@@ -17,9 +17,8 @@ import bmi_df2array as df2a
 
 from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data
 import netCDF4
-from nwm_routing.log_level_set import log_level_set
+from nwm_routing.log_level_set import log_level_set, MODULE_NAME
 from troute.config import Config
-from nwm_routing.log_level_set import MODULE_NAME
 
 LOG = logging.getLogger(MODULE_NAME)
 
