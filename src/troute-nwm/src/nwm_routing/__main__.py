@@ -30,8 +30,9 @@ import troute.nhd_network_utilities_v02 as nnu
 import troute.hyfeature_network_utilities as hnu
 import sys
 
+from nwm_routing.log_level_set import MODULE_NAME
 
-LOG = logging.getLogger('')
+LOG = logging.getLogger(MODULE_NAME)
 
 '''
 High level orchestration of ngen t-route simulations for NWM application

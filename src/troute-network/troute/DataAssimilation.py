@@ -11,10 +11,13 @@ import re
 import time
 import logging
 
-LOG = logging.getLogger('')
 from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data
 
 from troute.network import bmi_array2df as a2df
+
+from nwm_routing.log_level_set import MODULE_NAME
+
+LOG = logging.getLogger(MODULE_NAME)
 
 # set legacy run flag: option to pass data frames through BMI formalism 
 # not to be used in regular BMI runs any longer, only for debugging

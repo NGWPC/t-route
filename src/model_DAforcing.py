@@ -19,7 +19,9 @@ from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data
 import netCDF4
 from nwm_routing.log_level_set import log_level_set
 from troute.config import Config
-LOG = logging.getLogger('')
+from nwm_routing.log_level_set import MODULE_NAME
+
+LOG = logging.getLogger(MODULE_NAME)
 
 class DAforcing_model():
 

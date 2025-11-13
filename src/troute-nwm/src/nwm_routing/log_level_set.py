@@ -178,24 +178,25 @@ def log_level_set(input_parameters):
         handler.setFormatter(formatter)
 
         # Setup root logger
-        logging.getLogger().handlers.clear()  # Clear any default handlers
-        logging.getLogger().setLevel(translate_ngwpc_log_level(log_level))
-        logging.getLogger().addHandler(handler)
+        logger = logging.getLogger(MODULE_NAME)
+        logger.handlers.clear()  # Clear any default handlers
+        logger.setLevel(translate_ngwpc_log_level(log_level))
+        logger.addHandler(handler)
 
         # Ensure UTC timestamps
         logging.Formatter.converter = time.gmtime
 
         # Save the current log level
-        current_level = logging.getLogger().getEffectiveLevel()
+        current_level = logger.getEffectiveLevel()
 
         try:
             # Temporarily set log level to INFO
-            logging.getLogger().setLevel(logging.INFO)
+            logger.setLevel(logging.INFO)
             
             # Log the message at INFO level
             logging.info(f"Log level set to {log_level}")
             print(f"Module {MODULE_NAME} Log Level set to {log_level}")
         finally:
             # Restore the original log level
-            logging.getLogger().setLevel(current_level)
+            logger.setLevel(current_level)
     

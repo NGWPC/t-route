@@ -36,6 +36,7 @@ def find_layer_name(layers, pattern):
 
 
 def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
+    print("reading geopkg")
     # Retrieve available layers from the GeoPackage
     available_layers = fiona.listlayers(file_path)
 
@@ -50,6 +51,7 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
     }
 
     # Match available layers to the patterns
+    print("finding layers")
     matched_layers = {key: find_layer_name(available_layers, pattern) for key, pattern in layer_patterns.items()}
 
     layers_to_read = ["flowpaths", "flowpath_attributes", "hydrolocations"]
@@ -85,12 +87,17 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
         return pd.DataFrame()
 
     # Retrieve geopackage information using matched layer names
+    print("about to read")
     if cpu_pool > 1:
+        print("with parallel")
+        import sys
+        print(sys.executable)
         with Parallel(n_jobs=min(cpu_pool, len(layers_to_read))) as parallel:
             gpkg_list = parallel(delayed(read_layer)(matched_layers[layer]) for layer in layers_to_read)
 
         table_dict = {layers_to_read[i]: gpkg_list[i] for i in range(len(layers_to_read))}
     else:
+        print("without parallel")
         table_dict = {layer: read_layer(matched_layers[layer]) for layer in layers_to_read}
 
     # Handle different key column names between flowpaths and flowpath_attributes
@@ -350,14 +357,18 @@ class HYFeaturesNetwork(AbstractNetwork):
                 from_files = False
 
             # Preprocess network objects
+            print("preprocess_network")
             self.preprocess_network(flowpaths, nexus)
 
+            print("crosswalk_nex_flowpath_poi")
             self.crosswalk_nex_flowpath_poi(flowpaths, nexus)
 
             # Preprocess waterbody objects
+            print("preprocess_waterbodies")
             self.preprocess_waterbodies(lakes, nexus)
 
             # Preprocess data assimilation objects #TODO: Move to DataAssimilation.py?
+            print("preprocess_data_assimilation")
             self.preprocess_data_assimilation(network)
 
             if self.preprocessing_parameters.get("preprocess_output_folder", None):

@@ -14,8 +14,9 @@ import pyarrow.parquet as pq
 
 import troute.nhd_io as nhd_io
 
+from nwm_routing.log_level_set import MODULE_NAME
 
-LOG = logging.getLogger('')
+LOG = logging.getLogger(MODULE_NAME)
 
 
 def build_da_sets(da_params, run_sets, t0):

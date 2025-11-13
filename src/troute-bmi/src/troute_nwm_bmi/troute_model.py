@@ -15,9 +15,9 @@ import troute.hyfeature_network_utilities as hnu
 
 import nwm_routing.__main__ as nwm_routing
 from nwm_routing.output import nwm_output_generator
-from nwm_routing.log_level_set import log_level_set
+from nwm_routing.log_level_set import log_level_set, MODULE_NAME
 
-LOG = logging.getLogger("")
+LOG = logging.getLogger(MODULE_NAME)
 
 
 class Model:

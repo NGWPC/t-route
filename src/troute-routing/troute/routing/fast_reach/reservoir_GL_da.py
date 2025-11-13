@@ -1,7 +1,9 @@
 import numpy as np
 import logging
 from datetime import datetime, timedelta
-LOG = logging.getLogger('')
+from nwm_routing.log_level_set import MODULE_NAME
+
+LOG = logging.getLogger(MODULE_NAME)
 
 def great_lakes_da(
     gage_obs,
