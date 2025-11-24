@@ -448,14 +448,11 @@ class HYFeaturesNetwork(AbstractNetwork):
         # Drop 'gages' column if it is present
         if "gages" in self.dataframe:
             self._dataframe = self.dataframe.drop("gages", axis=1)
-<<<<<<< HEAD
 
         # ensure `cat-` is removed from any divide_ids
         if "divide_id" in self.dataframe.columns:
             self._dataframe["divide_id"] = self._dataframe['divide_id'].str.split('-').str[1].values.astype(np.int32)
         
-=======
->>>>>>> a17017fbd4376a7bf7380b43d7393f051c3245da
         # numeric code used to indicate network terminal segments
         terminal_code = self.supernetwork_parameters.get("terminal_code", 0)
 
@@ -901,7 +898,6 @@ class HYFeaturesNetwork(AbstractNetwork):
 
         self._qlateral = qlats_df
 
-<<<<<<< HEAD
     def build_et_array(
         self,
         run,
@@ -943,8 +939,6 @@ class HYFeaturesNetwork(AbstractNetwork):
             raise KeyError("Cannot find flowpath attributes to map PET. Can you ensure ") from e
         self._eloss = ELOSS_cfs
 
-=======
->>>>>>> a17017fbd4376a7bf7380b43d7393f051c3245da
     ######################################################################
     # FIXME Temporary solution to hydrofabric issues.
     def bandaid(
