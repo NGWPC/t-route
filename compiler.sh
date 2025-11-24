@@ -15,6 +15,7 @@ build_framework=true
 build_routing=true
 build_config=true
 build_nwm=true
+build_bmi=true
 
 if [ -z "$F90" ]
 then
@@ -156,4 +157,13 @@ if [[ "$build_nwm" == true ]]; then
     else
         $PIP_CMD install . || exit
     fi
+fi
+
+if [[ "$build_bmi" == true ]]; then
+  cd $REPOROOT/src/troute-bmi
+  if [[ ${WITH_EDITABLE} == true ]]; then
+    pip install --editable . || exit
+  else
+    pip install . || exit
+  fi
 fi
