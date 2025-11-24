@@ -127,6 +127,8 @@ def test_nwm_route_execution(
             reservoir_usgs_param_df,
             reservoir_usace_df,
             reservoir_usace_param_df,
+            pd.DataFrame(), #empty dataframe for USBR data...not needed unless running via BMI
+            pd.DataFrame(), #empty dataframe for USBR data...not needed unless running via BMI
             pd.DataFrame(), #empty dataframe for RFC data...not needed unless running via BMI
             pd.DataFrame(), #empty dataframe for RFC param data...not needed unless running via BMI
             pd.DataFrame(), #empty dataframe for great lakes data...
