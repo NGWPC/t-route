@@ -123,12 +123,14 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
         hydro = table_dict["hydrolocations"]
 
         # Filter out non-integer hl_link values and convert to integer (assuming valid lake_id values are integers)
-        hydro = hydro[hydro["hl_link"].apply(lambda x: str(x).replace(".", "", 1).isdigit())]
+        mask = hydro["hl_link"].apply(lambda x: str(x).replace(".", "", 1).isdigit())
+        hydro = hydro.loc[mask].copy()
         hydro["hl_link"] = hydro["hl_link"].astype(int)
 
-        # Convert lake_id to integer and merge with hydrolocations
-        lakes["lake_id"] = lakes["lake_id"].astype(int)
-        lakes = lakes.merge(hydro[["hl_link", "id", "hl_reference"]], left_on="lake_id", right_on="hl_link", how="left")
+        if not lakes.empty: 
+            # Convert lake_id to integer and merge with hydrolocations
+            lakes["lake_id"] = lakes["lake_id"].astype(int)
+            lakes = lakes.merge(hydro[["hl_link", "id", "hl_reference"]], left_on="lake_id", right_on="hl_link", how="left")
 
         # add hl_uri to nexus
         nexus = nexus.merge(hydro[["nex_id", "hl_uri"]], left_on="id", right_on="nex_id", how="left")
@@ -658,7 +660,7 @@ class HYFeaturesNetwork(AbstractNetwork):
             # split the hl_uri column into type and value
             gages_df[["type", "value"]] = gages_df.hl_uri.str.split("-", expand=True, n=1)
             # filter for 'Gages' only
-            gages_df = gages_df[gages_df["type"].isin(["gages", "nid", "usbr"])]
+            gages_df = gages_df[gages_df["type"].isin(["Gages", "NID", "usbr"])]
             # Some IDs have multiple gages associated with them. This will expand the dataframe so
             # there is a unique row per gage ID. Also adds lake ids to the dataframe for creating
             # lake-gage crosswalk dataframes.
