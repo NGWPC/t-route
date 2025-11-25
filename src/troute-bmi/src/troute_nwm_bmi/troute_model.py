@@ -13,7 +13,7 @@ from troute.DataAssimilation import DataAssimilation
 
 import troute.hyfeature_network_utilities as hnu
 
-import nwm_routing.__main__ as nwm_routing
+import nwm_routing.nwm_route as nwm_routing
 from nwm_routing.output import nwm_output_generator
 from nwm_routing.log_level_set import log_level_set
 
