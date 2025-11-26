@@ -12,6 +12,7 @@ import fiona
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pyogrio
 import pyarrow.parquet as pq
 import troute.nhd_io as nhd_io  # FIXME
 import xarray as xr
@@ -23,152 +24,6 @@ from .rfc_lake_gage_crosswalk import get_great_lakes_climatology, get_rfc_lake_g
 
 __verbose__ = False
 __showtiming__ = False
-
-
-def find_layer_name(layers, pattern):
-    """
-    Find a layer name in the list of layers that matches the regex pattern.
-    """
-    for layer in layers:
-        if re.search(pattern, layer, re.IGNORECASE):
-            return layer
-    return None
-
-
-def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
-    # Retrieve available layers from the GeoPackage
-    available_layers = fiona.listlayers(file_path)
-
-    # patterns for the layers we want to find
-    layer_patterns = {
-        "flowpaths": r"flow[-_]?paths?|flow[-_]?lines?",
-        "flowpath_attributes": r"flow[-_]?path[-_]?attributes?|flow[-_]?line[-_]?attributes?",
-        "lakes": r"lakes?",
-        "nexus": r"nexus?",
-        "network": r"network",
-        "hydrolocations": r"hydrolocations?",
-    }
-
-    # Match available layers to the patterns
-    matched_layers = {key: find_layer_name(available_layers, pattern) for key, pattern in layer_patterns.items()}
-
-    layers_to_read = ["flowpaths", "flowpath_attributes", "hydrolocations"]
-
-    if waterbody_parameters.get("break_network_at_waterbodies", False):
-        layers_to_read.extend(["lakes", "nexus"])
-
-    data_assimilation_parameters = compute_parameters.get("data_assimilation_parameters", {})
-    if any(
-        [
-            data_assimilation_parameters.get("streamflow_da", {}).get("streamflow_nudging", False),
-            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usgs", False),
-            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usace", False),
-            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usbr", False),
-            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_rfc_da", {}).get("reservoir_rfc_forecasts", False),
-        ]
-    ):
-        layers_to_read.append("network")
-
-    hybrid_parameters = compute_parameters.get("hybrid_parameters", {})
-    if hybrid_parameters.get("run_hybrid_routing", False) and "nexus" not in layers_to_read:
-        layers_to_read.append("nexus")
-
-    # Function that read a layer from the geopackage
-    def read_layer(layer_name):
-        if layer_name:
-            try:
-                return gpd.read_file(file_path, layer=layer_name)
-            except Exception as e:
-                print(f"Error reading {layer_name}: {e}")
-                return pd.DataFrame()
-        return pd.DataFrame()
-
-    # Retrieve geopackage information using matched layer names
-    if cpu_pool > 1:
-        with Parallel(n_jobs=min(cpu_pool, len(layers_to_read))) as parallel:
-            gpkg_list = parallel(delayed(read_layer)(matched_layers[layer]) for layer in layers_to_read)
-
-        table_dict = {layers_to_read[i]: gpkg_list[i] for i in range(len(layers_to_read))}
-    else:
-        table_dict = {layer: read_layer(matched_layers[layer]) for layer in layers_to_read}
-
-    # Handle different key column names between flowpaths and flowpath_attributes
-    flowpaths_df = table_dict.get("flowpaths", pd.DataFrame())
-    flowpath_attributes_df = table_dict.get("flowpath_attributes", pd.DataFrame())
-
-    # Check if 'link' column exists and rename it to 'id'
-    if "link" in flowpath_attributes_df.columns:
-        # v2.2 Hydrofabric files have both a link and an id in flowpath_attributes
-        # Dropping columns that are duplicated in the two dataframes
-        if "id" in flowpath_attributes_df.columns:
-            flowpath_attributes_df.drop(columns=["id"], inplace=True)
-        if "toid" in flowpath_attributes_df.columns:
-            flowpath_attributes_df.drop(columns=["toid"], inplace=True)
-        if "vpuid" in flowpath_attributes_df.columns:
-            flowpath_attributes_df.drop(columns=["vpuid"], inplace=True)
-        if "geometry" in flowpath_attributes_df.columns:
-            flowpath_attributes_df.drop(columns=["geometry"], inplace=True)
-        flowpath_attributes_df.rename(columns={"link": "id"}, inplace=True)
-
-    # Merge flowpaths and flowpath_attributes
-    flowpaths = pd.merge(flowpaths_df, flowpath_attributes_df, on="id", how="inner", suffixes=("", "_y"))
-
-    lakes = table_dict.get("lakes", pd.DataFrame())
-    network = table_dict.get("network", pd.DataFrame())
-    nexus = table_dict.get("nexus", pd.DataFrame())
-
-    # add an "id" column to lakes, by merging with hydrolocations based on "hl_link" (i.e, lake_id in lakes)
-    # also, add hl_uri to nexus, by merging with hydrolocations based on nex_id (i.e, id in nexus)
-    if "hydrolocations" in table_dict and not table_dict["hydrolocations"].empty:
-        hydro = table_dict["hydrolocations"]
-
-        # Filter out non-integer hl_link values and convert to integer (assuming valid lake_id values are integers)
-        mask = hydro["hl_link"].apply(lambda x: str(x).replace(".", "", 1).isdigit())
-        hydro = hydro.loc[mask].copy()
-        hydro["hl_link"] = hydro["hl_link"].astype(int)
-
-        if not lakes.empty: 
-            # Convert lake_id to integer and merge with hydrolocations
-            lakes["lake_id"] = lakes["lake_id"].astype(int)
-            lakes = lakes.merge(hydro[["hl_link", "id", "hl_reference"]], left_on="lake_id", right_on="hl_link", how="left")
-
-        # add hl_uri to nexus
-        nexus = nexus.merge(hydro[["nex_id", "hl_uri"]], left_on="id", right_on="nex_id", how="left")
-
-    return flowpaths, lakes, network, nexus
-
-
-def read_json(file_path, edge_list):
-    dfs = []
-    with open(edge_list) as edge_file:
-        edge_data = json.load(edge_file)
-        edge_map = {}
-        wb_id, toid = edge_data[0].keys()
-        for id_dict in edge_data:
-            edge_map[id_dict[wb_id]] = id_dict[toid]
-        with open(file_path) as data_file:
-            json_data = json.load(data_file)
-            for key_wb, value_params in json_data.items():
-                df = pd.json_normalize(value_params)
-                df[wb_id] = key_wb
-                df[toid] = edge_map[key_wb]
-                dfs.append(df)
-        df_main = pd.concat(dfs, ignore_index=True)
-
-    return df_main
-
-
-def read_geojson(file_path):
-    flowpaths = gpd.read_file(file_path)
-    return flowpaths
-
-
-def numeric_id(flowpath):
-    id = flowpath["key"].split("-")[-1]
-    toid = flowpath["downstream"].split("-")[-1]
-    flowpath["key"] = int(float(id))
-    flowpath["downstream"] = int(float(toid))
-    return flowpath
 
 
 def read_ngen_waterbody_df(parm_file, lake_index_field="wb-id", lake_id_mask=None):
@@ -224,22 +79,61 @@ def read_ngen_waterbody_type_df(parm_file, lake_index_field="wb-id", lake_id_mas
 
 def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_parameters, cpu_pool):
     geo_file_path = supernetwork_parameters["geo_file_path"]
-    flowpaths = lakes = network = pd.DataFrame()
-
     file_type = Path(geo_file_path).suffix
     if file_type == ".gpkg":
-        flowpaths, lakes, network, nexus = read_geopkg(
-            geo_file_path, compute_parameters, waterbody_parameters, cpu_pool
-        )
-    elif file_type == ".json":
-        edge_list = supernetwork_parameters["flowpath_edge_list"]
-        flowpaths = read_json(geo_file_path, edge_list)
-    elif file_type == ".geojson":
-        flowpaths = read_geojson(geo_file_path)
+
+        layers_to_read = [
+            "flowpaths",
+            "reference_flowpaths",
+            "virtual_flowpaths",
+            "virtual_nexus",
+            "waterbodies",
+            # "gages",
+        ]
+
+        # TODO enable lakes to be read into the routing solution here
+        # if waterbody_parameters.get("break_network_at_waterbodies", False):
+        #     layers_to_read.extend(["lakes", "nexus"])
+
+        # data_assimilation_parameters = compute_parameters.get("data_assimilation_parameters", {})
+        # if any(
+        #     [
+        #         data_assimilation_parameters.get("streamflow_da", {}).get("streamflow_nudging", False),
+        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usgs", False),
+        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usace", False),
+        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usbr", False),
+        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_rfc_da", {}).get("reservoir_rfc_forecasts", False),
+        #     ]
+        # ):
+        #     layers_to_read.append("network")
+
+        def read_layer(layer_name):
+            if layer_name:
+                try:
+                    _df = gpd.read_file(geo_file_path, layer=layer_name)
+                    if 'geometry' in _df.columns:
+                        _df = _df.drop(columns=["geometry"])
+                    return _df
+                except pyogrio.errors.DataSourceError as e:
+                    print(f"Error reading file {geo_file_path}: {e}")
+                    raise pyogrio.errors.DataSourceError from e
+                except pyogrio.errors.DataLayerError as e:
+                    print(f"Error reading layer {layer_name}: {e}")
+                    raise pyogrio.errors.DataLayerError from e
+
+        # Retrieve geopackage information using matched layer names
+        if cpu_pool > 1:
+            with Parallel(n_jobs=min(cpu_pool, len(layers_to_read))) as parallel:
+                gpkg_list = parallel(delayed(read_layer)(layer) for layer in layers_to_read)
+
+            table_dict = {layers_to_read[i]: gpkg_list[i] for i in range(len(layers_to_read))}
+        else:
+            table_dict = {layer: read_layer(layer) for layer in layers_to_read}
+
     else:
         raise RuntimeError("Unsupported file type: {}".format(file_type))
 
-    return flowpaths, lakes, network, nexus
+    return table_dict
 
 
 def load_bmi_data(
@@ -317,7 +211,7 @@ class NHF(AbstractNetwork):
         self.showtiming = showtiming
 
         if self.verbose:
-            print("creating supernetwork connections set")
+            print("creating NHF supernetwork connections set")
         if self.showtiming:
             start_time = time.time()
 
@@ -325,7 +219,8 @@ class NHF(AbstractNetwork):
         # Load hydrofabric information
         # ------------------------------------------------
         if self.preprocessing_parameters.get("use_preprocessed_data", False):
-            self.read_preprocessed_data()
+            raise NotImplementedError("Preprocessed data reads not implemented")
+            # self.read_preprocessed_data()
         else:
             # FIXME: Temporary solution, from_files should only be from command line.
             # Update this once ngen framework is capable of providing this info via BMI.
@@ -333,23 +228,31 @@ class NHF(AbstractNetwork):
             if not from_files_copy:
                 from_files = True
             if from_files:
-                flowpaths, lakes, network, nexus = read_geo_file(
+                nhf = read_geo_file(
                     self.supernetwork_parameters,
                     self.waterbody_parameters,
                     self.compute_parameters,
                     self.compute_parameters.get("cpu_pool", 1),
                 )
+
+                # Handle different key column names between flowpaths and flowpath_attributes
+                flowpaths = nhf["flowpaths"]
+                lakes = nhf["waterbodies"]
+                reference_flowpaths = nhf["reference_flowpaths"]
+                virtual_flowpaths = nhf["virtual_flowpaths"]
+                virtual_nexus = nhf["virtual_nexus"]
             else:
-                flowpaths, lakes, network = load_bmi_data(
-                    value_dict,
-                    bmi_parameters,
-                )
+                raise NotImplementedError("BMI loading not implemented for the NHF")
+                # flowpaths, lakes, network = load_bmi_data(
+                #     value_dict,
+                #     bmi_parameters,
+                # )
             # FIXME: See FIXME above.
             if not from_files_copy:
                 from_files = False
 
             # Preprocess network objects
-            self.preprocess_network(flowpaths, nexus)
+            self.preprocess_network(flowpaths, reference_flowpaths, virtual_flowpaths)
 
             self.crosswalk_nex_flowpath_poi(flowpaths, nexus)
 
@@ -405,34 +308,24 @@ class NHF(AbstractNetwork):
     def waterbody_null(self):
         return np.nan  # pd.NA
 
-    def preprocess_network(self, flowpaths, nexus):
-        self._dataframe = flowpaths
-
-        cols = self.supernetwork_parameters.get("columns", None)
-        if cols:
-            col_idx = list(set(cols.values()).intersection(set(self.dataframe.columns)))
-            self._dataframe = self.dataframe[col_idx]
-            # Rename parameter columns to standard names: from route-link names
-            #        key: "link"
-            #        downstream: "to"
-            #        dx: "Length"
-            #        n: "n"  # TODO: rename to `manningn`
-            #        ncc: "nCC"  # TODO: rename to `mannningncc`
-            #        s0: "So"  # TODO: rename to `bedslope`
-            #        bw: "BtmWdth"  # TODO: rename to `bottomwidth`
-            #        waterbody: "NHDWaterbodyComID"
-            #        gages: "gages"
-            #        tw: "TopWdth"  # TODO: rename to `topwidth`
-            #        twcc: "TopWdthCC"  # TODO: rename to `topwidthcc`
-            #        alt: "alt"
-            #        musk: "MusK"
-            #        musx: "MusX"
-            #        cs: "ChSlp"  # TODO: rename to `sideslope`
-            self._dataframe = self.dataframe.rename(columns=reverse_dict(cols))
-
-        # Don't need the string prefix anymore, drop it
-        mask = ~self.dataframe["downstream"].str.startswith("tnx")
-        self._dataframe = self.dataframe.apply(numeric_id, axis=1)
+    def preprocess_network(self, flowpaths, reference_flowpaths, virtual_flowpaths):
+        assert not virtual_flowpaths.empty, "No virtual flowpaths read to memory from .gpkg" 
+        vfp_to_fp_map = reference_flowpaths[['virtual_fp_id', 'fp_id', 'div_id']].copy()
+        _vfp = virtual_flowpaths.merge(
+            vfp_to_fp_map,
+            left_on='virtual_fp_id',
+            right_on='virtual_fp_id',
+            how='left'
+        )
+        result = _vfp.merge(
+            flowpaths,
+            left_on='fp_id',
+            right_on='fp_id',
+            how='left',
+            suffixes=('_vfp', '_fp')
+        )
+        self._dataframe = vfp
+        
 
         # make the flowpath linkage, ignore the terminal nexus
         self._flowpath_dict = dict(zip(self.dataframe.loc[mask].downstream, self.dataframe.loc[mask].key))
@@ -483,7 +376,7 @@ class NHF(AbstractNetwork):
         # and filtered for only diffusive domain tailwaters in AbstractNetwork.py.
         # Location information will be used to advertise tailwater locations of diffusive domains
         # to the model engine/coastal models
-        self._nexus_latlon = nexus
+        # self._nexus_latlon = nexus
 
     def crosswalk_nex_flowpath_poi(self, flowpaths, nexus):
         mask_flowpaths = flowpaths["toid"].str.startswith(("nex-", "tnex-"))

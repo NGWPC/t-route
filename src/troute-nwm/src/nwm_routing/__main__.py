@@ -15,7 +15,8 @@ import numpy as np
 import pandas as pd
 
 from .input import _input_handler_v03, _input_handler_v04
-from .nwm_routing import nwm_route
+from .nwm_route import nwm_route
+from .nhf_routing import nhf_routing
 from .preprocess import (
     nwm_network_preprocess,
     nwm_initial_warmstate_preprocess,
@@ -2006,9 +2007,9 @@ if __name__ == "__main__":
         "--input-version",
         default=4,
         nargs="?",
-        choices=[2, 3, 4],
+        choices=[3, 4, 5],
         type=int,
-        help="Use version 3 or 4 of the input format. Default 4",
+        help="Use version 3, 4, or 5 of the input format. Default 4",
     )
     v_args = v_parser.parse_known_args()
     '''
@@ -2024,3 +2025,6 @@ if __name__ == "__main__":
     if v_args[0].input_version == 4:
         LOG.info("Running main v04 - looping")
         main_v04(v_args[1])
+    if v_args[0].input_version == 5:
+        LOG.info("Running main v05 for NHF Routing - looping")
+        nhf_routing(v_args[1])

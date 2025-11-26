@@ -7,7 +7,7 @@ from .input import _input_handler_v04
 from .nwm_route import nwm_route
 from .output import nwm_output_generator
 
-from troute.HYFeaturesNetwork import NHF
+from troute.NHF import NHF
 from troute.DataAssimilation import DataAssimilation
 
 import troute.nhd_network_utilities_v02 as nnu
