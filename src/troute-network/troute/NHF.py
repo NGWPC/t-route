@@ -278,6 +278,7 @@ class NHF(AbstractNetwork):
                 gages
             )
 
+
         if self.verbose:
             print("supernetwork connections set complete")
         if self.showtiming:
