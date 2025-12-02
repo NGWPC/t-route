@@ -91,7 +91,7 @@ levelpool_reservoirs = Extension(
              "troute/network/reservoirs/levelpool/levelpool.{}".format(ext),
              "troute/network/logger.c",
              ],
-    include_dirs=[np.get_include(),  "troute/network/"],
+    include_dirs=[np.get_include(), "troute/network/"],
     extra_objects=["./libs/binding_lp.a"],
     libraries=["netcdff", "netcdf"],
     extra_compile_args=["-g"],
@@ -101,8 +101,9 @@ levelpool_reservoirs = Extension(
 #    "troute.network.reservoirs.hybrid.hybrid",
 #    sources=[
 #             "troute/network/reservoirs/hybrid/hybrid.{}".format(ext),
+#             "troute/network/logger.c",
 #             ],
-#    include_dirs=[np.get_include()],
+#    include_dirs=[np.get_include(), "troute/network/"],
 #    extra_objects=["./libs/bind_hybrid.a"],
 #    libraries=["netcdff", "netcdf"],
 #    extra_compile_args=["-g"],
@@ -112,6 +113,7 @@ rfc_reservoirs = Extension(
     "troute.network.reservoirs.rfc.rfc",
     sources=[
              "troute/network/reservoirs/rfc/rfc.{}".format(ext),
+             "troute/network/logger.c",
              ],
     include_dirs=[np.get_include(),  "troute/network/"],
     extra_objects=["./libs/bind_rfc.a"],
