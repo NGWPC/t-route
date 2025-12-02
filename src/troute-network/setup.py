@@ -89,6 +89,7 @@ levelpool_reservoirs = Extension(
     "troute.network.reservoirs.levelpool.levelpool",
     sources=[
              "troute/network/reservoirs/levelpool/levelpool.{}".format(ext),
+             "troute/network/logger.c",
              ],
     include_dirs=[np.get_include(),  "troute/network/"],
     extra_objects=["./libs/binding_lp.a"],
@@ -119,7 +120,7 @@ rfc_reservoirs = Extension(
 )
 
 package_data = {"troute": ["__init__.pxd"],
-                "troute.network": ["reach.pxd", "__init__.pxd", "reach_structs.h", "reach_structs.c"],
+                "troute.network": ["reach.pxd", "__init__.pxd", "reach_structs.h", "reach_structs.c", "logger.h"],
                 "troute.network.musking": ["mc_reach.pxd", "__init__.pxd", "mc_reach_structs.h", "mc_reach_structs.c"],
                 "troute.network.reservoirs":["__init__.pxd"],
                 "troute.network.reservoirs.levelpool":["__init__.pxd", "levelpool.pxd", "levelpool_structs.h", "levelpool_structs.c"],
