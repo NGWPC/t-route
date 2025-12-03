@@ -29,7 +29,7 @@ compute_parameters:
         qts_subdivisions            : 12
         dt                          : 300 # [sec]
         qlat_input_folder           : channel_forcing/
-        qlat_file_pattern_filter    : "*CHROUT_DOMAIN1.csv"
+        qlat_file_pattern_filter    : "*.CHRTOUT_DOMAIN1.csv"
         nts                         : 5760 #288 for 1day THIS HAS TO MATCH THE SIMULATION TIME PERIOD
         max_loop_size               : 288 # [hr]  
     data_assimilation_parameters:

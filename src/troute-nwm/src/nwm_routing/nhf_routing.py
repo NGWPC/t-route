@@ -111,7 +111,6 @@ def nhf_routing(argv):
         value_dict=None,
         da_run=da_sets[0],
         )
-
     
     forcing_end_time = time.time()
     task_times['forcing_time'] += forcing_end_time - network_end_time

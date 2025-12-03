@@ -8,13 +8,11 @@ from itertools import chain
 from pathlib import Path
 from pprint import pformat
 
-import fiona
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pyogrio
 import pyarrow.parquet as pq
-import troute.nhd_io as nhd_io  # FIXME
 import xarray as xr
 from joblib import Parallel, delayed
 from troute.nhd_network import extract_connections, reachable, reverse_dict, reverse_network
@@ -24,6 +22,60 @@ from .rfc_lake_gage_crosswalk import get_great_lakes_climatology, get_rfc_lake_g
 
 __verbose__ = False
 __showtiming__ = False
+
+def distribute_qlateral_to_virtual_flowpaths(
+    div_lateralflows_df: pd.DataFrame,
+    vfp_dataframe: pd.DataFrame,
+    flowpath_dict: dict,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Distribute lateral flows from divides to virtual flowpaths by area percentage.
+    
+    Parameters
+    ----------
+    div_lateralflows_df : pd.DataFrame
+        Lateral flows indexed by div_id, columns are timestamps
+    vfp_dataframe : pd.DataFrame
+        Virtual flowpath dataframe indexed by virtual_fp_id
+    flowpath_dict : dict
+        Mapping of {dn_virtual_nex_id: downstream_flowpath_id}
+        
+    Returns
+    -------
+    routing_qlats : pd.DataFrame
+        Qlats for routing segments, indexed by virtual_fp_id
+    flow_scaling_df : pd.DataFrame
+        Qlats for non-routing segments, indexed by virtual_fp_id
+    """
+    vfp_to_div = vfp_dataframe[['div_id', 'percentage_area_contribution', 'dn_virtual_nex_id', 'routing_segment']].copy()
+    vfp_to_div['div_id'] = vfp_to_div['div_id'].astype(int)
+    
+    # Distribute qlat from div to virtual flowpaths by area percentage
+    parent_qlats = div_lateralflows_df.reindex(vfp_to_div['div_id'].values)
+    parent_qlats.index = vfp_to_div.index  # index is virtual_fp_id
+    
+    _qlats_df = parent_qlats.mul(vfp_to_div['percentage_area_contribution'].values, axis=0)
+    
+    # Split routing vs non-routing
+    routing_mask = vfp_to_div['routing_segment']
+    
+    # Routing segments: keep indexed by virtual_fp_id
+    routing_qlats = _qlats_df[routing_mask].copy()
+    
+    # Non-routing segments: remap to downstream routing flowpath
+    non_routing_qlats = _qlats_df[~routing_mask].copy()
+    dn_nex_ids = vfp_to_div.loc[non_routing_qlats.index, 'dn_virtual_nex_id']
+    downstream_fp = dn_nex_ids.map(flowpath_dict)
+    non_routing_qlats.index = downstream_fp.values
+    
+    # Add non-routing flows to their downstream routing flowpaths
+    aggregated_non_routing = non_routing_qlats.groupby(non_routing_qlats.index).sum()
+    routing_qlats = routing_qlats.add(aggregated_non_routing, fill_value=0)
+    
+    # Keep original non-routing indexed by virtual_fp_id for flow scaling reference
+    flow_scaling_df = _qlats_df[~routing_mask].copy()
+    
+    return routing_qlats, flow_scaling_df
 
 
 def read_ngen_waterbody_df(parm_file, lake_index_field="wb-id", lake_id_mask=None):
@@ -179,6 +231,7 @@ class NHF(AbstractNetwork):
         "_upstream_terminal",
         "_nexus_latlon",
         "_duplicate_ids_df",
+        "_flow_scaling_segment_df"
     ]
 
     def __init__(
@@ -315,8 +368,27 @@ class NHF(AbstractNetwork):
         return self._gages
 
     @property
+    def great_lakes_climatology_df(self):
+        return pd.DataFrame()
+
+    @property
     def waterbody_null(self):
         return np.nan  # pd.NA
+
+    @property
+    def segment_index(self):
+        """
+            Segment IDs of all reaches in parameter dataframe
+            and diffusive domain.
+        """
+        # list of all segments in the domain (MC + diffusive)
+        self._segment_index = self.dataframe[self.dataframe["routing_segment"]].index  # only getting routing_segment == True virtual_flowpaths
+        if self._routing.diffusive_network_data:
+            for tw in self._routing.diffusive_network_data:
+                self._segment_index = self._segment_index.append(
+                    pd.Index(self._routing.diffusive_network_data[tw]['mainstem_segs'])
+                )
+        return self._segment_index
 
     def _build_upstream_dict_from_nexus(
         self, flowpaths_df: pd.DataFrame, edge_id: str = "fp_id", node_id: str = "nex_id"
@@ -775,7 +847,6 @@ class NHF(AbstractNetwork):
         qts_subdivisions = run.get("qts_subdivisions", 1)
         nts = run.get("nts", 1)
         qlat_input_folder = run.get("qlat_input_folder", None)
-        qlat_input_file = run.get("qlat_input_file", None)
 
         if qlat_input_folder:
             qlat_input_folder = Path(qlat_input_folder)
@@ -793,18 +864,7 @@ class NHF(AbstractNetwork):
             # data in memory for large domains and many timesteps... - shorvath, Feb 28, 2024
             qlat_file_pattern_filter = self.forcing_parameters.get("qlat_file_pattern_filter", None)
             if qlat_file_pattern_filter == "nex-*":
-                for f in qlat_files:
-                    df = pd.read_csv(f, names=["timestamp", "qlat"], index_col=[0])
-                    df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.strftime("%Y%m%d%H%M")
-                    df = df.set_index("timestamp")
-                    df = df.T
-                    df.index = [int(os.path.basename(f).split("-")[1].split("_")[0])]
-                    df = df.rename_axis(None, axis=1)
-                    df.index.name = "feature_id"
-                    dfs.append(df)
-
-                # lateral flows [m^3/s] are stored at NEXUS points with NEXUS ids
-                nexuses_lateralflows_df = pd.concat(dfs, axis=0)
+                raise NotImplementedError("Nex-output not implemented!")
             else:
                 for f in qlat_files:
                     df = read_file(f)
@@ -817,73 +877,41 @@ class NHF(AbstractNetwork):
                     df = df.set_index("feature_id")
                     dfs.append(df)
 
-                # lateral flows [m^3/s] are stored at NEXUS points with NEXUS ids
-                nexuses_lateralflows_df = pd.concat(dfs, axis=1)
+                # lateral flows [m^3/s] indexed by div_id (divide/catchment)
+                div_lateralflows_df = pd.concat(dfs, axis=1)
 
-            # Take flowpath ids entering NEXUS and replace NEXUS ids by the upstream flowpath ids
-            qlats_df = nexuses_lateralflows_df.rename(index=self.downstream_flowpath_dict)
-            qlats_df = qlats_df[qlats_df.index.isin(self.segment_index)]
-
-            """
-            #For a terminal nexus, we want to include the lateral flow from the catchment contributing to that nexus
-            #one way to do that is to cheat and put that lateral flow at the upstream...this is probably the simplest way
-            #right now.  The other is to create a virtual channel segment downstream to "route" i.e accumulate into
-            #but it isn't clear right now how to do that with flow/velocity/depth requirements
-            #find the terminal nodes
-            for tnx, test_up in self._upstream_terminal.items():
-                #first need to ensure there is an upstream location to dump to
-                pdb.set_trace()
-                for nex in test_up:
-                    try:
-                        #FIXME if multiple upstreams exist in this case then a choice is to be made as to which it goes into
-                        #some cases the choice is easy cause the upstream doesn't exist, but in others, it may not be so simple
-                        #in such cases where multiple valid upstream nexuses exist, perhaps the mainstem should be used?
-                        pdb.set_trace()
-                        qlats_df.loc[up] += nexuses_lateralflows_df.loc[tnx]
-                        break #flow added, don't add it again!
-                    except KeyError:
-                        #this upstream doesn't actually exist on the network (maybe it is a headwater?)
-                        #or perhaps the output file doesnt exist?  If this is the case, this isn't a good trap
-                        #but for now, add the flow to a known good nexus upstream of the terminal
-                        continue
-                    #TODO what happens if can't put the qlat anywhere?  Right now this silently ignores the issue...
-                qlats_df.drop(tnx, inplace=True)
-            """
-
-            # The segment_index has the full network set of segments/flowpaths.
-            # Whereas the set of flowpaths that are downstream of nexuses is a
-            # subset of the segment_index. Therefore, all of the segments/flowpaths
-            # that are not accounted for in the set of flowpaths downstream of
-            # nexuses need to be added to the qlateral dataframe and padded with
-            # zeros.
-            all_df = pd.DataFrame(
-                np.zeros((len(self.segment_index), len(qlats_df.columns))),
+                # Distribute to downstream flowpaths for routing, keep virtual_fp_id for flow scaling
+                nexus_to_downstream_fp = dict(zip(
+                    self._dataframe['up_virtual_nex_id'].dropna().astype(int),
+                    self._dataframe.loc[self._dataframe['up_virtual_nex_id'].notna()].index
+                ))
+                qlats_df, self._flow_scaling_segment_df = distribute_qlateral_to_virtual_flowpaths(
+                    div_lateralflows_df,
+                    self._dataframe,
+                    nexus_to_downstream_fp,
+                )
+        else:
+            raise ValueError("qlat_input_folder does not exist")
+        all_df = pd.DataFrame(
+            np.zeros((len(self.segment_index), len(qlats_df.columns))),
                 index=self.segment_index,
                 columns=qlats_df.columns,
-            )
-            all_df.loc[qlats_df.index] = qlats_df
-            qlats_df = all_df.sort_index()
+        )
+        all_df.loc[qlats_df.index] = qlats_df
+        qlats_df = all_df.sort_index()
 
-        elif qlat_input_file:
-            qlats_df = nhd_io.get_ql_from_csv(qlat_input_file)
-        else:
-            qlat_const = run.get("qlat_const", 0)
-            qlats_df = pd.DataFrame(
-                qlat_const,
-                index=self.segment_index,
-                columns=range(nts // qts_subdivisions),
-                dtype="float32",
-            )
-
-        # TODO: Make a more sophisticated date-based filter
+        # column filtering
         max_col = 1 + nts // qts_subdivisions
         if len(qlats_df.columns) > max_col:
             qlats_df.drop(qlats_df.columns[max_col:], axis=1, inplace=True)
 
+        # final filter to segment_index
         if not self.segment_index.empty:
             qlats_df = qlats_df[qlats_df.index.isin(self.segment_index)]
 
         self._qlateral = qlats_df
+
+
 
     def build_et_array(
         self,
