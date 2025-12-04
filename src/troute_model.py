@@ -4,7 +4,7 @@ import yaml
 import time
 
 from troute.config import Config
-import nwm_routing.__main__ as tr
+import nwm_routing.nwm_route as tr
 
 from troute.network import bmi_array2df as a2df
 

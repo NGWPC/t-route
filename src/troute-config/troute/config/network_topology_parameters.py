@@ -48,6 +48,15 @@ class SupernetworkParameters(BaseModel):
     Path to the hydrofabric. Currently accepts geopackage (assumes HYFeatures), geojson (assumes HYFeatures), 
     json (assumes HYFeatures), netcdf (assumes NHD).
     """
+
+    nhf_discretization_len: float = Field(
+        default=300, description="The length of the discretization segments within T-Route for NHF routing"
+    )
+                                          
+    nhf_discretization_buffer: float = Field(
+        default=0.3334, description="The % buffering to use when determining discretization for routing"
+    )
+
     network_type: Literal["HYFeaturesNetwork", "NHDNetwork"] = "HYFeaturesNetwork"
     """
     Specify if this is an NHD network or a HYFeatures network.
