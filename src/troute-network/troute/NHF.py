@@ -390,45 +390,42 @@ class NHF(AbstractNetwork):
                 )
         return self._segment_index
 
-    def _build_upstream_dict_from_nexus(
-        self, flowpaths_df: pd.DataFrame, edge_id: str = "fp_id", node_id: str = "nex_id"
-    ) -> dict[int, list[int]]:
-        """Build upstream connectivity dictionary from flowpath nexus connections."""
-        fp_df = flowpaths_df.copy()
-        fp_df[edge_id] = fp_df[edge_id].astype('Int32')
-        fp_df[f"up_{node_id}"] = fp_df[f"up_{node_id}"].astype('Int32')
-        fp_df[f"dn_{node_id}"] = fp_df[f"dn_{node_id}"].astype('Int32')
+
+    def _build_downstream_connections(self, virtual_flowpaths: pd.DataFrame) -> dict[int, list[int]]:
+        """
+        Build downstream connectivity: {virtual_fp_id: [downstream_virtual_fp_ids]}
         
-        # nexus -> downstream flowpath (which flowpath is downstream of this nexus)
-        nexus_to_downstream = (
-            fp_df[[f"up_{node_id}", edge_id]]
-            .dropna(subset=[f"up_{node_id}"])
-            .rename(columns={f"up_{node_id}": node_id, edge_id: f"dn_{edge_id}"})
-        )
+        Logic:
+        - Flowpath A has dn_virtual_nex_id = X
+        - Flowpath B has up_virtual_nex_id = X
+        - Therefore A -> B (A flows into B)
+        """
+        vfp = virtual_flowpaths.copy()
         
-        # nexus -> upstream flowpath (which flowpath is upstream of this nexus)
-        nexus_to_upstream = (
-            fp_df[[f"dn_{node_id}", edge_id]]
-            .dropna(subset=[f"dn_{node_id}"])
-            .rename(columns={f"dn_{node_id}": node_id, edge_id: f"up_{edge_id}"})
-        )
-        
-        # Join on nexus to get: downstream_flowpath <- nexus -> upstream_flowpath
-        connections = nexus_to_upstream.merge(
-            nexus_to_downstream, 
-            on=node_id, 
-            how="inner"
-        )[[f"dn_{edge_id}", f"up_{edge_id}"]]
-        
-        # Convert to dictionary: {upstream_segment: [downstream_segment]}
-        connections_dict = (
-            connections
-            .groupby(f"up_{edge_id}")[f"dn_{edge_id}"]
+        # Map: nexus_id -> list of flowpaths that have this nexus as their UPSTREAM nexus
+        # These are the flowpaths DOWNSTREAM of that nexus
+        nex_to_downstream_fps = (
+            vfp[vfp['up_virtual_nex_id'].notna()]
+            .groupby('up_virtual_nex_id')['virtual_fp_id']
             .apply(list)
             .to_dict()
         )
         
-        return connections_dict
+        # Build connections: for each flowpath, find flowpath(s) downstream via nexus join
+        connections = {}
+        for _, row in vfp.iterrows():
+            fp_id = row['virtual_fp_id']
+            dn_nex = row['dn_virtual_nex_id']
+            
+            if pd.isna(dn_nex):
+                # No downstream nexus - shouldn't happen based on your data
+                connections[fp_id] = []
+            else:
+                # Find flowpaths whose up_virtual_nex_id == this flowpath's dn_virtual_nex_id
+                downstream_fps = nex_to_downstream_fps.get(dn_nex, [])
+                connections[fp_id] = downstream_fps
+        
+        return connections
 
 
     def preprocess_network(self, flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus):
@@ -469,11 +466,15 @@ class NHF(AbstractNetwork):
             self._upstream_terminal.setdefault(row["virtual_nex_id"], set()).add(upstream_vfp["virtual_fp_id"].item())
 
         # build connections dictionary
-        self._connections = self._build_upstream_dict_from_nexus(
-            virtual_flowpaths,
-            edge_id="virtual_fp_id",
-            node_id="virtual_nex_id"
-        )
+        self._connections = self._build_downstream_connections(virtual_flowpaths[virtual_flowpaths["routing_segment"]])  # only making connections for routable segments
+
+        # Mark terminal flowpaths (those whose dn_virtual_nex_id is a terminal nexus)
+        terminals = virtual_nexus[pd.isna(virtual_nexus["dn_virtual_fp_id"])]
+        terminal_nex_ids = set(terminals["virtual_nex_id"].tolist())
+
+        for fp_id, dn_nex in zip(virtual_flowpaths['virtual_fp_id'], virtual_flowpaths['dn_virtual_nex_id']):
+            if dn_nex in terminal_nex_ids:
+                self._connections[fp_id] = []
 
         # Store a dataframe containing info about nexus points. This will be reprojected to lat/lon
         # and filtered for only diffusive domain tailwaters in AbstractNetwork.py.

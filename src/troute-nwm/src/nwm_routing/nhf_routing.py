@@ -3,6 +3,8 @@ import argparse
 import logging
 import time
 
+import numpy as np
+
 from .input import _input_handler_v04
 from .nwm_route import nwm_route
 from .output import nwm_output_generator
@@ -179,6 +181,32 @@ def nhf_routing(argv):
         
         route_start_time = time.time()
 
+        routing_df = network.dataframe[network.dataframe["routing_segment"]][[
+            "n",
+            "mainstem_lp",
+            "topwdth",
+            "slope",
+            "ncc",
+            "btmwdth",
+            "length_km",
+            "musx",
+            "chslp",
+            "topwdthcc",
+            "musk"
+        ]].copy()
+        routing_df["alt"] = np.zeros_like(routing_df["n"].values)
+        routing_df = routing_df.rename(columns={
+            "mainstem_lp": "mainstem",
+            "topwdth": "tw",
+            "slope": "s0",
+            "btmwdth": "bw",
+            "length_km": "dx",
+            "chslp": "cs",
+            "topwdthcc": "twcc"
+        })
+        routing_df["dx"] = routing_df["dx"] * 1000  # converted to meters
+
+
         run_results = nwm_route(
             network.connections, 
             network.reverse_network, 
@@ -193,7 +221,7 @@ def nhf_routing(argv):
             nts,
             qts_subdivisions,
             network.independent_networks, 
-            network.dataframe,
+            routing_df, # only routing where there are routing segments
             network.q0,
             network._qlateral,
             network._eloss,
