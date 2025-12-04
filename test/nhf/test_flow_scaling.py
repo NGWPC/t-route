@@ -3,7 +3,7 @@ import pytest
 import pandas as pd
 import numpy as np
 
-from troute.NHF import distribute_qlateral_to_virtual_flowpaths  # adjust import path
+from troute.NHF import distribute_qlateral_to_virtual_flowpaths
 
 
 class TestDistributeQlateralToVirtualFlowpaths:
