@@ -3,6 +3,9 @@ import argparse
 import logging
 import time
 
+import numpy as np
+
+from .flow_scaling_utils import append_nonrouting_to_run_results
 from .input import _input_handler_v04
 from .nwm_route import nwm_route
 from .output import nwm_output_generator
@@ -12,7 +15,6 @@ from troute.DataAssimilation import DataAssimilation
 
 import troute.nhd_network_utilities_v02 as nnu
 import troute.hyfeature_network_utilities as hnu
-
 
 
 LOG = logging.getLogger('')
@@ -179,7 +181,33 @@ def nhf_routing(argv):
         
         route_start_time = time.time()
 
-        run_results = nwm_route(
+        routing_df = network.dataframe[network.dataframe["routing_segment"]][[
+            "n",
+            "mainstem_lp",
+            "topwdth",
+            "slope",
+            "ncc",
+            "btmwdth",
+            "length_km",
+            "musx",
+            "chslp",
+            "topwdthcc",
+            "musk"
+        ]].copy()
+        routing_df["alt"] = np.zeros_like(routing_df["n"].values)
+        routing_df = routing_df.rename(columns={
+            "mainstem_lp": "mainstem",
+            "topwdth": "tw",
+            "slope": "s0",
+            "btmwdth": "bw",
+            "length_km": "dx",
+            "chslp": "cs",
+            "topwdthcc": "twcc"
+        })
+        routing_df["dx"] = routing_df["dx"] * 1000  # converted to meters
+
+
+        run_results, subnetwork_list = nwm_route(
             network.connections, 
             network.reverse_network, 
             network.waterbody_connections, 
@@ -193,7 +221,7 @@ def nhf_routing(argv):
             nts,
             qts_subdivisions,
             network.independent_networks, 
-            network.dataframe,
+            routing_df, # only routing where there are routing segments
             network.q0,
             network._qlateral,
             network._eloss,
@@ -228,14 +256,18 @@ def nhf_routing(argv):
             firstRun,
             logFileName            
         )
-      
-        # returns list, first item is run result, second item is subnetwork items
-        subnetwork_list = run_results[1]
-        run_results = run_results[0]
-
         
         route_end_time = time.time()
         task_times['route_time'] += route_end_time - route_start_time
+
+        # Add flow-scaling to run-results
+        LOG.info(f"Running Flow-Scaling for run set: {run_set_iterator}")
+        run_results = append_nonrouting_to_run_results(
+            run_results,
+            network._flow_scaling_segment_df,
+            qts_subdivisions,
+            nts,
+        )
 
         # create initial conditions for next loop itteration
         network.new_q0(run_results)
@@ -276,9 +308,8 @@ def nhf_routing(argv):
         else:
             poi_crosswalk = dict()
 
-        output_start_time = time.time()  
-        
-        #TODO Update this to work with either network type...
+        output_start_time = time.time() 
+                
         nwm_output_generator(
             run,
             run_results,
