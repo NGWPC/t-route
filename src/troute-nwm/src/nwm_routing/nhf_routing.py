@@ -5,6 +5,7 @@ import time
 
 import numpy as np
 
+from .flow_scaling_utils import append_nonrouting_to_run_results
 from .input import _input_handler_v04
 from .nwm_route import nwm_route
 from .output import nwm_output_generator
@@ -14,7 +15,6 @@ from troute.DataAssimilation import DataAssimilation
 
 import troute.nhd_network_utilities_v02 as nnu
 import troute.hyfeature_network_utilities as hnu
-
 
 
 LOG = logging.getLogger('')
@@ -207,7 +207,7 @@ def nhf_routing(argv):
         routing_df["dx"] = routing_df["dx"] * 1000  # converted to meters
 
 
-        run_results = nwm_route(
+        run_results, subnetwork_list = nwm_route(
             network.connections, 
             network.reverse_network, 
             network.waterbody_connections, 
@@ -256,14 +256,18 @@ def nhf_routing(argv):
             firstRun,
             logFileName            
         )
-      
-        # returns list, first item is run result, second item is subnetwork items
-        subnetwork_list = run_results[1]
-        run_results = run_results[0]
-
         
         route_end_time = time.time()
         task_times['route_time'] += route_end_time - route_start_time
+
+        # Add flow-scaling to run-results
+        LOG.info(f"Running Flow-Scaling for run set: {run_set_iterator}")
+        run_results = append_nonrouting_to_run_results(
+            run_results,
+            network._flow_scaling_segment_df,
+            qts_subdivisions,
+            nts,
+        )
 
         # create initial conditions for next loop itteration
         network.new_q0(run_results)
@@ -304,9 +308,8 @@ def nhf_routing(argv):
         else:
             poi_crosswalk = dict()
 
-        output_start_time = time.time()  
-        
-        #TODO Update this to work with either network type...
+        output_start_time = time.time() 
+                
         nwm_output_generator(
             run,
             run_results,
