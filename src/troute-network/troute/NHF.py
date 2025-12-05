@@ -1,12 +1,9 @@
-import json
-import os
-import re
 import time
 from collections import defaultdict
-from datetime import datetime
 from itertools import chain
 from pathlib import Path
 from pprint import pformat
+from typing import Optional
 
 import geopandas as gpd
 import numpy as np
@@ -15,13 +12,245 @@ import pyogrio
 import pyarrow.parquet as pq
 import xarray as xr
 from joblib import Parallel, delayed
-from troute.nhd_network import extract_connections, reachable, reverse_dict, reverse_network
+from troute.nhd_network import reverse_network
 
 from .AbstractNetwork import AbstractNetwork
-from .rfc_lake_gage_crosswalk import get_great_lakes_climatology, get_rfc_lake_gage_crosswalk
 
 __verbose__ = False
 __showtiming__ = False
+
+def build_downstream_connections(
+    routing_flowpaths: pd.DataFrame,
+    all_flowpaths: pd.DataFrame,
+    terminal_nexus_ids: Optional[set[int]] = None,
+) -> dict[int, list[int]]:
+    """
+    Build downstream connectivity dictionary mapping flowpath IDs to their downstream flowpath IDs.
+    
+    The NHF data model uses nexus points as connection nodes between flowpaths:
+    - Flowpath A has dn_virtual_nex_id = X (A drains TO nexus X)
+    - Flowpath B has up_virtual_nex_id = X (B receives FROM nexus X)
+    - Therefore A -> B (A flows into B)
+    
+    Parameters
+    ----------
+    routing_flowpaths : pd.DataFrame
+        DataFrame containing ONLY routing segment flowpaths (routing_segment == True).
+        These are the flowpaths that will appear as keys in the connections dict.
+        Must have columns: virtual_fp_id, dn_virtual_nex_id, up_virtual_nex_id
+    all_flowpaths : pd.DataFrame
+        DataFrame containing ALL virtual flowpaths (both routing and non-routing).
+        Used to build the nexus-to-downstream-flowpath mapping.
+        Must have columns: virtual_fp_id, dn_virtual_nex_id, up_virtual_nex_id
+    terminal_nexus_ids : set[int], optional
+        Set of nexus IDs that are terminal (no downstream flowpath).
+        If provided, flowpaths draining to these nexuses will have empty downstream lists.
+        
+    Returns
+    -------
+    dict[int, list[int]]
+        Dictionary mapping each routing virtual_fp_id to a list of downstream virtual_fp_ids.
+        Terminal flowpaths will have empty lists [].
+        
+    Examples
+    --------
+    >>> all_vfp = pd.DataFrame({
+    ...     'virtual_fp_id': [1, 2, 3],
+    ...     'dn_virtual_nex_id': [100, 101, 102],
+    ...     'up_virtual_nex_id': [None, 100, 101],
+    ...     'routing_segment': [True, True, True]
+    ... })
+    >>> routing_vfp = all_vfp[all_vfp['routing_segment']]
+    >>> connections = build_downstream_connections(routing_vfp, all_vfp, terminal_nexus_ids={102})
+    >>> connections
+    {1: [2], 2: [3], 3: []}
+    """
+    if terminal_nexus_ids is None:
+        terminal_nexus_ids = set()
+    
+    # Get the set of routing flowpath IDs for filtering downstream connections
+    routing_fp_ids = set(routing_flowpaths['virtual_fp_id'].tolist())
+    
+    # Map: nexus_id -> list of ROUTING flowpaths that have this nexus as their UPSTREAM nexus
+    # We use all_flowpaths to find the mapping, but filter to only routing segments
+    routing_vfp = all_flowpaths[all_flowpaths['virtual_fp_id'].isin(routing_fp_ids)]
+    nex_to_downstream_fps = (
+        routing_vfp[routing_vfp['up_virtual_nex_id'].notna()]
+        .groupby('up_virtual_nex_id')['virtual_fp_id']
+        .apply(list)
+        .to_dict()
+    )
+    
+    # Build connections: for each routing flowpath, find downstream routing flowpath(s)
+    connections = {}
+    for _, row in routing_flowpaths.iterrows():
+        fp_id = row['virtual_fp_id']
+        dn_nex = row['dn_virtual_nex_id']
+        
+        if pd.isna(dn_nex):
+            # No downstream nexus
+            connections[fp_id] = []
+        elif dn_nex in terminal_nexus_ids:
+            # Downstream nexus is terminal (no further flowpaths)
+            connections[fp_id] = []
+        else:
+            # Find routing flowpaths whose up_virtual_nex_id == this flowpath's dn_virtual_nex_id
+            downstream_fps = nex_to_downstream_fps.get(dn_nex, [])
+            connections[fp_id] = downstream_fps
+    
+    return connections
+
+
+def build_upstream_terminal(
+    virtual_flowpaths: pd.DataFrame,
+    terminal_nexus_ids: set[int],
+) -> dict[int, set[int]]:
+    """
+    Build mapping of terminal nexus IDs to their upstream flowpath IDs.
+    
+    This identifies which flowpaths drain into terminal nexuses (network outlets).
+    
+    Parameters
+    ----------
+    virtual_flowpaths : pd.DataFrame
+        DataFrame containing virtual flowpath information with columns:
+        - virtual_fp_id: unique flowpath identifier
+        - dn_virtual_nex_id: downstream nexus ID for each flowpath
+    terminal_nexus_ids : set[int]
+        Set of nexus IDs that are terminal (no downstream flowpath).
+        
+    Returns
+    -------
+    dict[int, set[int]]
+        Dictionary mapping each terminal nexus ID to a set of upstream flowpath IDs.
+        
+    Examples
+    --------
+    >>> vfp = pd.DataFrame({
+    ...     'virtual_fp_id': [1, 2, 3],
+    ...     'dn_virtual_nex_id': [100, 101, 101],  # fp2 and fp3 both drain to terminal nex 101
+    ... })
+    >>> upstream_terminal = build_upstream_terminal(vfp, terminal_nexus_ids={101})
+    >>> upstream_terminal
+    {101: {2, 3}}
+    """
+    upstream_terminal = {}
+    
+    for _, row in virtual_flowpaths.iterrows():
+        dn_nex = row['dn_virtual_nex_id']
+        if pd.notna(dn_nex) and dn_nex in terminal_nexus_ids:
+            fp_id = row['virtual_fp_id']
+            upstream_terminal.setdefault(dn_nex, set()).add(fp_id)
+    
+    return upstream_terminal
+
+
+def get_terminal_nexus_ids(virtual_nexus: pd.DataFrame) -> set[int]:
+    """
+    Extract terminal nexus IDs from the virtual nexus DataFrame.
+    
+    Terminal nexuses are those with no downstream flowpath (dn_virtual_fp_id is NaN).
+    
+    Parameters
+    ----------
+    virtual_nexus : pd.DataFrame
+        DataFrame containing virtual nexus information with columns:
+        - virtual_nex_id: unique nexus identifier
+        - dn_virtual_fp_id: downstream flowpath ID (NaN for terminals)
+        
+    Returns
+    -------
+    set[int]
+        Set of terminal nexus IDs.
+    """
+    terminals = virtual_nexus[pd.isna(virtual_nexus["dn_virtual_fp_id"])]
+    return set(terminals["virtual_nex_id"].tolist())
+
+
+def validate_connections(connections: dict[int, list[int]]) -> tuple[bool, set[int]]:
+    """
+    Validate that all downstream flowpath IDs in the connections dictionary
+    exist as keys (i.e., they are valid flowpath IDs).
+    
+    This catches the case where nexus IDs are accidentally used instead of
+    flowpath IDs in the connections values.
+    
+    Parameters
+    ----------
+    connections : dict[int, list[int]]
+        Dictionary mapping flowpath IDs to lists of downstream flowpath IDs.
+        
+    Returns
+    -------
+    tuple[bool, set[int]]
+        - bool: True if all downstream IDs are valid, False otherwise
+        - set[int]: Set of orphaned IDs (downstream IDs not found as keys)
+        
+    Examples
+    --------
+    >>> connections = {1: [2], 2: [3], 3: []}
+    >>> is_valid, orphaned = validate_connections(connections)
+    >>> is_valid
+    True
+    >>> orphaned
+    set()
+    
+    >>> bad_connections = {1: [2], 2: [999], 3: []}  # 999 doesn't exist as key
+    >>> is_valid, orphaned = validate_connections(bad_connections)
+    >>> is_valid
+    False
+    >>> orphaned
+    {999}
+    """
+    all_downstream_fps = set(chain.from_iterable(connections.values()))
+    all_fp_ids = set(connections.keys())
+    
+    orphaned = all_downstream_fps - all_fp_ids
+    
+    return len(orphaned) == 0, orphaned
+
+
+def find_headwaters(connections: dict[int, list[int]]) -> set[int]:
+    """
+    Find headwater flowpaths in the network.
+    
+    Headwaters are flowpaths that are never referenced as downstream of any other
+    flowpath (i.e., they appear as keys but never in any values list).
+    
+    Parameters
+    ----------
+    connections : dict[int, list[int]]
+        Dictionary mapping flowpath IDs to lists of downstream flowpath IDs.
+        
+    Returns
+    -------
+    set[int]
+        Set of headwater flowpath IDs.
+    """
+    all_downstream_fps = set(chain.from_iterable(connections.values()))
+    all_fp_ids = set(connections.keys())
+    
+    return all_fp_ids - all_downstream_fps
+
+
+def find_tailwaters(connections: dict[int, list[int]]) -> set[int]:
+    """
+    Find tailwater flowpaths in the network.
+    
+    Tailwaters are flowpaths with no downstream connections (empty list).
+    
+    Parameters
+    ----------
+    connections : dict[int, list[int]]
+        Dictionary mapping flowpath IDs to lists of downstream flowpath IDs.
+        
+    Returns
+    -------
+    set[int]
+        Set of tailwater flowpath IDs.
+    """
+    return {fp_id for fp_id, downstream in connections.items() if not downstream}
+
 
 def distribute_qlateral_to_virtual_flowpaths(
     div_lateralflows_df: pd.DataFrame,
@@ -390,46 +619,6 @@ class NHF(AbstractNetwork):
                 )
         return self._segment_index
 
-    def _build_upstream_dict_from_nexus(
-        self, flowpaths_df: pd.DataFrame, edge_id: str = "fp_id", node_id: str = "nex_id"
-    ) -> dict[int, list[int]]:
-        """Build upstream connectivity dictionary from flowpath nexus connections."""
-        fp_df = flowpaths_df.copy()
-        fp_df[edge_id] = fp_df[edge_id].astype('Int32')
-        fp_df[f"up_{node_id}"] = fp_df[f"up_{node_id}"].astype('Int32')
-        fp_df[f"dn_{node_id}"] = fp_df[f"dn_{node_id}"].astype('Int32')
-        
-        # nexus -> downstream flowpath (which flowpath is downstream of this nexus)
-        nexus_to_downstream = (
-            fp_df[[f"up_{node_id}", edge_id]]
-            .dropna(subset=[f"up_{node_id}"])
-            .rename(columns={f"up_{node_id}": node_id, edge_id: f"dn_{edge_id}"})
-        )
-        
-        # nexus -> upstream flowpath (which flowpath is upstream of this nexus)
-        nexus_to_upstream = (
-            fp_df[[f"dn_{node_id}", edge_id]]
-            .dropna(subset=[f"dn_{node_id}"])
-            .rename(columns={f"dn_{node_id}": node_id, edge_id: f"up_{edge_id}"})
-        )
-        
-        # Join on nexus to get: downstream_flowpath <- nexus -> upstream_flowpath
-        connections = nexus_to_upstream.merge(
-            nexus_to_downstream, 
-            on=node_id, 
-            how="inner"
-        )[[f"dn_{edge_id}", f"up_{edge_id}"]]
-        
-        # Convert to dictionary: {upstream_segment: [downstream_segment]}
-        connections_dict = (
-            connections
-            .groupby(f"up_{edge_id}")[f"dn_{edge_id}"]
-            .apply(list)
-            .to_dict()
-        )
-        
-        return connections_dict
-
 
     def preprocess_network(self, flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus):
         assert not virtual_flowpaths.empty, "No virtual flowpaths read to memory from .gpkg" 
@@ -461,19 +650,26 @@ class NHF(AbstractNetwork):
         self._dataframe.set_index("virtual_fp_id", inplace=True)
         self._dataframe = self.dataframe.sort_index()
         
-        terminal_nexus_points = virtual_nexus[pd.isna(virtual_nexus["dn_virtual_fp_id"])]
-        self._terminal_codes = {nex_id for nex_id in terminal_nexus_points["virtual_nex_id"].tolist()}
-        self._upstream_terminal = dict()
-        for _, row in terminal_nexus_points.iterrows():
-            upstream_vfp = virtual_flowpaths[virtual_flowpaths["dn_virtual_nex_id"] == row["virtual_nex_id"]]
-            self._upstream_terminal.setdefault(row["virtual_nex_id"], set()).add(upstream_vfp["virtual_fp_id"].item())
-
-        # build connections dictionary
-        self._connections = self._build_upstream_dict_from_nexus(
-            virtual_flowpaths,
-            edge_id="virtual_fp_id",
-            node_id="virtual_nex_id"
+        self._terminal_codes = get_terminal_nexus_ids(virtual_nexus)
+        
+        # Build upstream terminal mapping
+        self._upstream_terminal = build_upstream_terminal(virtual_flowpaths, self._terminal_codes)
+        
+        # Build connections dictionary - only for routing segments
+        routing_vfp = virtual_flowpaths[virtual_flowpaths["routing_segment"]]
+        self._connections = build_downstream_connections(
+            routing_flowpaths=routing_vfp,
+            all_flowpaths=virtual_flowpaths,
+            terminal_nexus_ids=self._terminal_codes,
         )
+        
+        # Validate connections
+        is_valid, orphaned = validate_connections(self._connections)
+        if not is_valid:
+            raise ValueError(
+                f"Invalid network connections: {len(orphaned)} downstream IDs not found. "
+                f"First 10: {list(orphaned)[:10]}"
+            )
 
         # Store a dataframe containing info about nexus points. This will be reprojected to lat/lon
         # and filtered for only diffusive domain tailwaters in AbstractNetwork.py.
