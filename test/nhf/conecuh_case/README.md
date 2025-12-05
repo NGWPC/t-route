@@ -8,4 +8,5 @@ source .venv/bin/activate
 ./compiler.sh --uv
 cd test/nhf/conecuh_case
 uv pip install -r requirements.txt
+uv run python -m nwm_routing -V5 -f test_case.yaml
 ```
