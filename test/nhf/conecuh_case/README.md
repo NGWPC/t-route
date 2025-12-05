@@ -8,3 +8,4 @@ source .venv/bin/activate
 ./compiler.sh --uv
 cd test/nhf/conecuh_case
 uv pip install -r requirements.txt
+```
