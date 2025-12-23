@@ -113,7 +113,7 @@ class BmiTroute(Bmi):
     def finalize(self):
         """Finalize model."""
         if self._model is not None:
-            self._model.run(self._values)
+            self._model.finalize(self._values)
             self._model = None
 
     # BMI functions that are not being used yet...

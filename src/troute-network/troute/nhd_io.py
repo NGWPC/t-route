@@ -2381,35 +2381,171 @@ def write_flowveldepth_netcdf(stream_output_directory, file_name,
     # Open netCDF4 Dataset in write mode
     with netCDF4.Dataset(
         filename=f"{stream_output_directory}/{file_name}",
-        mode='w',
+        mode='a',  # append mode (creates if it doesn't exist)
         format='NETCDF4'
     ) as ncfile:
+        # assumes the feature IDs will be the same between instances
 
         # ============ DIMENSIONS ===================
-        _ = ncfile.createDimension('feature_id', len(flow))
-        _ = ncfile.createDimension('time', len(timestamps))
         max_str_len = max(len(str(x)) for x in flow.index.get_level_values('Type'))
-        _ = ncfile.createDimension('type_strlen', max_str_len)
+        # create snapshot of current dimensions
+        feature_id_len = len(ncfile.dimensions["feature_id"]) if "feature_id" in ncfile.dimensions else 0
+        time_len = len(ncfile.dimensions["time"]) if "time" in ncfile.dimensions else 0
+
+        # =========== feature_id VARIABLE ===============
+        if "feature_id" not in ncfile.variables:
+            _ = ncfile.createDimension('type_strlen', max_str_len)
+            _ = ncfile.createDimension('feature_id', None)
+            FEATURE_ID = ncfile.createVariable(
+                varname = "feature_id",
+                datatype = 'int64',
+                dimensions = ("feature_id",),
+            )
+            ncfile['feature_id'].setncatts(
+                {
+                    'long_name': 'Segment ID',
+                }
+            )
+            FEATURE_ID[:] = flow.index.get_level_values('featureID')
+
+        # =========== time VARIABLE ===============
+        if "time" in ncfile.variables:
+            TIME = ncfile.variables["time"]
+        else:
+            _ = ncfile.createDimension('time', None)
+            TIME = ncfile.createVariable(
+                varname = "time",
+                datatype = 'float64',
+                dimensions = ("time",),
+                fill_value = -9999.0
+            )
+            ncfile['time'].setncatts(
+                {
+                    'long_name': 'valid output time',
+                    'standard_name': 'time',
+                    'units': f'seconds since {t0.strftime("%Y-%m-%d %H:%M:%S")}',
+                    'missing_value': -9999.0
+                    #'calendar': 'proleptic_gregorian'
+                }
+            )
+        TIME[time_len:] = timestamps
+
+        # =========== type VARIABLE ===============
+        if "type" not in ncfile.variables:
+            TYPE = ncfile.createVariable(
+                varname="type",
+                datatype=f'S{max_str_len}',
+                dimensions=("feature_id",),
+            )
+            ncfile['type'].setncatts(
+                {
+                    'long_name': 'Type',
+                }
+            )
+            TYPE[:] = np.array(flow.index.get_level_values('Type').astype(str).tolist(), dtype=f'S{max_str_len}')
+
+        # =========== flow VARIABLE ===============
+        if "flow" in ncfile.variables:
+            flow_var = ncfile.variables["flow"]
+        else:
+            flow_var = ncfile.createVariable(
+                varname = "flow",
+                datatype = "f4",
+                dimensions = ("feature_id", "time"),
+                fill_value = -9999.0
+            )
+            ncfile['flow'].setncatts(
+                {
+                    'long_name': 'Flow',
+                    'units': 'm3 s-1',
+                    'missing_value': -9999.0
+                }
+            )
+        flow_var[:, time_len:] = flow.to_numpy(dtype=np.float32)
+
+        # =========== velocity VARIABLE ===============
+        if "velocity" in ncfile.variables:
+            velocity_var = ncfile.variables["velocity"]
+        else:
+            velocity_var = ncfile.createVariable(
+                varname = "velocity",
+                datatype = "f4",
+                dimensions = ("feature_id", "time"),
+                fill_value = -9999.0
+                )
+            ncfile['velocity'].setncatts(
+                {
+                    'long_name': 'Velocity',
+                    'units': 'm/s',
+                    'missing_value': -9999.0
+                }
+            )
+        velocity_var[:, time_len:] = velocity.to_numpy(dtype=np.float32)
+
+        # =========== depth VARIABLE ===============
+        if "depth" in ncfile.variables:
+            depth_var = ncfile.variables["depth"]
+        else:
+            depth_var = ncfile.createVariable(
+                varname = "depth",
+                datatype = "f4",
+                dimensions = ("feature_id", "time"),
+                fill_value = -9999.0
+                )
+            ncfile['depth'].setncatts(
+                {
+                    'long_name': 'Depth',
+                    'units': 'm',
+                    'missing_value': -9999.0
+                }
+            )
+        depth_var[:, time_len:] = depth.to_numpy(dtype=np.float32)
+
+        # =========== nudge VARIABLE ===============
+        if "nudge" in ncfile.variables:
+            nudge = ncfile.variables["nudge"]
+        else:
+            nudge = ncfile.createVariable(
+                varname = "nudge",
+                datatype = "f4",
+                dimensions = ("feature_id", "time"),
+                fill_value = -9999.0
+                )
+            ncfile['nudge'].setncatts(
+                {
+                    'long_name': 'Streamflow Nudge Value',
+                    'units': 'm3 s-1',
+                    'missing_value': -9999.0
+                }
+            )
+        nudge[:, time_len:] = nudge_df.to_numpy(dtype=np.float32)
+
+
+
+
+        # _ = ncfile.createDimension('feature_id', len(flow))
+        # _ = ncfile.createDimension('time', len(timestamps))
+        # _ = ncfile.createDimension('type_strlen', max_str_len)
         #_ = ncfile.createDimension('gage', gage)
         #_ = ncfile.createDimension('nudge_timestep', nudge_timesteps)  # Add dimension for nudge time steps
         
         # =========== time VARIABLE ===============
-        TIME = ncfile.createVariable(
-            varname = "time",
-            datatype = 'float64',
-            dimensions = ("time",),
-            fill_value = -9999.0
-        )
-        TIME[:] = timestamps
-        ncfile['time'].setncatts(
-            {
-                'long_name': 'valid output time',
-                'standard_name': 'time',
-                'units': f'seconds since {t0.strftime("%Y-%m-%d %H:%M:%S")}',
-                'missing_value': -9999.0
-                #'calendar': 'proleptic_gregorian'
-            }
-        )
+        # TIME = ncfile.createVariable(
+        #     varname = "time",
+        #     datatype = 'float64',
+        #     dimensions = ("time",),
+        #     fill_value = -9999.0
+        # )
+        # TIME[:] = timestamps
+        # ncfile['time'].setncatts(
+        #     {
+        #         'long_name': 'valid output time',
+        #         'standard_name': 'time',
+        #         'units': f'seconds since {t0.strftime("%Y-%m-%d %H:%M:%S")}',
+        #         'missing_value': -9999.0
+        #         #'calendar': 'proleptic_gregorian'
+        #     }
+        # )
 
         # # =========== reference_time VARIABLE ===============
         # REF_TIME = ncfile.createVariable(
@@ -2426,103 +2562,106 @@ def write_flowveldepth_netcdf(stream_output_directory, file_name,
         # )
 
         # =========== feature_id VARIABLE ===============
-        FEATURE_ID = ncfile.createVariable(
-            varname = "feature_id",
-            datatype = 'int64',
-            dimensions = ("feature_id",),
-        )
-        FEATURE_ID[:] = flow.index.get_level_values('featureID')
-        ncfile['feature_id'].setncatts(
-            {
-                'long_name': 'Segment ID',
-            }
-        )
+        # FEATURE_ID = ncfile.createVariable(
+        #     varname = "feature_id",
+        #     datatype = 'int64',
+        #     dimensions = ("feature_id",),
+        # )
+        # FEATURE_ID[:] = flow.index.get_level_values('featureID')
+        # ncfile['feature_id'].setncatts(
+        #     {
+        #         'long_name': 'Segment ID',
+        #     }
+        # )
         # =========== type VARIABLE ===============
-        TYPE = ncfile.createVariable(
-            varname="type",
-            datatype=f'S{max_str_len}',
-            dimensions=("feature_id",),
-        )
-        TYPE[:] = np.array(flow.index.get_level_values('Type').astype(str).tolist(), dtype=f'S{max_str_len}')
-        ncfile['type'].setncatts(
-            {
-                'long_name': 'Type',
-            }
-        )
+        # TYPE = ncfile.createVariable(
+        #     varname="type",
+        #     datatype=f'S{max_str_len}',
+        #     dimensions=("feature_id",),
+        # )
+        # TYPE[:] = np.array(flow.index.get_level_values('Type').astype(str).tolist(), dtype=f'S{max_str_len}')
+        # ncfile['type'].setncatts(
+        #     {
+        #         'long_name': 'Type',
+        #     }
+        # )
 
         # =========== flow VARIABLE ===============            
-        flow_var = ncfile.createVariable(
-            varname = "flow",
-            datatype = "f4",
-            dimensions = ("feature_id", "time"),
-            fill_value = -9999.0
-            )
+        # flow_var = ncfile.createVariable(
+        #     varname = "flow",
+        #     datatype = "f4",
+        #     dimensions = ("feature_id", "time"),
+        #     fill_value = -9999.0
+        #     )
 
-        flow_var[:] = flow.to_numpy(dtype=np.float32)
-        ncfile['flow'].setncatts(
-            {
-                'long_name': 'Flow',
-                'units': 'm3 s-1',
-                'missing_value': -9999.0
-            }
-        )
+        # flow_var[:] = flow.to_numpy(dtype=np.float32)
+        # ncfile['flow'].setncatts(
+        #     {
+        #         'long_name': 'Flow',
+        #         'units': 'm3 s-1',
+        #         'missing_value': -9999.0
+        #     }
+        # )
 
         # =========== velocity VARIABLE ===============            
-        velocity_var = ncfile.createVariable(
-            varname = "velocity",
-            datatype = "f4",
-            dimensions = ("feature_id", "time"),
-            fill_value = -9999.0
-            )
-        velocity_var[:] = velocity.to_numpy(dtype=np.float32)
-        ncfile['velocity'].setncatts(
-            {
-                'long_name': 'Velocity',
-                'units': 'm/s',
-                'missing_value': -9999.0
-            }
-        )
+        # velocity_var = ncfile.createVariable(
+        #     varname = "velocity",
+        #     datatype = "f4",
+        #     dimensions = ("feature_id", "time"),
+        #     fill_value = -9999.0
+        #     )
+        # velocity_var[:] = velocity.to_numpy(dtype=np.float32)
+        # ncfile['velocity'].setncatts(
+        #     {
+        #         'long_name': 'Velocity',
+        #         'units': 'm/s',
+        #         'missing_value': -9999.0
+        #     }
+        # )
 
         # =========== depth VARIABLE ===============            
-        depth_var = ncfile.createVariable(
-            varname = "depth",
-            datatype = "f4",
-            dimensions = ("feature_id", "time"),
-            fill_value = -9999.0
-            )
-        depth_var[:] = depth.to_numpy(dtype=np.float32)
-        ncfile['depth'].setncatts(
-            {
-                'long_name': 'Depth',
-                'units': 'm',
-                'missing_value': -9999.0
-            }
-        )
+        # depth_var = ncfile.createVariable(
+        #     varname = "depth",
+        #     datatype = "f4",
+        #     dimensions = ("feature_id", "time"),
+        #     fill_value = -9999.0
+        #     )
+        # depth_var[:] = depth.to_numpy(dtype=np.float32)
+        # ncfile['depth'].setncatts(
+        #     {
+        #         'long_name': 'Depth',
+        #         'units': 'm',
+        #         'missing_value': -9999.0
+        #     }
+        # )
         
         # =========== nudge VARIABLE ===============            
-        nudge = ncfile.createVariable(
-            varname = "nudge",
-            datatype = "f4",
-            dimensions = ("feature_id", "time"),
-            fill_value = -9999.0
-            )
-        nudge[:] = nudge_df.to_numpy(dtype=np.float32)
-        ncfile['nudge'].setncatts(
-            {
-                'long_name': 'Streamflow Nudge Value',
-                'units': 'm3 s-1',
-                'missing_value': -9999.0
-            }
-        )
+        # nudge = ncfile.createVariable(
+        #     varname = "nudge",
+        #     datatype = "f4",
+        #     dimensions = ("feature_id", "time"),
+        #     fill_value = -9999.0
+        #     )
+        # nudge[:] = nudge_df.to_numpy(dtype=np.float32)
+        # ncfile['nudge'].setncatts(
+        #     {
+        #         'long_name': 'Streamflow Nudge Value',
+        #         'units': 'm3 s-1',
+        #         'missing_value': -9999.0
+        #     }
+        # )
         
         # =========== GLOBAL ATTRIBUTES ===============
-        ncfile.setncatts(
-            {
-                'TITLE': 'OUTPUT FROM T-ROUTE',
-                'file_reference_time': t0.strftime('%Y-%m-%d_%H:%M:%S'),
-                'code_version': '',
-            }
-        )
+        if feature_id_len == 0:
+            ncfile.setncatts(
+                {
+                    'TITLE': 'OUTPUT FROM T-ROUTE',
+                    'file_reference_time': t0.strftime('%Y-%m-%d_%H:%M:%S'),
+                    'code_version': '',
+                }
+            )
+
+
 def stream_output_mask_reader(stream_output_mask):
     if not stream_output_mask:
         return {}

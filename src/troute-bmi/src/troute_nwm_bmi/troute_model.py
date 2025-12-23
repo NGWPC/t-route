@@ -113,10 +113,12 @@ class Model:
         self._df_data[timestamp] = np.array(qlat_values)
         self._time += self.dt
         self._timings["forcing_time"] += time.time() - start
+        if len(self._df_data) >= self.max_timestep_buffer:
+            self.run(bmi_values)
 
 
     def run(self, bmi_values: dict):
-        nts = self.nts
+        nts = len(self._df_data)
         qts_subdivisions = self.forcing_parameters.get('qts_subdivisions', 12)
 
         LOG.debug("Assembling forcing dataframe")
@@ -222,6 +224,12 @@ class Model:
         )
         self._timings["output_time"] = time.time() - output_start_time
 
+        # empty current data at end of timestep dump
+        self._df_data.clear()
+
+    def finalize(self, bmi_values: dict):
+        if len(self._df_data) > 0:
+            self.run(bmi_values)
         if self.show_timing:
             self._log_times()
 
@@ -284,6 +292,10 @@ class Model:
     @property
     def parity_parameters(self) -> dict:
         return self.output_parameters.get("wrf_hydro_parity_check", {})
+
+    @property
+    def max_timestep_buffer(self) -> int:
+        return self.bmi_parameters.get("max_timestep_buffer", 1000)
 
     @property
     def show_timing(self):
