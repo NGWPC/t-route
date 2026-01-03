@@ -9,7 +9,7 @@ import troute.nhd_network_utilities_v02 as nnu
 from .log_level_set import log_level_set
 from troute.config import Config
 
-LOG = logging.getLogger('')
+LOG = logging.getLogger('T-Route')
 
 def _input_handler_v04(args):
     '''
@@ -120,7 +120,7 @@ def _input_handler_v03(args):
 
     # configure python logger
     log_level_set(log_parameters)
-    LOG = logging.getLogger('')
+    LOG = logging.getLogger('T-Route')
 
     # if log level is at or below DEBUG, then check user inputs
     if LOG.isEnabledFor(logging.DEBUG):

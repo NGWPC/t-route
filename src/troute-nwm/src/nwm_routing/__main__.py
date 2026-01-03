@@ -31,7 +31,7 @@ import troute.hyfeature_network_utilities as hnu
 import sys
 
 
-LOG = logging.getLogger('')
+LOG = logging.getLogger('T-Route')
 
 '''
 High level orchestration of ngen t-route simulations for NWM application

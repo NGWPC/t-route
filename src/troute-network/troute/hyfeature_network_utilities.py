@@ -15,7 +15,7 @@ import pyarrow.parquet as pq
 import troute.nhd_io as nhd_io
 
 
-LOG = logging.getLogger('')
+LOG = logging.getLogger('T-Route')
 
 
 def build_da_sets(da_params, run_sets, t0):
