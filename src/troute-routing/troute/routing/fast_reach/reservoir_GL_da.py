@@ -1,7 +1,7 @@
 import numpy as np
 import logging
 from datetime import datetime, timedelta
-LOG = logging.getLogger('')
+LOG = logging.getLogger('T-Route')
 
 def great_lakes_da(
     gage_obs,
