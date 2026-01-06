@@ -1,6 +1,7 @@
 import logging
 import pytest
 from ewts.formatter import CustomFormatter
+from ewts.constants import MODULE_NAME
 
 @pytest.fixture
 def formatter():
@@ -19,7 +20,7 @@ def formatter():
 )
 def test_level_name_mapping(formatter, level, expected):
     record = logging.LogRecord(
-        name="T-Route",
+        name=MODULE_NAME,
         level=level,
         pathname="test",
         lineno=0,
@@ -33,7 +34,7 @@ def test_level_name_mapping(formatter, level, expected):
 
 def test_utc_timestamp(formatter):
     record = logging.LogRecord(
-        name="T-Route",
+        name=MODULE_NAME,
         level=logging.INFO,
         pathname="test",
         lineno=0,
@@ -50,7 +51,7 @@ def test_utc_timestamp(formatter):
 
 def test_trailing_whitespace_stripped(formatter):
     record = logging.LogRecord(
-        name="T-Route",
+        name=MODULE_NAME,
         level=logging.INFO,
         pathname="test",
         lineno=0,
