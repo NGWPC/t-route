@@ -1,5 +1,23 @@
-# Error Warning and Trapping System
-# ewts/formatter.py
+"""
+Custom log record formatting for the Error Warning and Trapping System (EWTS).
+
+This module defines a custom logging formatter used by EWTS to produce
+consistent, ngen-compatible log output across all participating modules.
+
+The formatter applies the following behaviors:
+
+    - Forces all timestamps to UTC, independent of system locale settings.
+    - Formats timestamps with millisecond precision.
+    - Maps Python logging levels to ngen-style severity names
+      (e.g., ERROR → SEVERE, CRITICAL → FATAL).
+    - Pads and normalizes level names to fixed width for column alignment.
+    - Strips trailing whitespace and newline characters from log messages.
+
+The formatter operates entirely within the Python logging framework and does
+not modify logger configuration or handler behavior. It is intended to be used
+by the EWTS logging configuration layer and not instantiated directly by
+application code.
+"""
 
 import logging
 import time

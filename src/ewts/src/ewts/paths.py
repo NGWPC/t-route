@@ -1,5 +1,30 @@
-# Error Warning and Trapping System
-# ewts/paths.py
+"""
+Log file path resolution utilities for the Error Warning and Trapping System (EWTS).
+
+This module provides helper functions for constructing and validating log file
+paths used by the EWTS logging configuration. Log file selection follows a
+well-defined precedence based on environment variables and runtime availability.
+
+Log file path precedence:
+
+    1. If the NGEN-provided log file path is available via the environment variable
+       defined in EV_NGEN_LOGFILEPATH, use that path.
+
+    2. Otherwise, create a default, module-specific log file:
+        2.1) Create a base log directory under the ngenCERF data directory if it
+             exists; otherwise fall back to the user's home directory.
+        2.2) Create a child directory using the current username if available,
+             otherwise use the current UTC date (YYYYMMDD).
+        2.3) Construct a log filename using the module name and a UTC timestamp.
+
+The resolved log file path is validated by attempting to open the file. Upon
+successful creation or reuse, the full log file path is stored in the
+EV_MODULE_LOGFILEPATH environment variable so subsequent calls reuse the same
+file. If log file creation fails, entries will be written to stdout.
+
+This module does not configure loggers directly; it only resolves filesystem
+paths and associated metadata required by the logging configuration layer.
+"""
 
 import getpass
 import os
@@ -33,10 +58,10 @@ def create_timestamp(date_only=False, iso=False, append_ms=False):
 def get_log_file_path():
     # Determine the log file path using the following precedence:
     # 1) Use the ngen-provided log file path if available in the NGEN_LOG_FILE_PATH environment variable
-    # 3) Otherwise, create a default module-specific log file using the module name and a UTC timestamp.
-    # 3.1) First create a subdirectory under the ngenCERF data directory if available, otherwise the user home directory.
-    # 3.2) Next create a subdirectory name using the username, if available, otherwise use the YYYYMMDD.
-    # 3.3) Attempt to open the log file and upon failure, use stdout.
+    # 2) Otherwise, create a default module-specific log file using the module name and a UTC timestamp.
+    # 2.1) First create a subdirectory under the ngenCERF data directory if available, otherwise the user home directory.
+    # 2.2) Next create a subdirectory name using the username, if available, otherwise use the YYYYMMDD.
+    # 2.3) Attempt to open the log file and upon failure, use stdout.
 
     appendEntries = True
     moduleLogFileExists = False
