@@ -74,11 +74,16 @@ def configure_logging():
     if getattr(logger, "_initialized", False):
         return logger # logger already initialized, nothing else to do
 
-    # Default to enabled if flag not set or is set to DISABLED
+    # Default to enabled if flag not set or is set to disabled
     raw_value = os.getenv(EV_EWTS_LOGGING)
-    enabled = raw_value != "DISABLED"
-    if raw_value is None:
-        print(f"{EV_EWTS_LOGGING} not set; logging ENABLED by default")
+    normalized = (raw_value or "").strip().lower()  # convert None or "" to "", lowercase for easy comparison
+
+    # Determine if logging is enabled
+    enabled = normalized != "disabled"
+
+    # Inform user if logging is enabled by default (env not explicitly set to "enabled")
+    if enabled and normalized not in ("enabled",):
+        print(f"{EV_EWTS_LOGGING} not explicitly set to 'ENABLED'; logging ENABLED by default", flush=True)
 
     if not enabled:
         logger.disabled = True
