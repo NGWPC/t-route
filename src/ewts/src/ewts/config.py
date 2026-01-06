@@ -1,5 +1,35 @@
-# Error Warning and Trapping System
-# ewts/config.py
+"""
+Logging configuration for the Error Warning and Trapping System (EWTS).
+
+This module defines the centralized logging configuration used by EWTS.
+It is responsible for creating and configuring a single, named logger
+within the Python logging framework, based on environment variables
+provided by the runtime environment (e.g., ngen).
+
+Logging configuration is performed via configure_logging(), which applies
+handlers, formatters, and log levels to the EWTS logger. The configuration
+function is idempotent: once the logger has been initialized, subsequent
+calls return immediately without modifying the existing configuration.
+
+Configuration behavior is controlled by environment variables, whose names
+are defined in constants.py:
+
+    - EV_EWTS_LOGGING:
+        Enables or disables EWTS logging. If set to "DISABLED", logging is
+        disabled entirely for the EWTS logger. If unset, logging is enabled
+        by default.
+
+    - EV_MODULE_LOGLEVEL:
+        Specifies the log level for the EWTS logger. Supported values include
+        standard Python logging levels as well as ngen-style levels (e.g.,
+        "SEVERE", "FATAL"), which are translated to Python equivalents.
+
+Log output is directed to a file determined by the path-resolution utilities
+in paths.py. If a log file cannot be created, logging falls back to stdout.
+
+This module does not expose logging APIs directly; callers are expected to
+retrieve the configured logger by name using logging.getLogger(MODULE_NAME).
+"""
 
 import logging
 import sys
