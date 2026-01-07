@@ -1,7 +1,7 @@
 import numpy as np
 from datetime import datetime, timedelta
 import logging
-from ewts import MODULE_NAME
+from troute_ewts import MODULE_NAME
 LOG = logging.getLogger(MODULE_NAME)
 
 def great_lakes_da(
