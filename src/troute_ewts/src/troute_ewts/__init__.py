@@ -18,12 +18,12 @@ logger without importing internal implementation details.
 Typical usage:
 
     At application startup:
-        from ewts import configure_logging
+        from troute_ewts import configure_logging
         configure_logging()
 
     Within other modules:
         import logging
-        from ewts import MODULE_NAME
+        from troute_ewts import MODULE_NAME
 
         LOG = logging.getLogger(MODULE_NAME)
 """

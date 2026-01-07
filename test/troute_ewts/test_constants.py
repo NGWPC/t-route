@@ -1,4 +1,4 @@
-from ewts.constants import (
+from troute_ewts.constants import (
     MODULE_NAME,
     LOG_MODULE_NAME_LEN,
 )

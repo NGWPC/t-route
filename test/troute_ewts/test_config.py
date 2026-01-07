@@ -1,8 +1,8 @@
 import pytest
 
 import logging
-from ewts.config import configure_logging, translate_ngwpc_log_level
-from ewts.constants import MODULE_NAME, EV_EWTS_LOGGING
+from troute_ewts.config import configure_logging, translate_ngwpc_log_level
+from troute_ewts.constants import MODULE_NAME, EV_EWTS_LOGGING
 
 # ------------------------------
 def test_configure_logging_default(clean_ewts_env):

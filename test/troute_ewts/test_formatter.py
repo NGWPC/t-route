@@ -1,7 +1,7 @@
 import logging
 import pytest
-from ewts.formatter import CustomFormatter
-from ewts.constants import MODULE_NAME
+from troute_ewts.formatter import CustomFormatter
+from troute_ewts.constants import MODULE_NAME
 
 @pytest.fixture
 def formatter():
