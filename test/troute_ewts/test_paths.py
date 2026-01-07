@@ -2,9 +2,9 @@ import os
 import getpass
 from datetime import datetime
 import pytest
-from ewts import paths
-from ewts.paths import create_timestamp, get_log_file_path
-from ewts.constants import MODULE_NAME, EV_MODULE_LOGFILEPATH, EV_NGEN_LOGFILEPATH
+from troute_ewts import paths
+from troute_ewts.paths import create_timestamp, get_log_file_path
+from troute_ewts.constants import EV_MODULE_LOGFILEPATH, EV_NGEN_LOGFILEPATH
 
 # -------------------------------
 # Fixture for a clean log environment
