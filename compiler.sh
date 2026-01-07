@@ -85,7 +85,7 @@ if [[ "$build_reservoir_kernel" == true ]]; then
 
 fi
 
-cd $REPOROOT/src/ewts
+cd $REPOROOT/src/troute_ewts
 if [[ ${WITH_EDITABLE} == true ]]; then
   pip install --editable . || exit
 else

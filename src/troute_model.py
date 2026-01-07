@@ -8,7 +8,7 @@ import nwm_routing.__main__ as tr
 
 from troute.network import bmi_array2df as a2df
 
-from ewts import configure_logging
+from troute_ewts import configure_logging
 
 class troute_model():
 

@@ -8,7 +8,7 @@ import troute.nhd_io as nhd_io
 import troute.nhd_network_utilities_v02 as nnu
 from troute.config import Config
 
-from ewts import configure_logging
+from troute_ewts import configure_logging
 LOG = configure_logging()
 
 def _input_handler_v04(args):

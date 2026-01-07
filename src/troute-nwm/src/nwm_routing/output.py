@@ -7,7 +7,7 @@ import troute.nhd_io as nhd_io
 from build_tests import parity_check
 
 import logging
-from ewts import MODULE_NAME
+from troute_ewts import MODULE_NAME
 LOG = logging.getLogger(MODULE_NAME)
 
 def _reindex_lake_to_link_id(target_df, crosswalk):

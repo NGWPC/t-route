@@ -11,7 +11,7 @@ import re
 import time
 import logging
 
-from ewts import MODULE_NAME
+from troute_ewts import MODULE_NAME
 LOG = logging.getLogger(MODULE_NAME)
 
 from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data

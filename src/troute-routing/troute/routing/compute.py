@@ -15,7 +15,7 @@ import troute.routing.diffusive_utils_v02 as diff_utils
 from troute.routing.fast_reach import diffusive
 
 import logging
-from ewts import MODULE_NAME
+from troute_ewts import MODULE_NAME
 LOG = logging.getLogger(MODULE_NAME)
 
 _compute_func_map = defaultdict(

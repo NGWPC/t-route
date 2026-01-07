@@ -1,6 +1,6 @@
 import numpy as np
 import logging
-from ewts import MODULE_NAME
+from troute_ewts import MODULE_NAME
 LOG = logging.getLogger(MODULE_NAME)
 
 def _modify_for_projected_storage(

@@ -29,7 +29,7 @@ import troute.nhd_network_utilities_v02 as nnu
 import troute.hyfeature_network_utilities as hnu
 import sys
 
-from ewts import MODULE_NAME
+from troute_ewts import MODULE_NAME
 LOG = logging.getLogger(MODULE_NAME)
 
 '''
