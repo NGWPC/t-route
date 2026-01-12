@@ -47,3 +47,7 @@ class BMIParameters(BaseModel):
             'hl_uri',
             ]
         )
+    max_timestep_buffer: Optional[int] = 1000
+    """
+    The maximum number of timestamps the BMI can hold in memory before it forces a run, writes the outputs, and clears its memory.
+    """

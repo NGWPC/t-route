@@ -2063,9 +2063,12 @@ def write_single_waterbody_netcdf(
     t0, 
     dt, 
     nts,
-    time_index
+    time_index,
+    filename_t0: datetime = None
 ):
-    netcdfname = 'troute_lakeout_' + t0.strftime('%Y%m%d%H%M') + '.nc'
+    if filename_t0 is None:
+        filename_t0 = t0
+    netcdfname = 'troute_lakeout_' + filename_t0.strftime('%Y%m%d%H%M') + '.nc'
 
     # array of simulation time
     wbdy_time = np.array([t0 + timedelta(seconds = int(time_index[i] + 1) * dt) for i in range(len(time_index))]) #time_index
@@ -2096,252 +2099,275 @@ def write_single_waterbody_netcdf(
     # open netCDF4 Dataset in write mode
     with netCDF4.Dataset(
         filename = str(wbdy_filepath) + '/' + netcdfname,
-        mode = 'w',
+        mode = 'a',
         format = "NETCDF4"
     ) as f:
 
-        # =========== DIMENSIONS ===============
-        _ = f.createDimension("time", num_timesteps)
-        _ = f.createDimension("feature_id", len(wbdy_feature_id))
-        _ = f.createDimension("reference_time", 1)
-        _ = f.createDimension("latitude", len(wbdy_feature_id))
-        _ = f.createDimension("longitude", len(wbdy_feature_id))
+        # Get the current length of the time dimension.
+        # If this is 0, assume that the file was just created and variable need to be created within.
+        # If this is greater than zero, assume we're appending and use the time index for where to start new writes
+        time_len = len(f.dimensions["time"]) if "time" in f.dimensions else 0
 
         # =========== time VARIABLE ===============
-        TIME = f.createVariable(
-            varname = "time",
-            datatype = 'int32',
-            dimensions = ("time",),
-        )
-        TIME[:] = date2num(
+        if "time" in f.variables:
+            TIME = f.variables["time"]
+        else:
+            _ = f.createDimension("time", None)
+            TIME = f.createVariable(
+                varname = "time",
+                datatype = 'int32',
+                dimensions = ("time",),
+            )
+            f['time'].setncatts(
+                {
+                    'long_name': 'valid output time',
+                    'standard_name': 'time',
+                    'valid_min': date2num(
+                        t0, 
+                        units = "minutes since 1970-01-01 00:00:00 UTC",
+                        calendar = "gregorian"
+                    ),
+                    'valid_max': date2num(
+                        wbdy_time[num_timesteps-1], 
+                        units = "minutes since 1970-01-01 00:00:00 UTC",
+                        calendar = "gregorian"
+                    ),
+                    'units': 'minutes since 1970-01-01T00:00:00+00:00',
+                    'calendar': 'proleptic_gregorian'
+                }
+            )
+        TIME[time_len:] = date2num(
             wbdy_time, 
             units = "minutes since 1970-01-01 00:00:00 UTC",
             calendar = "gregorian"
         )
-        f['time'].setncatts(
-            {
-                'long_name': 'valid output time',
-                'standard_name': 'time',
-                'valid_min': date2num(
-                    t0, 
-                    units = "minutes since 1970-01-01 00:00:00 UTC",
-                    calendar = "gregorian"
-                ),
-                'valid_max': date2num(
-                    wbdy_time[num_timesteps-1], 
-                    units = "minutes since 1970-01-01 00:00:00 UTC",
-                    calendar = "gregorian"
-                ),
-                'units': 'minutes since 1970-01-01T00:00:00+00:00',
-                'calendar': 'proleptic_gregorian'
-            }
-        )
 
         # =========== reference_time VARIABLE ===============
-        REF_TIME = f.createVariable(
-            varname = "reference_time",
-            datatype = 'int32',
-            dimensions = ("reference_time",),
-        )
-        REF_TIME[:] = date2num(
-            t0, 
-            units = "minutes since 1970-01-01 00:00:00 UTC",
-            calendar = "gregorian"
-        )
-        f['reference_time'].setncatts(
-            {
-                'long_name': 'model initialization time',
-                'standard_name': 'forecast_reference_time',
-                'units': 'minutes since 1970-01-01T00:00:00+00:00',
-                'calendar': 'proleptic_gregorian'
-            }
-        )
+        if "reference_time" not in f.variables:
+            _ = f.createDimension("reference_time", 1)
+            REF_TIME = f.createVariable(
+                varname = "reference_time",
+                datatype = 'int32',
+                dimensions = ("reference_time",),
+            )
+            REF_TIME[:] = date2num(
+                t0, 
+                units = "minutes since 1970-01-01 00:00:00 UTC",
+                calendar = "gregorian"
+            )
+            f['reference_time'].setncatts(
+                {
+                    'long_name': 'model initialization time',
+                    'standard_name': 'forecast_reference_time',
+                    'units': 'minutes since 1970-01-01T00:00:00+00:00',
+                    'calendar': 'proleptic_gregorian'
+                }
+            )
 
         # =========== feature_id VARIABLE ===============
-        FEATURE_ID = f.createVariable(
-            varname = "feature_id",
-            datatype = 'int64',
-            dimensions = ("feature_id",),
-        )
-        FEATURE_ID[:] = wbdy_feature_id
-        f['feature_id'].setncatts(
-            {
-                'long_name': 'Lake ComID',
-                'comment': '',
-                'cf_role:': 'timeseries_id'
-            }
-        )
+        if "feature_id" not in f.variables:
+            _ = f.createDimension("feature_id", len(wbdy_feature_id))
+            FEATURE_ID = f.createVariable(
+                varname = "feature_id",
+                datatype = 'int64',
+                dimensions = ("feature_id",),
+            )
+            FEATURE_ID[:] = wbdy_feature_id
+            f['feature_id'].setncatts(
+                {
+                    'long_name': 'Lake ComID',
+                    'comment': '',
+                    'cf_role:': 'timeseries_id'
+                }
+            )
 
         # =========== latitude VARIABLE ===============
-        LATITUDE = f.createVariable(
-            varname = "latitude",
-            datatype = 'f4',
-            dimensions = ("latitude",),
-            fill_value = np.nan
-        )
-        if not waterbodies_df.empty:
-            LATITUDE[:] = waterbodies_df.lat.tolist()
-        else:
-            LATITUDE[:] = np.nan
-        f['latitude'].setncatts(
-            {
-                'long_name': 'Lake latitude',
-                'standard_name': 'latitude',
-                'units': 'degrees_north'
-            }
-        )
-        
-        # =========== longitude VARIABLE ===============
-        LONGITUDE = f.createVariable(
-            varname = "longitude",
-            datatype = 'f4',
-            dimensions = ("longitude",),
-            fill_value = np.nan
-        )
-        if not waterbodies_df.empty:
-            LONGITUDE[:] = waterbodies_df.lon.tolist()
-        else:
-            LONGITUDE[:] = np.nan
-        f['longitude'].setncatts(
-            {
-                'long_name': 'Lake longitude',
-                'standard_name': 'longitude',
-                'units': 'degrees_east'
-            }
-        )
-        
-        # =========== reservoir type VARIABLE ===============            
-        res_type = f.createVariable(
-                varname = "reservoir_type",
-                datatype = "i4",
-                dimensions = ("feature_id")
+        if "latitude" not in f.variables:
+            _ = f.createDimension("latitude", len(wbdy_feature_id))
+            LATITUDE = f.createVariable(
+                varname = "latitude",
+                datatype = 'f4',
+                dimensions = ("latitude",),
+                fill_value = np.nan
             )
-        res_type[:] = wbdy_type
-        f['reservoir_type'].setncatts(
-            {
-                'coordinates': 'latitude longitude',
-                'long_name': 'reservoir_type',
-                'flag_values': [1, 2, 3, 4],
-                'flag_meanings': 'Level_pool USGS-persistence USACE-persistence RFC-forecasts'
-            }
-        )
-        
-        # =========== crs VARIABLE ===============            
-        crs = f.createVariable(
-                varname = "crs",
-                datatype = "S1",
-                dimensions = ()
+            if not waterbodies_df.empty:
+                LATITUDE[:] = waterbodies_df.lat.tolist()
+            else:
+                LATITUDE[:] = np.nan
+            f['latitude'].setncatts(
+                {
+                    'long_name': 'Lake latitude',
+                    'standard_name': 'latitude',
+                    'units': 'degrees_north'
+                }
             )
-        if not waterbodies_df.empty:
-            crs[:] = np.array(waterbodies_df['crs'].iat[0],dtype = '|S1')
-        else:
-            crs[:] = np.array(['n'],dtype = '|S1')
-        f['crs'].setncatts(
-            {
-                'transform_name': 'latitude longitude',
-                'grid_mapping_name': 'latitude longitude',
-                'esri_pe_string': 'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]];-400 -400 1000000000;-100000 10000;-100000 10000;8.98315284119521E-09;0.001;0.001;IsHighPrecision',
-                'spatial_ref': 'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]];-400 -400 1000000000;-100000 10000;-100000 10000;8.98315284119521E-09;0.001;0.001;IsHighPrecision',
-                'long_name': 'CRS definition',
-                'longitude_of_prime_meridian': 0.0,
-                '_CoordinateAxes': 'latitude longitude',
-                'semi_major_axis': 6378137.0,
-                'semi_minor_axis': 6356752.5,
-                'inverse_flattening': 298.25723
-            }
-        )
-        
-        # =========== inflow VARIABLE ===============            
-        inflow = f.createVariable(
-                varname = "inflow",
-                datatype = "f4",
-                dimensions = ("time","latitude","longitude","feature_id"),
-                fill_value = -999900
-            )
-        inflow[:] = max_i_vals
-        f['inflow'].setncatts(
-            {
-                'long_name': 'Lake Inflow',
-                'units': 'm3 s-1',
-                'grid_mapping': 'crs',
-                'valid_range': [-1000000,1000000],
-                'coordinates': 'latitude longitude',
-                'add_offset': 0.0,
-                'scale_factor': 0.01,
-                'missing_value': -999900
-            }
-        )
 
-        # =========== outflow VARIABLE ===============            
-        outflow = f.createVariable(
+
+        # =========== longitude VARIABLE ===============
+        if "longitude" not in f.variables:
+            _ = f.createDimension("longitude", len(wbdy_feature_id))
+            LONGITUDE = f.createVariable(
+                varname = "longitude",
+                datatype = 'f4',
+                dimensions = ("longitude",),
+                fill_value = np.nan
+            )
+            if not waterbodies_df.empty:
+                LONGITUDE[:] = waterbodies_df.lon.tolist()
+            else:
+                LONGITUDE[:] = np.nan
+            f['longitude'].setncatts(
+                {
+                    'long_name': 'Lake longitude',
+                    'standard_name': 'longitude',
+                    'units': 'degrees_east'
+                }
+            )
+
+        # =========== reservoir type VARIABLE ===============
+        if "reservoir_type" not in f.variables:
+            res_type = f.createVariable(
+                    varname = "reservoir_type",
+                    datatype = "i4",
+                    dimensions = ("feature_id")
+                )
+            res_type[:] = wbdy_type
+            f['reservoir_type'].setncatts(
+                {
+                    'coordinates': 'latitude longitude',
+                    'long_name': 'reservoir_type',
+                    'flag_values': [1, 2, 3, 4],
+                    'flag_meanings': 'Level_pool USGS-persistence USACE-persistence RFC-forecasts'
+                }
+            )
+
+        # =========== crs VARIABLE ===============
+        if crs not in f.variables:
+            crs = f.createVariable(
+                    varname = "crs",
+                    datatype = "S1",
+                    dimensions = ()
+                )
+            if not waterbodies_df.empty:
+                crs[:] = np.array(waterbodies_df['crs'].iat[0],dtype = '|S1')
+            else:
+                crs[:] = np.array(['n'],dtype = '|S1')
+            f['crs'].setncatts(
+                {
+                    'transform_name': 'latitude longitude',
+                    'grid_mapping_name': 'latitude longitude',
+                    'esri_pe_string': 'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]];-400 -400 1000000000;-100000 10000;-100000 10000;8.98315284119521E-09;0.001;0.001;IsHighPrecision',
+                    'spatial_ref': 'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]];-400 -400 1000000000;-100000 10000;-100000 10000;8.98315284119521E-09;0.001;0.001;IsHighPrecision',
+                    'long_name': 'CRS definition',
+                    'longitude_of_prime_meridian': 0.0,
+                    '_CoordinateAxes': 'latitude longitude',
+                    'semi_major_axis': 6378137.0,
+                    'semi_minor_axis': 6356752.5,
+                    'inverse_flattening': 298.25723
+                }
+            )
+        
+        # =========== inflow VARIABLE ===============
+        if "inflow" in f.variables:
+            inflow = f.variables["inflow"]
+        else:
+            inflow = f.createVariable(
+                    varname = "inflow",
+                    datatype = "f4",
+                    dimensions = ("time","latitude","longitude","feature_id"),
+                    fill_value = -999900
+                )
+            f['inflow'].setncatts(
+                {
+                    'long_name': 'Lake Inflow',
+                    'units': 'm3 s-1',
+                    'grid_mapping': 'crs',
+                    'valid_range': [-1000000,1000000],
+                    'coordinates': 'latitude longitude',
+                    'add_offset': 0.0,
+                    'scale_factor': 0.01,
+                    'missing_value': -999900
+                }
+            )
+        inflow[time_len:, :, :, :] = max_i_vals
+
+        # =========== outflow VARIABLE ===============
+        if "outflow" in f.variables:
+            outflow = f.variables["outflow"]
+        else:
+            outflow = f.createVariable(
                 varname = "outflow",
                 datatype = "f4",
                 dimensions = ("time","latitude","longitude","feature_id"),
                 fill_value = -999900 #np.nan
             )
-        outflow[:] = max_q_vals
-        f['outflow'].setncatts(
-            {
-                'long_name': 'Lake Outflow',
-                'units': 'm3 s-1',
-                'grid_mapping': 'crs',
-                'valid_range': [-1000000,1000000],
-                'coordinates': 'latitude longitude',
-                'add_offset': 0.0,
-                'scale_factor': 0.01,
-                'missing_value': -999900
-            }
-        )
+            f['outflow'].setncatts(
+                {
+                    'long_name': 'Lake Outflow',
+                    'units': 'm3 s-1',
+                    'grid_mapping': 'crs',
+                    'valid_range': [-1000000,1000000],
+                    'coordinates': 'latitude longitude',
+                    'add_offset': 0.0,
+                    'scale_factor': 0.01,
+                    'missing_value': -999900
+                }
+            )
+        outflow[time_len:, :, :, :] = max_q_vals
 
-        # =========== depth VARIABLE ===============            
-        depth = f.createVariable(
+        # =========== depth VARIABLE ===============
+        if "water_sfc_elev" in f.variables:
+            depth = f.variables["water_sfc_elev"]
+        else:
+            depth = f.createVariable(
                 varname = "water_sfc_elev",
                 datatype = "f4",
                 dimensions = ("time","latitude","longitude","feature_id"),
                 fill_value = np.nan
             )
-        depth[:] = max_d_vals
-        f['water_sfc_elev'].setncatts(
-            {
-                'long_name': 'Water Surface Elevation',
-                'units': 'm',
-                'comment': 'If reservoir_type = 4, water_sfc_elev is invalid because this value corresponds only to level pool',
-                'coordinates': 'latitude longitude'
-            }
-        )
+            f['water_sfc_elev'].setncatts(
+                {
+                    'long_name': 'Water Surface Elevation',
+                    'units': 'm',
+                    'comment': 'If reservoir_type = 4, water_sfc_elev is invalid because this value corresponds only to level pool',
+                    'coordinates': 'latitude longitude'
+                }
+            )
+        depth[time_len:, :, :, :] = max_d_vals
 
-        # =========== GLOBAL ATTRIBUTES =============== 
-        if not waterbodies_df.empty:
-            f.setncatts(
-                {
-                    'TITLE': 'OUTPUT FROM T-ROUTE',
-                    'featureType': 'timeSeries',
-                    'proj4': '+proj=lcc +units=m +a=6370000.0 +b=6370000.0 +lat_1=30.0 +lat_2=60.0 +lat_0=40.0 +lon_0=-97.0 +x_0=0 +y_0=0 +k_0=1.0 +nadgrids=@',
-                    'model_initialization_time': t0.strftime('%Y-%m-%d_%H:%M:%S'),
-                    'station_dimension': 'lake_id',
-                    'model_total_valid_times': nts,
-                    'Conventions': 'CF-1.6',
-                    'code_version': '',
-                    'model_output_type': 'reservoir',
-                    'model_configuration': ''
-                }
-            )
-        else:
-            f.setncatts(
-                {
-                    'TITLE': 'OUTPUT FROM T-ROUTE',
-                    'basin_characteristics': 'There are no waterbodies in this basin',
-                    'featureType': 'timeSeries',
-                    'proj4': '+proj=lcc +units=m +a=6370000.0 +b=6370000.0 +lat_1=30.0 +lat_2=60.0 +lat_0=40.0 +lon_0=-97.0 +x_0=0 +y_0=0 +k_0=1.0 +nadgrids=@',
-                    'model_initialization_time': t0.strftime('%Y-%m-%d_%H:%M:%S'),
-                    'station_dimension': 'lake_id',
-                    'model_total_valid_times': nts,
-                    'Conventions': 'CF-1.6',
-                    'code_version': '',
-                    'model_output_type': 'reservoir',
-                    'model_configuration': ''
-                }
-            )
+        # =========== GLOBAL ATTRIBUTES ===============
+        if time_len == 0:
+            if not waterbodies_df.empty:
+                f.setncatts(
+                    {
+                        'TITLE': 'OUTPUT FROM T-ROUTE',
+                        'featureType': 'timeSeries',
+                        'proj4': '+proj=lcc +units=m +a=6370000.0 +b=6370000.0 +lat_1=30.0 +lat_2=60.0 +lat_0=40.0 +lon_0=-97.0 +x_0=0 +y_0=0 +k_0=1.0 +nadgrids=@',
+                        'model_initialization_time': t0.strftime('%Y-%m-%d_%H:%M:%S'),
+                        'station_dimension': 'lake_id',
+                        'model_total_valid_times': nts,
+                        'Conventions': 'CF-1.6',
+                        'code_version': '',
+                        'model_output_type': 'reservoir',
+                        'model_configuration': ''
+                    }
+                )
+            else:
+                f.setncatts(
+                    {
+                        'TITLE': 'OUTPUT FROM T-ROUTE',
+                        'basin_characteristics': 'There are no waterbodies in this basin',
+                        'featureType': 'timeSeries',
+                        'proj4': '+proj=lcc +units=m +a=6370000.0 +b=6370000.0 +lat_1=30.0 +lat_2=60.0 +lat_0=40.0 +lon_0=-97.0 +x_0=0 +y_0=0 +k_0=1.0 +nadgrids=@',
+                        'model_initialization_time': t0.strftime('%Y-%m-%d_%H:%M:%S'),
+                        'station_dimension': 'lake_id',
+                        'model_total_valid_times': nts,
+                        'Conventions': 'CF-1.6',
+                        'code_version': '',
+                        'model_output_type': 'reservoir',
+                        'model_configuration': ''
+                    }
+                )
 
 def write_flowveldepth_csv_pkl(stream_output_directory, file_name,
                               flow, velocity, depth, nudge_df, timestamps,
@@ -2382,148 +2408,157 @@ def write_flowveldepth_netcdf(stream_output_directory, file_name,
     # Open netCDF4 Dataset in write mode
     with netCDF4.Dataset(
         filename=f"{stream_output_directory}/{file_name}",
-        mode='w',
+        mode='a',  # append mode (creates if it doesn't exist)
         format='NETCDF4'
     ) as ncfile:
+        # assumes the feature IDs will be the same between instances
 
         # ============ DIMENSIONS ===================
-        _ = ncfile.createDimension('feature_id', len(flow))
-        _ = ncfile.createDimension('time', len(timestamps))
         max_str_len = max(len(str(x)) for x in flow.index.get_level_values('Type'))
-        _ = ncfile.createDimension('type_strlen', max_str_len)
-        #_ = ncfile.createDimension('gage', gage)
-        #_ = ncfile.createDimension('nudge_timestep', nudge_timesteps)  # Add dimension for nudge time steps
-        
-        # =========== time VARIABLE ===============
-        TIME = ncfile.createVariable(
-            varname = "time",
-            datatype = 'float64',
-            dimensions = ("time",),
-            fill_value = -9999.0
-        )
-        TIME[:] = timestamps
-        ncfile['time'].setncatts(
-            {
-                'long_name': 'valid output time',
-                'standard_name': 'time',
-                'units': f'seconds since {t0.strftime("%Y-%m-%d %H:%M:%S")}',
-                'missing_value': -9999.0
-                #'calendar': 'proleptic_gregorian'
-            }
-        )
-
-        # # =========== reference_time VARIABLE ===============
-        # REF_TIME = ncfile.createVariable(
-        #     varname = "reference_time",
-        #     datatype = 'S1',
-        #     dimensions = ("reference_time",),
-        # )
-        # REF_TIME[:] = t0.strftime('%Y-%m-%d_%H:%M:%S')
-        # ncfile['reference_time'].setncatts(
-        #     {
-        #         'long_name': 'reference time',
-        #         'standard_name': 'reference_time',
-        #     }
-        # )
+        # Get the current length of the time dimension.
+        # If this is 0, assume that the file was just created and variable need to be created within.
+        # If this is greater than zero, assume we're appending and use the time index for where to start new writes
+        time_len = len(ncfile.dimensions["time"]) if "time" in ncfile.dimensions else 0
 
         # =========== feature_id VARIABLE ===============
-        FEATURE_ID = ncfile.createVariable(
-            varname = "feature_id",
-            datatype = 'int64',
-            dimensions = ("feature_id",),
-        )
-        FEATURE_ID[:] = flow.index.get_level_values('featureID')
-        ncfile['feature_id'].setncatts(
-            {
-                'long_name': 'Segment ID',
-            }
-        )
+        if "feature_id" not in ncfile.variables:
+            _ = ncfile.createDimension('type_strlen', max_str_len)
+            _ = ncfile.createDimension('feature_id', len(flow))
+            FEATURE_ID = ncfile.createVariable(
+                varname = "feature_id",
+                datatype = 'int64',
+                dimensions = ("feature_id",),
+            )
+            ncfile['feature_id'].setncatts(
+                {
+                    'long_name': 'Segment ID',
+                }
+            )
+            FEATURE_ID[:] = flow.index.get_level_values('featureID')
+
+        # =========== time VARIABLE ===============
+        if "time" in ncfile.variables:
+            TIME = ncfile.variables["time"]
+        else:
+            _ = ncfile.createDimension('time', None)
+            TIME = ncfile.createVariable(
+                varname = "time",
+                datatype = 'float64',
+                dimensions = ("time",),
+                fill_value = -9999.0
+            )
+            ncfile['time'].setncatts(
+                {
+                    'long_name': 'valid output time',
+                    'standard_name': 'time',
+                    'units': f'seconds since {t0.strftime("%Y-%m-%d %H:%M:%S")}',
+                    'missing_value': -9999.0
+                    #'calendar': 'proleptic_gregorian'
+                }
+            )
+        TIME[time_len:] = timestamps
+
         # =========== type VARIABLE ===============
-        TYPE = ncfile.createVariable(
-            varname="type",
-            datatype=f'S{max_str_len}',
-            dimensions=("feature_id",),
-        )
-        TYPE[:] = np.array(flow.index.get_level_values('Type').astype(str).tolist(), dtype=f'S{max_str_len}')
-        ncfile['type'].setncatts(
-            {
-                'long_name': 'Type',
-            }
-        )
-
-        # =========== flow VARIABLE ===============            
-        flow_var = ncfile.createVariable(
-            varname = "flow",
-            datatype = "f4",
-            dimensions = ("feature_id", "time"),
-            fill_value = -9999.0
+        if "type" not in ncfile.variables:
+            TYPE = ncfile.createVariable(
+                varname="type",
+                datatype=f'S{max_str_len}',
+                dimensions=("feature_id",),
             )
-
-        flow_var[:] = flow.to_numpy(dtype=np.float32)
-        ncfile['flow'].setncatts(
-            {
-                'long_name': 'Flow',
-                'units': 'm3 s-1',
-                'missing_value': -9999.0
-            }
-        )
-
-        # =========== velocity VARIABLE ===============            
-        velocity_var = ncfile.createVariable(
-            varname = "velocity",
-            datatype = "f4",
-            dimensions = ("feature_id", "time"),
-            fill_value = -9999.0
+            ncfile['type'].setncatts(
+                {
+                    'long_name': 'Type',
+                }
             )
-        velocity_var[:] = velocity.to_numpy(dtype=np.float32)
-        ncfile['velocity'].setncatts(
-            {
-                'long_name': 'Velocity',
-                'units': 'm/s',
-                'missing_value': -9999.0
-            }
-        )
+            TYPE[:] = np.array(flow.index.get_level_values('Type').astype(str).tolist(), dtype=f'S{max_str_len}')
 
-        # =========== depth VARIABLE ===============            
-        depth_var = ncfile.createVariable(
-            varname = "depth",
-            datatype = "f4",
-            dimensions = ("feature_id", "time"),
-            fill_value = -9999.0
+        # =========== flow VARIABLE ===============
+        if "flow" in ncfile.variables:
+            flow_var = ncfile.variables["flow"]
+        else:
+            flow_var = ncfile.createVariable(
+                varname = "flow",
+                datatype = "f4",
+                dimensions = ("feature_id", "time"),
+                fill_value = -9999.0
             )
-        depth_var[:] = depth.to_numpy(dtype=np.float32)
-        ncfile['depth'].setncatts(
-            {
-                'long_name': 'Depth',
-                'units': 'm',
-                'missing_value': -9999.0
-            }
-        )
-        
-        # =========== nudge VARIABLE ===============            
-        nudge = ncfile.createVariable(
-            varname = "nudge",
-            datatype = "f4",
-            dimensions = ("feature_id", "time"),
-            fill_value = -9999.0
+            ncfile['flow'].setncatts(
+                {
+                    'long_name': 'Flow',
+                    'units': 'm3 s-1',
+                    'missing_value': -9999.0
+                }
             )
-        nudge[:] = nudge_df.to_numpy(dtype=np.float32)
-        ncfile['nudge'].setncatts(
-            {
-                'long_name': 'Streamflow Nudge Value',
-                'units': 'm3 s-1',
-                'missing_value': -9999.0
-            }
-        )
+        flow_var[:, time_len:] = flow.to_numpy(dtype=np.float32)
+
+        # =========== velocity VARIABLE ===============
+        if "velocity" in ncfile.variables:
+            velocity_var = ncfile.variables["velocity"]
+        else:
+            velocity_var = ncfile.createVariable(
+                varname = "velocity",
+                datatype = "f4",
+                dimensions = ("feature_id", "time"),
+                fill_value = -9999.0
+                )
+            ncfile['velocity'].setncatts(
+                {
+                    'long_name': 'Velocity',
+                    'units': 'm/s',
+                    'missing_value': -9999.0
+                }
+            )
+        velocity_var[:, time_len:] = velocity.to_numpy(dtype=np.float32)
+
+        # =========== depth VARIABLE ===============
+        if "depth" in ncfile.variables:
+            depth_var = ncfile.variables["depth"]
+        else:
+            depth_var = ncfile.createVariable(
+                varname = "depth",
+                datatype = "f4",
+                dimensions = ("feature_id", "time"),
+                fill_value = -9999.0
+                )
+            ncfile['depth'].setncatts(
+                {
+                    'long_name': 'Depth',
+                    'units': 'm',
+                    'missing_value': -9999.0
+                }
+            )
+        depth_var[:, time_len:] = depth.to_numpy(dtype=np.float32)
+
+        # =========== nudge VARIABLE ===============
+        if "nudge" in ncfile.variables:
+            nudge = ncfile.variables["nudge"]
+        else:
+            nudge = ncfile.createVariable(
+                varname = "nudge",
+                datatype = "f4",
+                dimensions = ("feature_id", "time"),
+                fill_value = -9999.0
+                )
+            ncfile['nudge'].setncatts(
+                {
+                    'long_name': 'Streamflow Nudge Value',
+                    'units': 'm3 s-1',
+                    'missing_value': -9999.0
+                }
+            )
+        nudge[:, time_len:] = nudge_df.to_numpy(dtype=np.float32)
         
         # =========== GLOBAL ATTRIBUTES ===============
-        ncfile.setncatts(
-            {
-                'TITLE': 'OUTPUT FROM T-ROUTE',
-                'file_reference_time': t0.strftime('%Y-%m-%d_%H:%M:%S'),
-                'code_version': '',
-            }
-        )
+        if time_len == 0:
+            ncfile.setncatts(
+                {
+                    'TITLE': 'OUTPUT FROM T-ROUTE',
+                    'file_reference_time': t0.strftime('%Y-%m-%d_%H:%M:%S'),
+                    'code_version': '',
+                }
+            )
+
+
 def stream_output_mask_reader(stream_output_mask):
     if not stream_output_mask:
         return {}
@@ -2649,7 +2684,8 @@ def write_flowveldepth(
     cpu_pool = 1,
     poi_crosswalk = None,
     nexus_dict= None,
-    ):
+    file_name_time=None,
+):
     '''
     Write the results of flowveldepth and nudge to netcdf- break. 
     Arguments
@@ -2668,8 +2704,8 @@ def write_flowveldepth(
     # timesteps = list(timesteps)
     n_timesteps = flowveldepth.shape[1]//3
     ts = stream_output_internal_frequency//(dt//60)
-    ind = [i for i in range(ts-1,n_timesteps,ts)]
-    timestamps_sec =  [(i+1)*dt for i in ind]
+    ind = [i for i in range(ts-1, n_timesteps, ts)]
+    timestamps_sec = [(i+1) * dt for i in ind]
     
     flow = flowveldepth.iloc[:,0::3].iloc[:,ind]
     velocity = flowveldepth.iloc[:,1::3].iloc[:,ind]
@@ -2684,7 +2720,8 @@ def write_flowveldepth(
     pd.set_option('future.no_silent_downcasting', True)
     empty_df = pd.DataFrame(index=empty_ids, columns=nudge_df.columns).fillna(-9999.0)
     nudge_df = pd.concat([nudge_df, empty_df]).loc[flowveldepth.index]
-    file_name_time = t0
+    if file_name_time is None:
+        file_name_time = t0
     jobs = []
     
     if stream_output_timediff > 0:
@@ -2696,12 +2733,15 @@ def write_flowveldepth(
         
         for _ in range(num_files):
             filename = 'troute_output_' + file_name_time.strftime('%Y%m%d%H%M') + stream_output_type
-            args = (stream_output_directory,filename,
-                    flow.iloc[:,0:ts_per_file],
-                    velocity.iloc[:,0:ts_per_file],
-                    depth.iloc[:,0:ts_per_file],
-                    nudge_df.iloc[:,0:ts_per_file],
-                    timestamps_sec[0:ts_per_file],t0)
+            args = (
+                stream_output_directory,filename,
+                flow.iloc[:,0:ts_per_file],
+                velocity.iloc[:,0:ts_per_file],
+                depth.iloc[:,0:ts_per_file],
+                nudge_df.iloc[:,0:ts_per_file],
+                timestamps_sec[0:ts_per_file],
+                t0
+            )
             if stream_output_type == '.nc':
                 if cpu_pool > 1 & num_files > 1:
                     jobs.append(delayed(write_flowveldepth_netcdf)(*args))
