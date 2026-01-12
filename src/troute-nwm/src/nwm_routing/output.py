@@ -355,7 +355,8 @@ def nwm_output_generator(
                 t0, 
                 dt, 
                 nts,
-                time_index
+                time_index,
+                filename_t0=filename_t0,
             )
         elif waterbodies_df.empty: #there are no waterbodies in the basin.
             #this portion of the code is used to create lakeout nc files with zero values.
@@ -375,7 +376,8 @@ def nwm_output_generator(
                 t0, 
                 dt, 
                 nts,
-                time_index
+                time_index,
+                filename_t0=filename_t0,
             )
             LOG.warning("lakeout_output specified with no waterbodies in the basin.")
         end_time = time.time()
