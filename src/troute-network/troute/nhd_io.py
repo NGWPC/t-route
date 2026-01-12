@@ -2388,14 +2388,15 @@ def write_flowveldepth_netcdf(stream_output_directory, file_name,
 
         # ============ DIMENSIONS ===================
         max_str_len = max(len(str(x)) for x in flow.index.get_level_values('Type'))
-        # create snapshot of current dimensions
-        feature_id_len = len(ncfile.dimensions["feature_id"]) if "feature_id" in ncfile.dimensions else 0
+        # Get the current length of the time dimension.
+        # If this is 0, assume that the file was just created and variable need to be created within.
+        # If this is greater than zero, assume we're appending and use the time index for where to start new writes
         time_len = len(ncfile.dimensions["time"]) if "time" in ncfile.dimensions else 0
 
         # =========== feature_id VARIABLE ===============
         if "feature_id" not in ncfile.variables:
             _ = ncfile.createDimension('type_strlen', max_str_len)
-            _ = ncfile.createDimension('feature_id', None)
+            _ = ncfile.createDimension('feature_id', len(flow))
             FEATURE_ID = ncfile.createVariable(
                 varname = "feature_id",
                 datatype = 'int64',
@@ -2519,140 +2520,9 @@ def write_flowveldepth_netcdf(stream_output_directory, file_name,
                 }
             )
         nudge[:, time_len:] = nudge_df.to_numpy(dtype=np.float32)
-
-
-
-
-        # _ = ncfile.createDimension('feature_id', len(flow))
-        # _ = ncfile.createDimension('time', len(timestamps))
-        # _ = ncfile.createDimension('type_strlen', max_str_len)
-        #_ = ncfile.createDimension('gage', gage)
-        #_ = ncfile.createDimension('nudge_timestep', nudge_timesteps)  # Add dimension for nudge time steps
-        
-        # =========== time VARIABLE ===============
-        # TIME = ncfile.createVariable(
-        #     varname = "time",
-        #     datatype = 'float64',
-        #     dimensions = ("time",),
-        #     fill_value = -9999.0
-        # )
-        # TIME[:] = timestamps
-        # ncfile['time'].setncatts(
-        #     {
-        #         'long_name': 'valid output time',
-        #         'standard_name': 'time',
-        #         'units': f'seconds since {t0.strftime("%Y-%m-%d %H:%M:%S")}',
-        #         'missing_value': -9999.0
-        #         #'calendar': 'proleptic_gregorian'
-        #     }
-        # )
-
-        # # =========== reference_time VARIABLE ===============
-        # REF_TIME = ncfile.createVariable(
-        #     varname = "reference_time",
-        #     datatype = 'S1',
-        #     dimensions = ("reference_time",),
-        # )
-        # REF_TIME[:] = t0.strftime('%Y-%m-%d_%H:%M:%S')
-        # ncfile['reference_time'].setncatts(
-        #     {
-        #         'long_name': 'reference time',
-        #         'standard_name': 'reference_time',
-        #     }
-        # )
-
-        # =========== feature_id VARIABLE ===============
-        # FEATURE_ID = ncfile.createVariable(
-        #     varname = "feature_id",
-        #     datatype = 'int64',
-        #     dimensions = ("feature_id",),
-        # )
-        # FEATURE_ID[:] = flow.index.get_level_values('featureID')
-        # ncfile['feature_id'].setncatts(
-        #     {
-        #         'long_name': 'Segment ID',
-        #     }
-        # )
-        # =========== type VARIABLE ===============
-        # TYPE = ncfile.createVariable(
-        #     varname="type",
-        #     datatype=f'S{max_str_len}',
-        #     dimensions=("feature_id",),
-        # )
-        # TYPE[:] = np.array(flow.index.get_level_values('Type').astype(str).tolist(), dtype=f'S{max_str_len}')
-        # ncfile['type'].setncatts(
-        #     {
-        #         'long_name': 'Type',
-        #     }
-        # )
-
-        # =========== flow VARIABLE ===============            
-        # flow_var = ncfile.createVariable(
-        #     varname = "flow",
-        #     datatype = "f4",
-        #     dimensions = ("feature_id", "time"),
-        #     fill_value = -9999.0
-        #     )
-
-        # flow_var[:] = flow.to_numpy(dtype=np.float32)
-        # ncfile['flow'].setncatts(
-        #     {
-        #         'long_name': 'Flow',
-        #         'units': 'm3 s-1',
-        #         'missing_value': -9999.0
-        #     }
-        # )
-
-        # =========== velocity VARIABLE ===============            
-        # velocity_var = ncfile.createVariable(
-        #     varname = "velocity",
-        #     datatype = "f4",
-        #     dimensions = ("feature_id", "time"),
-        #     fill_value = -9999.0
-        #     )
-        # velocity_var[:] = velocity.to_numpy(dtype=np.float32)
-        # ncfile['velocity'].setncatts(
-        #     {
-        #         'long_name': 'Velocity',
-        #         'units': 'm/s',
-        #         'missing_value': -9999.0
-        #     }
-        # )
-
-        # =========== depth VARIABLE ===============            
-        # depth_var = ncfile.createVariable(
-        #     varname = "depth",
-        #     datatype = "f4",
-        #     dimensions = ("feature_id", "time"),
-        #     fill_value = -9999.0
-        #     )
-        # depth_var[:] = depth.to_numpy(dtype=np.float32)
-        # ncfile['depth'].setncatts(
-        #     {
-        #         'long_name': 'Depth',
-        #         'units': 'm',
-        #         'missing_value': -9999.0
-        #     }
-        # )
-        
-        # =========== nudge VARIABLE ===============            
-        # nudge = ncfile.createVariable(
-        #     varname = "nudge",
-        #     datatype = "f4",
-        #     dimensions = ("feature_id", "time"),
-        #     fill_value = -9999.0
-        #     )
-        # nudge[:] = nudge_df.to_numpy(dtype=np.float32)
-        # ncfile['nudge'].setncatts(
-        #     {
-        #         'long_name': 'Streamflow Nudge Value',
-        #         'units': 'm3 s-1',
-        #         'missing_value': -9999.0
-        #     }
-        # )
         
         # =========== GLOBAL ATTRIBUTES ===============
-        if feature_id_len == 0:
+        if time_len == 0:
             ncfile.setncatts(
                 {
                     'TITLE': 'OUTPUT FROM T-ROUTE',
@@ -2787,7 +2657,8 @@ def write_flowveldepth(
     cpu_pool = 1,
     poi_crosswalk = None,
     nexus_dict= None,
-    ):
+    file_name_time=None,
+):
     '''
     Write the results of flowveldepth and nudge to netcdf- break. 
     Arguments
@@ -2806,8 +2677,8 @@ def write_flowveldepth(
     # timesteps = list(timesteps)
     n_timesteps = flowveldepth.shape[1]//3
     ts = stream_output_internal_frequency//(dt//60)
-    ind = [i for i in range(ts-1,n_timesteps,ts)]
-    timestamps_sec =  [(i+1)*dt for i in ind]
+    ind = [i for i in range(ts-1, n_timesteps, ts)]
+    timestamps_sec = [(i+1) * dt for i in ind]
     
     flow = flowveldepth.iloc[:,0::3].iloc[:,ind]
     velocity = flowveldepth.iloc[:,1::3].iloc[:,ind]
@@ -2822,7 +2693,8 @@ def write_flowveldepth(
     pd.set_option('future.no_silent_downcasting', True)
     empty_df = pd.DataFrame(index=empty_ids, columns=nudge_df.columns).fillna(-9999.0)
     nudge_df = pd.concat([nudge_df, empty_df]).loc[flowveldepth.index]
-    file_name_time = t0
+    if file_name_time is None:
+        file_name_time = t0
     jobs = []
     
     if stream_output_timediff > 0:
@@ -2834,12 +2706,15 @@ def write_flowveldepth(
         
         for _ in range(num_files):
             filename = 'troute_output_' + file_name_time.strftime('%Y%m%d%H%M') + stream_output_type
-            args = (stream_output_directory,filename,
-                    flow.iloc[:,0:ts_per_file],
-                    velocity.iloc[:,0:ts_per_file],
-                    depth.iloc[:,0:ts_per_file],
-                    nudge_df.iloc[:,0:ts_per_file],
-                    timestamps_sec[0:ts_per_file],t0)
+            args = (
+                stream_output_directory,filename,
+                flow.iloc[:,0:ts_per_file],
+                velocity.iloc[:,0:ts_per_file],
+                depth.iloc[:,0:ts_per_file],
+                nudge_df.iloc[:,0:ts_per_file],
+                timestamps_sec[0:ts_per_file],
+                t0
+            )
             if stream_output_type == '.nc':
                 if cpu_pool > 1 & num_files > 1:
                     jobs.append(delayed(write_flowveldepth_netcdf)(*args))

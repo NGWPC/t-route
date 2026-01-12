@@ -133,7 +133,8 @@ def nwm_output_generator(
     link_lake_crosswalk = None,
     nexus_dict = None,
     poi_crosswalk = None,
-    logFileName='NONE' 
+    logFileName='NONE',
+    filename_t0=None,
 ):
   
     dt = run.get("dt")
@@ -302,7 +303,8 @@ def nwm_output_generator(
             cpu_pool = cpu_pool,
             poi_crosswalk = poi_crosswalk,
             nexus_dict= nexus_dict,
-            )
+            file_name_time=filename_t0,
+        )
 
         nTimeBins = int( len(flowveldepth.columns)/3)
         fCalc = int(dt/60)

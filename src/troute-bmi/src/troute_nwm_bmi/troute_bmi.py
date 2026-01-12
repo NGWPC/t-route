@@ -9,13 +9,30 @@ _COUNT_SUFFIX = "__count"
 
 _VAR_NAME_UNITS_MAP = {
     'land_surface_water_source__volume_flow_rate': ['streamflow_cms', 'm3 s-1'],
+    'channel_exit_water_x-section__volume_flow_rate': ['streamflow_cms', 'm3 s-1'],
+    'channel_water_flow__speed': ['streamflow_ms', 'm s-1'],
+    'channel_water__mean_depth': ['streamflow_m', 'm'],
+    'lake_water~incoming__volume_flow_rate': ['waterbody_cms', 'm3 s-1'],
+    'lake_water~outgoing__volume_flow_rate': ['waterbody_cms', 'm3 s-1'],
+    'lake_surface__elevation': ['waterbody_m', 'm'],
 }
 
-_OUTPUT_VAR_NAMES = []
+_OUTPUT_VAR_NAMES = [
+    "channel_water__id",
+    "channel_exit_water_x-section__volume_flow_rate",
+    "channel_water_flow__speed",
+    "channel_water__mean_depth",
+    "lake_water__id",
+    "lake_water~incoming__volume_flow_rate",
+    "lake_water~outgoing__volume_flow_rate",
+    "lake_surface__elevation"
+]
 
 _INPUT_VAR_NAMES = [
     "land_surface_water_source__id",
+    "land_surface_water_source__id" + _COUNT_SUFFIX,
     "land_surface_water_source__volume_flow_rate",
+    "land_surface_water_source__volume_flow_rate" + _COUNT_SUFFIX,
     "upstream_id",
 ]
 
@@ -33,10 +50,11 @@ class BmiTroute(Bmi):
             "land_surface_water_source__volume_flow_rate" + _COUNT_SUFFIX: np.zeros(1, dtype=np.int64),
             "upstream_id": np.zeros(0, dtype=int),
         }
+        for var in _OUTPUT_VAR_NAMES:
+            self._values[var] = np.zeros(0, np.int32) # dtype subject to change after running model
         self._var_loc = "node"
         self._var_grid_id = 0
         self._time_units = "s"
-        self._start_time = 0.0
         self._end_time = np.finfo("d").max
 
     def initialize(self, bmi_cfg_file):
@@ -95,17 +113,17 @@ class BmiTroute(Bmi):
 
     def get_start_time(self):
         """Start time of model."""
-        return self._start_time
+        return 0.0
 
     def get_end_time(self):
         """End time of model."""
-        return self._end_time
+        return self._model.ngen_dt * (self._model.nts - 1)
 
     def get_current_time(self):
         return self._model.time
 
     def get_time_step(self):
-        return self._model.dt
+        return self._model.ngen_dt
 
     def get_time_units(self):
         return self._time_units
@@ -124,11 +142,7 @@ class BmiTroute(Bmi):
         time_frac : float
             Fraction fo a time step.
         """
-        time_step = self.get_time_step()
-        self._model.dt = int(time_frac * time_step)
-        if self._model.dt > 0:
-            self.update()
-        self._model.dt = time_step
+        raise NotImplementedError("update_frac")
 
     def get_var_type(self, var_name):
         """Data type of variable.
