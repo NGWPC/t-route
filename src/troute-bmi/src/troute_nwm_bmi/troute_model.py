@@ -65,6 +65,7 @@ class Model:
             )
         else:
             raise Exception("Supernetwork network type must be HYFeaturesNetwork or NHDNetwork")
+        self._network.assemble_coastal_coupling_data()
         network_creation_time = time.time() - network_start_time
 
         # Data data assimilation

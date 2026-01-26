@@ -136,7 +136,9 @@ class AbstractNetwork(ABC):
             "lateral inflow DataFrame creation complete in %s seconds." \
                 % (time.time() - start_time)
                 )
+        self.assemble_coastal_coupling_data()
 
+    def assemble_coastal_coupling_data(self):
         #---------------------------------------------------------------------
         # Assemble coastal coupling data [WIP]
         #---------------------------------------------------------------------
