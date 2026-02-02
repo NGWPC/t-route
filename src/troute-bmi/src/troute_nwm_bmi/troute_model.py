@@ -1,6 +1,8 @@
 """Basic Model Interface backing model for NGEN t-route."""
+from __future__ import annotations
 import logging
 import time
+import typing
 import yaml
 import numpy as np
 import pandas as pd
@@ -18,6 +20,10 @@ from nwm_routing.output import nwm_output_generator
 
 from troute_ewts import configure_logging, MODULE_NAME
 LOG = logging.getLogger(MODULE_NAME)
+
+if typing.TYPE_CHECKING:
+    from numpy.typing import NDArray
+
 
 class Model:
     dt: int
@@ -111,13 +117,13 @@ class Model:
         step_time = self._network.t0 + timedelta(seconds=self.time)
         timestamp = step_time.strftime("%Y%m%d%H%M")
         self._df_data[timestamp] = np.array(qlat_values)
-        self._time += self.dt
+        self._time += self.ngen_dt
         self._timings["forcing_time"] += time.time() - start
 
 
-    def run(self, bmi_values: dict):
+    def run(self, bmi_values: dict[str, NDArray]):
+        qts_subdivisions = self.qts_subdivisions
         nts = self.nts
-        qts_subdivisions = self.forcing_parameters.get('qts_subdivisions', 12)
 
         LOG.debug("Assembling forcing dataframe")
         forcing_start_time = time.time()
@@ -135,6 +141,10 @@ class Model:
             flowveldepth_interorder = {bmi_values['upstream_id'][0]: {"results": bmi_values['upstream_fvd']}}
         else:
             flowveldepth_interorder = {}
+
+        usgs_df = self._data_assimilation.usgs_df
+        if not usgs_df.empty:
+            usgs_df = usgs_df.loc[:,self._network.t0:]
 
         LOG.debug("Starting routing function")
         route_start_time = time.time()
@@ -155,7 +165,7 @@ class Model:
             param_df=self._network.dataframe,
             q0=self._network.q0,
             qlats=qlats,
-            usgs_df=self._data_assimilation.usgs_df,
+            usgs_df=usgs_df,
             lastobs_df=self._data_assimilation.lastobs_df,
             reservoir_usgs_df=self._data_assimilation.reservoir_usgs_df,
             reservoir_usgs_param_df=self._data_assimilation.reservoir_usgs_param_df,
@@ -220,6 +230,45 @@ class Model:
             nexus_dict=self._network.nexus_dict,
             poi_crosswalk=self._network.poi_nex_dict or {},
         )
+
+        self._network.new_t0(self.dt, nts)
+        if self._da_index < len(self._da_sets):
+            self._data_assimilation.update_for_next_loop(
+                self._network,
+                self._da_sets[self._da_index]
+            )
+            self._da_index += 1
+
+        # compute BMI outputs
+        def _update_values(name: str, values: pd.Series | pd.Index):
+            dtype = bmi_values[name].dtype
+            array = bmi_values[name] = values.to_numpy().astype(dtype)
+            return array
+        qvd_columns = pd.MultiIndex.from_product(
+            [range(nts), ["q", "v", "d"]]
+        ).to_flat_index()
+        flowveldepth = pd.concat(
+            [pd.DataFrame(r[1], index=r[0], columns=qvd_columns) for r in run_results],
+            copy=False,
+        )
+        _update_values("channel_exit_water_x-section__volume_flow_rate", flowveldepth.iloc[:,-3])
+        _update_values("channel_water_flow__speed", flowveldepth.iloc[:,-2])
+        _update_values("channel_water__mean_depth", flowveldepth.iloc[:,-1])
+        _update_values("channel_water__id", flowveldepth.index)
+
+        i_columns = pd.MultiIndex.from_product(
+            [range(int(nts)), ["i"]]
+        ).to_flat_index()
+        wbdy = pd.concat(
+            [pd.DataFrame(r[6], index=r[0], columns=i_columns) for r in run_results],
+            copy=False,
+        )
+
+        wbdy_id = _update_values("lake_water__id", self._network.waterbody_dataframe.index)
+        _update_values("lake_water~incoming__volume_flow_rate", wbdy.loc[wbdy_id].iloc[:,-1])
+        _update_values("lake_water~outgoing__volume_flow_rate", flowveldepth.loc[wbdy_id].iloc[:,-3])
+        _update_values("lake_surface__elevation", flowveldepth.loc[wbdy_id].iloc[:,-1])
+
         self._timings["output_time"] = time.time() - output_start_time
 
         if self.show_timing:
@@ -305,6 +354,14 @@ class Model:
     @property
     def t0(self) -> datetime:
         return self._network.t0
+
+    @property
+    def qts_subdivisions(self) -> int:
+        return self.forcing_parameters["qts_subdivisions"]
+
+    @property
+    def ngen_dt(self) -> int:
+        return int(self.dt * self.qts_subdivisions)
 
     def _log_times(self):
         def sec_and_per(title, key: str):

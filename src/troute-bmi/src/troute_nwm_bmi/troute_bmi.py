@@ -9,13 +9,30 @@ _COUNT_SUFFIX = "__count"
 
 _VAR_NAME_UNITS_MAP = {
     'land_surface_water_source__volume_flow_rate': ['streamflow_cms', 'm3 s-1'],
+    'channel_exit_water_x-section__volume_flow_rate': ['streamflow_cms', 'm3 s-1'],
+    'channel_water_flow__speed': ['streamflow_ms', 'm s-1'],
+    'channel_water__mean_depth': ['streamflow_m', 'm'],
+    'lake_water~incoming__volume_flow_rate': ['waterbody_cms', 'm3 s-1'],
+    'lake_water~outgoing__volume_flow_rate': ['waterbody_cms', 'm3 s-1'],
+    'lake_surface__elevation': ['waterbody_m', 'm'],
 }
 
-_OUTPUT_VAR_NAMES = []
+_OUTPUT_VAR_NAMES = [
+    "channel_water__id",
+    "channel_exit_water_x-section__volume_flow_rate",
+    "channel_water_flow__speed",
+    "channel_water__mean_depth",
+    "lake_water__id",
+    "lake_water~incoming__volume_flow_rate",
+    "lake_water~outgoing__volume_flow_rate",
+    "lake_surface__elevation"
+]
 
 _INPUT_VAR_NAMES = [
     "land_surface_water_source__id",
+    "land_surface_water_source__id" + _COUNT_SUFFIX,
     "land_surface_water_source__volume_flow_rate",
+    "land_surface_water_source__volume_flow_rate" + _COUNT_SUFFIX,
     "upstream_id",
 ]
 
@@ -32,12 +49,18 @@ class BmiTroute(Bmi):
             "land_surface_water_source__volume_flow_rate": np.zeros(0, dtype=float),
             "land_surface_water_source__volume_flow_rate" + _COUNT_SUFFIX: np.zeros(1, dtype=np.int64),
             "upstream_id": np.zeros(0, dtype=int),
+            "channel_water__id": np.zeros([], dtype=np.int64),
+            "channel_exit_water_x-section__volume_flow_rate": np.zeros([], dtype=np.float64),
+            "channel_water_flow__speed": np.zeros([], dtype=np.float64),
+            "channel_water__mean_depth": np.zeros([], dtype=np.float64),
+            "lake_water__id": np.zeros([], dtype=np.int64),
+            "lake_water~incoming__volume_flow_rate": np.zeros([], dtype=np.float64),
+            "lake_water~outgoing__volume_flow_rate": np.zeros([], dtype=np.float64),
+            "lake_surface__elevation": np.zeros([], dtype=np.float64),
         }
         self._var_loc = "node"
         self._var_grid_id = 0
         self._time_units = "s"
-        self._start_time = 0.0
-        self._end_time = np.finfo("d").max
 
     def initialize(self, bmi_cfg_file):
         self._model = Model(bmi_cfg_file)
@@ -95,17 +118,17 @@ class BmiTroute(Bmi):
 
     def get_start_time(self):
         """Start time of model."""
-        return self._start_time
+        return 0.0
 
     def get_end_time(self):
         """End time of model."""
-        return self._end_time
+        return self._model.ngen_dt * (self._model.nts - 1)
 
     def get_current_time(self):
         return self._model.time
 
     def get_time_step(self):
-        return self._model.dt
+        return self._model.ngen_dt
 
     def get_time_units(self):
         return self._time_units
