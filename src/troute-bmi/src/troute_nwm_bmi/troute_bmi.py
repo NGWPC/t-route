@@ -10,7 +10,6 @@ from .troute_model import Model
 if typing.TYPE_CHECKING:
     from numpy.typing import NDArray
 
-_COUNT_SUFFIX = "__count"
 
 _VAR_NAME_UNITS_MAP = {
     'land_surface_water_source__volume_flow_rate': ['streamflow_cms', 'm3 s-1'],
@@ -35,9 +34,7 @@ _OUTPUT_VAR_NAMES = [
 
 _INPUT_VAR_NAMES = [
     "land_surface_water_source__id",
-    "land_surface_water_source__id" + _COUNT_SUFFIX,
     "land_surface_water_source__volume_flow_rate",
-    "land_surface_water_source__volume_flow_rate" + _COUNT_SUFFIX,
     "upstream_id",
 ]
 
@@ -49,9 +46,7 @@ class BmiTroute(Bmi):
         super().__init__()
         self._values: dict[str, NDArray] = {
             "land_surface_water_source__id": np.zeros(0, dtype=np.intc),
-            "land_surface_water_source__id" + _COUNT_SUFFIX: np.zeros(1, dtype=np.int64),
             "land_surface_water_source__volume_flow_rate": np.zeros(0, dtype=np.double),
-            "land_surface_water_source__volume_flow_rate" + _COUNT_SUFFIX: np.zeros(1, dtype=np.int64),
             "upstream_id": np.zeros(0, dtype=int),
             "channel_water__id": np.zeros(0, dtype=np.int64),
             "channel_exit_water_x-section__volume_flow_rate": np.zeros(0, dtype=np.float32),
@@ -71,10 +66,13 @@ class BmiTroute(Bmi):
         self._model = Model(bmi_cfg_file)
 
     def update(self):
-        self._model.update(self._values)
-    
+        self._model.run(self._values)
+        # clear current flow values
+        dtype = self._values["land_surface_water_source__volume_flow_rate"].dtype
+        self._values["land_surface_water_source__volume_flow_rate"] = np.zeros(0, dtype=dtype)
+
     def update_until(self, time):
-        while self._model._time < time:
+        if self._model.time < time:
             self.update()
 
     def set_value(self, var_name: str, src):
@@ -97,11 +95,9 @@ class BmiTroute(Bmi):
         elif var_name == "serialization_free":
             self._free_serialized()
             return
-        # special case for changing data size 
-        if var_name.endswith(_COUNT_SUFFIX):
-            source_var_name = var_name[:-len(_COUNT_SUFFIX)]
-            source = self._values.get(source_var_name)
-            self._values[source_var_name] = np.resize(source, int(src[0]))
+        elif var_name == "reset_time":
+            self._model.reset_time()
+            return
         var = self._values[var_name]
         if len(src) == len(var):
             var[:] = src
@@ -132,7 +128,7 @@ class BmiTroute(Bmi):
         array_like
             Value array.
         """
-        if var_name == "serialiation_state":
+        if var_name == "serialization_state":
             return self._serialized
         if var_name == "serialization_size" or var_name == "serialization_create":
             return self._serialized_size
@@ -158,7 +154,7 @@ class BmiTroute(Bmi):
     def finalize(self):
         """Finalize model."""
         if self._model is not None:
-            self._model.run(self._values)
+            self._model.log_times()
             self._model = None
 
     # BMI functions that are not being used yet...
@@ -188,6 +184,8 @@ class BmiTroute(Bmi):
         """
         if var_name == "serialization_free":
             return np.dtype(np.intc).name
+        if var_name == "reset_time":
+            return np.dtype(np.double).name
         return self.get_value_ptr(var_name).dtype.name
 
     def get_var_units(self, var_name: str):
@@ -216,8 +214,8 @@ class BmiTroute(Bmi):
         """
         if var_name == "serialization_state":
             return int(self._serialized_size[0])
-        if var_name == "serialization_free":
-            return np.dtype(np.intc).itemsize
+        if var_name == "serialization_free" or var_name == "reset_time":
+            return np.dtype(self.get_var_type(var_name)).itemsize
         return self.get_value_ptr(var_name).nbytes
 
     def get_var_itemsize(self, name):

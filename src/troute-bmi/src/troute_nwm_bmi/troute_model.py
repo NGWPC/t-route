@@ -72,6 +72,7 @@ class Model:
         else:
             raise Exception("Supernetwork network type must be HYFeaturesNetwork or NHDNetwork")
         self._network.assemble_coastal_coupling_data()
+        self._orig_t0 = self._network.t0
         network_creation_time = time.time() - network_start_time
 
         # Data data assimilation
@@ -102,7 +103,6 @@ class Model:
         # to function from inital loop.     
         self._subnetwork = [None, None, None]
 
-        self._df_data = {}
         self._timings = {
             "forcing_time": forcing_time,
             "route_time": 0.0,
@@ -110,31 +110,13 @@ class Model:
             "network_creation_time": network_creation_time,
         }
 
-
-    def update(self, bmi_values: dict):
-        start = time.time()
-        qlat_values = bmi_values["land_surface_water_source__volume_flow_rate"]
-        step_time = self._network.t0 + timedelta(seconds=self.time)
-        timestamp = step_time.strftime("%Y%m%d%H%M")
-        self._df_data[timestamp] = np.array(qlat_values)
-        self._time += self.ngen_dt
-        self._timings["forcing_time"] += time.time() - start
-
-
     def run(self, bmi_values: dict[str, NDArray]):
         qts_subdivisions = self.qts_subdivisions
         nts = self.nts
 
         LOG.debug("Assembling forcing dataframe")
         forcing_start_time = time.time()
-        ## setup the qlats dataframe from the update() data
-        qlats = pd.DataFrame(data=self._df_data, index=bmi_values["land_surface_water_source__id"])
-        # Take flowpath ids entering NEXUS and replace NEXUS ids by the upstream flowpath ids
-        qlats = qlats.rename(index=self._network.downstream_flowpath_dict)
-        # create zero values for missing values
-        missing = self._network.segment_index[~self._network.segment_index.isin(qlats.index)]
-        zeros = pd.DataFrame(data=0.0, index=missing, columns=qlats.columns)
-        qlats = pd.concat([qlats, zeros]).sort_index()
+        qlats = self._construct_qlats(bmi_values)
         self._timings["forcing_time"] += time.time() - forcing_start_time
 
         if len(bmi_values["upstream_id"]) > 0:
@@ -265,6 +247,10 @@ class Model:
 
         self._timings["output_time"] = time.time() - output_start_time
 
+        # update time as (ngen dt in seconds) * (number of steps processed)
+        self._time += self.ngen_dt * qlats.shape[1]
+
+    def log_times(self):
         if self.show_timing:
             self._log_times()
 
@@ -276,6 +262,7 @@ class Model:
             if isinstance(value, dict):
                 subnetwork[i] = dict(value)
         return {
+            "time": self._time,
             "subnetwork": subnetwork,
             # updated data stored on AbstractNetwork
             "q0": self._network._q0,
@@ -289,14 +276,20 @@ class Model:
         }
 
     def load_state(self, data: dict):
+        self._time = data["time"]
         self._subnetwork = data["subnetwork"]
         self._network._q0 = data["q0"]
         self._network._t0 = data["t0"]
-        self._data_assimilation._last_obs_df = data["lat_obs"]
+        self._data_assimilation._last_obs_df = data["last_obs"]
         self._data_assimilation._reservoir_usgs_param_df = data["usgs"]
         self._data_assimilation._reservoir_usace_param_df = data["usace"]
         self._data_assimilation._reservoir_rfc_param_df = data["rfc"]
         self._data_assimilation._great_lakes_param_df = data["gl"]
+        self._network.update_waterbody_water_elevation()
+
+    def reset_time(self):
+        self._time = 0.0
+        self._network.t0 = self._orig_t0
 
     @property
     def nts(self) -> int:
@@ -386,6 +379,31 @@ class Model:
     @property
     def ngen_dt(self) -> int:
         return int(self.dt * self.qts_subdivisions)
+
+    def _construct_qlats(self, bmi_values: dict[str, NDArray]):
+        dt = self.ngen_dt
+        step_time = self._network.t0
+        water_source_ids = bmi_values["land_surface_water_source__id"]
+        water_source_values = bmi_values["land_surface_water_source__volume_flow_rate"]
+        num_ids = len(water_source_ids)
+        # build the dataframe data
+        # the flow rate data should be organized as one large array broken into chunks per timestep with sources aligned with the IDs
+        df_data = {}
+        index = 0
+        while index < len(water_source_values):
+            timeslice = water_source_values[index:(index + num_ids)]
+            timestamp = step_time.strftime("%Y%m%d%H%M")
+            df_data[timestamp] = timeslice
+            step_time += timedelta(seconds=dt)
+            index += num_ids
+        ## use a DataFrame to view the inputs grouped by timestep
+        qlats = pd.DataFrame(data=df_data, index=water_source_ids)
+        # Take flowpath ids entering NEXUS and replace NEXUS ids by the upstream flowpath ids
+        qlats = qlats.rename(index=self._network.downstream_flowpath_dict)
+        # create zero values for missing values
+        missing = self._network.segment_index[~self._network.segment_index.isin(qlats.index)]
+        zeros = pd.DataFrame(data=0.0, index=missing, columns=qlats.columns)
+        return pd.concat([qlats, zeros]).sort_index()
 
     def _log_times(self):
         def sec_and_per(title, key: str):
