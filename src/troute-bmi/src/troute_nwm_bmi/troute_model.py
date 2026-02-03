@@ -232,12 +232,6 @@ class Model:
         )
 
         self._network.new_t0(self.dt, nts)
-        if self._da_index < len(self._da_sets):
-            self._data_assimilation.update_for_next_loop(
-                self._network,
-                self._da_sets[self._da_index]
-            )
-            self._da_index += 1
 
         # compute BMI outputs
         def _update_values(name: str, values: pd.Series | pd.Index):
@@ -273,6 +267,36 @@ class Model:
 
         if self.show_timing:
             self._log_times()
+
+    def create_state(self):
+        """Create a dictionary of data that can be serialized using `pickle.dumps`."""
+        # save current subnetwork and convert defaultdicts to dicts
+        subnetwork = list(self._subnetwork)
+        for i, value in enumerate(subnetwork):
+            if isinstance(value, dict):
+                subnetwork[i] = dict(value)
+        return {
+            "subnetwork": subnetwork,
+            # updated data stored on AbstractNetwork
+            "q0": self._network._q0,
+            "t0": self._network._t0,
+            # updated data stored on DataAssimilation
+            "last_obs": self._data_assimilation._last_obs_df,
+            "usgs": self._data_assimilation._reservoir_usgs_param_df,
+            "usace": self._data_assimilation._reservoir_usace_param_df,
+            "rfc": self._data_assimilation._reservoir_rfc_param_df,
+            "gl": self._data_assimilation._great_lakes_param_df,
+        }
+
+    def load_state(self, data: dict):
+        self._subnetwork = data["subnetwork"]
+        self._network._q0 = data["q0"]
+        self._network._t0 = data["t0"]
+        self._data_assimilation._last_obs_df = data["lat_obs"]
+        self._data_assimilation._reservoir_usgs_param_df = data["usgs"]
+        self._data_assimilation._reservoir_usace_param_df = data["usace"]
+        self._data_assimilation._reservoir_rfc_param_df = data["rfc"]
+        self._data_assimilation._great_lakes_param_df = data["gl"]
 
     @property
     def nts(self) -> int:

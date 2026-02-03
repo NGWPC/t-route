@@ -1,9 +1,14 @@
 """Basic Model Interface implementation for NGEN t-route."""
 from __future__ import annotations
+import pickle
+import typing
 import numpy as np
 from bmipy import Bmi
 
 from .troute_model import Model
+
+if typing.TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 _COUNT_SUFFIX = "__count"
 
@@ -39,28 +44,28 @@ _INPUT_VAR_NAMES = [
 
 class BmiTroute(Bmi):
     _model: Model
-    _values: dict[str, np.ndarray]
 
     def __init__(self):
         super().__init__()
-        self._values = {
+        self._values: dict[str, NDArray] = {
             "land_surface_water_source__id": np.zeros(0, dtype=np.intc),
             "land_surface_water_source__id" + _COUNT_SUFFIX: np.zeros(1, dtype=np.int64),
-            "land_surface_water_source__volume_flow_rate": np.zeros(0, dtype=float),
+            "land_surface_water_source__volume_flow_rate": np.zeros(0, dtype=np.double),
             "land_surface_water_source__volume_flow_rate" + _COUNT_SUFFIX: np.zeros(1, dtype=np.int64),
             "upstream_id": np.zeros(0, dtype=int),
-            "channel_water__id": np.zeros([], dtype=np.int64),
-            "channel_exit_water_x-section__volume_flow_rate": np.zeros([], dtype=np.float64),
-            "channel_water_flow__speed": np.zeros([], dtype=np.float64),
-            "channel_water__mean_depth": np.zeros([], dtype=np.float64),
-            "lake_water__id": np.zeros([], dtype=np.int64),
-            "lake_water~incoming__volume_flow_rate": np.zeros([], dtype=np.float64),
-            "lake_water~outgoing__volume_flow_rate": np.zeros([], dtype=np.float64),
-            "lake_surface__elevation": np.zeros([], dtype=np.float64),
+            "channel_water__id": np.zeros(0, dtype=np.int64),
+            "channel_exit_water_x-section__volume_flow_rate": np.zeros(0, dtype=np.float32),
+            "channel_water_flow__speed": np.zeros(0, dtype=np.float32),
+            "channel_water__mean_depth": np.zeros(0, dtype=np.float32),
+            "lake_water__id": np.zeros(0, dtype=np.int64),
+            "lake_water~incoming__volume_flow_rate": np.zeros(0, dtype=np.float32),
+            "lake_water~outgoing__volume_flow_rate": np.zeros(0, dtype=np.float32),
+            "lake_surface__elevation": np.zeros(0, dtype=np.float32),
         }
         self._var_loc = "node"
         self._var_grid_id = 0
         self._time_units = "s"
+        self._free_serialized()
 
     def initialize(self, bmi_cfg_file):
         self._model = Model(bmi_cfg_file)
@@ -83,12 +88,25 @@ class BmiTroute(Bmi):
         src : array_like
             Array of new values.
         """
+        if var_name == "serialization_create":
+            self._serialize()
+            return
+        elif var_name == "serialization_state":
+            self._deserialize(src)
+            return
+        elif var_name == "serialization_free":
+            self._free_serialized()
+            return
         # special case for changing data size 
         if var_name.endswith(_COUNT_SUFFIX):
             source_var_name = var_name[:-len(_COUNT_SUFFIX)]
             source = self._values.get(source_var_name)
             self._values[source_var_name] = np.resize(source, int(src[0]))
-        self._values[var_name][:] = src
+        var = self._values[var_name]
+        if len(src) == len(var):
+            var[:] = src
+        else:
+            self._values[var_name] = np.array(src, dtype=var.dtype)
 
     def get_value(self, var_name: str):
         """Copy of values.
@@ -101,7 +119,7 @@ class BmiTroute(Bmi):
         output_df : pd.DataFrame
             Copy of values.
         """
-        return np.copy(self._values[var_name])
+        return np.copy(self.get_value_ptr(var_name))
 
     def get_value_ptr(self, var_name: str):
         """Reference to values.
@@ -114,6 +132,10 @@ class BmiTroute(Bmi):
         array_like
             Value array.
         """
+        if var_name == "serialiation_state":
+            return self._serialized
+        if var_name == "serialization_size" or var_name == "serialization_create":
+            return self._serialized_size
         return self._values[var_name]
 
     def get_start_time(self):
@@ -153,7 +175,7 @@ class BmiTroute(Bmi):
             self.update()
         self._model.dt = time_step
 
-    def get_var_type(self, var_name):
+    def get_var_type(self, var_name: str):
         """Data type of variable.
         Parameters
         ----------
@@ -164,7 +186,9 @@ class BmiTroute(Bmi):
         str
             Data type.
         """
-        return str(self.get_value(var_name).dtype)
+        if var_name == "serialization_free":
+            return np.dtype(np.intc).name
+        return self.get_value_ptr(var_name).dtype.name
 
     def get_var_units(self, var_name: str):
         """Get units of variable.
@@ -179,7 +203,7 @@ class BmiTroute(Bmi):
         """
         return _VAR_NAME_UNITS_MAP[var_name][1]
 
-    def get_var_nbytes(self, var_name):
+    def get_var_nbytes(self, var_name: str):
         """Get units of variable.
         Parameters
         ----------
@@ -190,7 +214,11 @@ class BmiTroute(Bmi):
         int
             Size of data array in bytes.
         """
-        return self.get_value(var_name).nbytes
+        if var_name == "serialization_state":
+            return int(self._serialized_size[0])
+        if var_name == "serialization_free":
+            return np.dtype(np.intc).itemsize
+        return self.get_value_ptr(var_name).nbytes
 
     def get_var_itemsize(self, name):
         return np.dtype(self.get_var_type(name)).itemsize
@@ -344,3 +372,25 @@ class BmiTroute(Bmi):
 
     def get_grid_z(self, grid, z):
         raise NotImplementedError("get_grid_z")
+
+    def _serialize(self):
+        data = {
+            "values": self._values,
+            "model": self._model.create_state(),
+        }
+        # HIGHEST_PROTOCOL recommended for pickling pandas DataFrames
+        serialized = pickle.dumps(data, pickle.HIGHEST_PROTOCOL)
+        self._serialized = np.array(
+            bytearray(serialized), dtype=self._serialized.dtype
+        )
+        self._serialized_size[0] = len(self._serialized)
+
+    def _deserialize(self, data):
+        deserialized = pickle.loads(bytes(data))
+        self._values = deserialized["values"]
+        self._model.load_state(deserialized["model"])
+        self._free_serialized()
+
+    def _free_serialized(self):
+        self._serialized = np.zeros(0, dtype=np.uint8)
+        self._serialized_size = np.zeros(1, dtype=np.uint64)
