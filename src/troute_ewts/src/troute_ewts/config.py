@@ -43,6 +43,7 @@ from .constants import (
 )
 from .formatter import CustomFormatter
 from .paths import get_log_file_path
+from .env import getenv_any
 
 def translate_ngwpc_log_level(level: str) -> str:
     level = level.strip().upper()
@@ -75,7 +76,7 @@ def configure_logging():
         return logger # logger already initialized, nothing else to do
 
     # Default to enabled if flag not set or is set to disabled
-    raw_value = os.getenv(EV_EWTS_LOGGING)
+    raw_value = getenv_any(EV_EWTS_LOGGING, "")
     normalized = (raw_value or "").strip().lower()  # convert None or "" to "", lowercase for easy comparison
 
     # Determine if logging is enabled
@@ -102,7 +103,7 @@ def configure_logging():
     )
 
     log_level = translate_ngwpc_log_level(
-        os.getenv(EV_MODULE_LOGLEVEL, "INFO")
+        getenv_any(EV_MODULE_LOGLEVEL, "INFO")
     )
 
     module_fmt = MODULE_NAME.upper().ljust(LOG_MODULE_NAME_LEN)[:LOG_MODULE_NAME_LEN]
