@@ -8,8 +8,8 @@ import troute.nhd_io as nhd_io
 import troute.nhd_network_utilities_v02 as nnu
 from troute.config import Config
 
-from troute_ewts import configure_logging
-LOG = configure_logging()
+from troute_ewts import MODULE_NAME
+LOG = logging.getLogger(MODULE_NAME)
 
 def _input_handler_v04(args):
     '''
