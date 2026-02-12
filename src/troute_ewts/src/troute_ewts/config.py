@@ -33,7 +33,6 @@ retrieve the configured logger by name using logging.getLogger(MODULE_NAME).
 
 import logging
 import sys
-import os
 
 from .constants import (
     MODULE_NAME,
@@ -43,7 +42,7 @@ from .constants import (
 )
 from .formatter import CustomFormatter
 from .paths import get_log_file_path
-from .env import getenv_any
+from .helper import getenv_any
 
 def translate_ngwpc_log_level(level: str) -> str:
     level = level.strip().upper()
