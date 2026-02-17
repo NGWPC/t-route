@@ -217,7 +217,7 @@ class Model:
         # compute BMI outputs
         def _update_values(name: str, values: pd.Series | pd.Index):
             dtype = bmi_values[name].dtype
-            array = bmi_values[name] = values.to_numpy().astype(dtype)
+            array = bmi_values[name] = values.to_numpy(dtype=dtype, copy=True)
             return array
         qvd_columns = pd.MultiIndex.from_product(
             [range(nts), ["q", "v", "d"]]
