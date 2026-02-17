@@ -29,7 +29,6 @@ class Model:
     dt: int
 
     def __init__(self, config_file: str):
-        self._main_start_time = time.time()
         self._time = 0.0
 
         with open(config_file) as reader:
@@ -410,7 +409,7 @@ class Model:
             seconds = round(self._timings[key], 2)
             percent = round(self._timings[key] / process_time * 100, 2)
             LOG.info(f"{title}: {seconds} secs, {percent} %")
-        process_time = time.time() - self._main_start_time
+        process_time = sum(self._timings.values())
         LOG.debug(f"Processes complete in {process_time} seconds.")
         LOG.info('************ TIMING SUMMARY ************')
         LOG.info('----------------------------------------')
@@ -418,5 +417,4 @@ class Model:
         sec_and_per("Forcing array construction", "forcing_time")
         sec_and_per("Routing computations", "route_time")
         sec_and_per("Output writing", "output_time")
-        total_execution_time = round(sum(self._timings.values()), 2)
-        LOG.info(f"Total execution time: {total_execution_time} secs")
+        LOG.info(f"Total execution time: {round(process_time, 2)} secs")
