@@ -1,3 +1,4 @@
+from __future__ import annotations
 from collections import defaultdict
 from itertools import chain
 from functools import partial
@@ -24,6 +25,60 @@ _compute_func_map = defaultdict(
         "V02-structured": compute_network_structured,
     },
 )
+
+
+class NwmResults:
+    """Wrapper for accessing run results using named properties instead of indexing into the results tuple.\n
+    If the results indexes change, in future updates, updating the property indexes here should propagate to all places where results are read."""
+    def __init__(self, raw):
+        self._raw = raw
+
+    def __getitem__(self, index):
+        return self._raw[index]
+
+    @property
+    def ids(self):
+        return self._raw[0]
+
+    @property
+    def flow_velocity_depth(self):
+        return self._raw[1]
+
+    @property
+    def courant(self):
+        return self._raw[2]
+
+    @property
+    def last_obs(self):
+        return self._raw[3]
+
+    @property
+    def usgs(self):
+        return self._raw[4]
+
+    @property
+    def usace(self):
+        return self._raw[5]
+
+    @property
+    def usbr(self):
+        return self._raw[6]
+
+    @property
+    def upstream(self):
+        return self._raw[7]
+
+    @property
+    def rfc(self):
+        return self._raw[8]
+
+    @property
+    def nudge(self):
+        return self._raw[9]
+
+    @property
+    def great_lakes(self):
+        return self._raw[10]
 
 
 def _format_qlat_start_time(qlat_start_time):
@@ -588,7 +643,7 @@ def compute_nhd_routing_v02(
     subnetwork_list,
     flowveldepth_interorder = {},
     from_files = True,
-):
+) -> tuple[list[NwmResults], list]:
 
     da_decay_coefficient = da_parameter_dict.get("da_decay_coefficient", 0)
     param_df["dt"] = dt
@@ -1873,10 +1928,10 @@ def compute_nhd_routing_v02(
                 )
             )
 
-    return results, subnetwork_list
+    return [NwmResults(r) for r in results], subnetwork_list
 
 def compute_diffusive_routing(
-    results,
+    results: list[NwmResults],
     diffusive_network_data,
     cpu_pool,
     t0,
@@ -1894,7 +1949,7 @@ def compute_diffusive_routing(
     refactored_reaches,
     coastal_boundary_depth_df, 
     unrefactored_topobathy,
-    ):
+    ) -> list[NwmResults]:
 
     results_diffusive = []
     for tw in diffusive_network_data: # <------- TODO - by-network parallel loop, here.
@@ -1902,18 +1957,18 @@ def compute_diffusive_routing(
         trib_flow = None
         # extract junction inflows from results array
         for j, i in enumerate(results):
-            x = np.in1d(i[0], diffusive_network_data[tw]['tributary_segments'])
+            x = np.in1d(i.ids, diffusive_network_data[tw]['tributary_segments'])
             if sum(x) > 0:
                 if j == 0:
-                    trib_segs = i[0][x]
-                    trib_flow = i[1][x, ::3]
+                    trib_segs = i.ids[x]
+                    trib_flow = i.flow_velocity_depth[x, ::3]
                 else:
                     if trib_segs is None:
-                        trib_segs = i[0][x]
-                        trib_flow = i[1][x, ::3]                        
+                        trib_segs = i.ids[x]
+                        trib_flow = i.flow_velocity_depth[x, ::3]                        
                     else:
-                        trib_segs = np.append(trib_segs, i[0][x])
-                        trib_flow = np.append(trib_flow, i[1][x, ::3], axis = 0)  
+                        trib_segs = np.append(trib_segs, i.ids[x])
+                        trib_flow = np.append(trib_flow, i.flow_velocity_depth[x, ::3], axis = 0)  
 
         # create DataFrame of junction inflow data            
         junction_inflows = pd.DataFrame(data = trib_flow, index = trib_segs)
@@ -2019,4 +2074,4 @@ def compute_diffusive_routing(
             )
         )
 
-    return results_diffusive
+    return [NwmResults(r) for r in results_diffusive]

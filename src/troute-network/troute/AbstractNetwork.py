@@ -1,8 +1,10 @@
+from __future__ import annotations
 from abc import ABC, abstractmethod
 from functools import partial
 import pandas as pd
 import numpy as np
 import multiprocessing
+import typing
 from datetime import datetime, timedelta
 
 import os
@@ -17,6 +19,9 @@ from troute.nhd_network import extract_connections, replace_waterbodies_connecti
 from troute.nhd_network_utilities_v02 import organize_independent_networks
 import troute.nhd_io as nhd_io 
 from .AbstractRouting import MCOnly, MCwithDiffusive, MCwithDiffusiveNatlXSectionNonRefactored, MCwithDiffusiveNatlXSectionRefactored
+
+if typing.TYPE_CHECKING:
+    from troute.routing.compute import NwmResults
 
 from troute_ewts import MODULE_NAME
 LOG = logging.getLogger(MODULE_NAME)
@@ -184,7 +189,7 @@ class AbstractNetwork(ABC):
             else:
                 self._coastal_boundary_depth_df = pd.DataFrame()            
 
-    def new_q0(self, run_results):
+    def new_q0(self, run_results: list[NwmResults]):
         """
         Prepare a new q0 dataframe with initial flow and depth to act as
         a warmstate for the next simulation chunk.
@@ -192,7 +197,7 @@ class AbstractNetwork(ABC):
         self._q0 = pd.concat(
             [
                 pd.DataFrame(
-                    r[1][:, [-3, -3, -1]], index=r[0], columns=["qu0", "qd0", "h0"]
+                    r.flow_velocity_depth[:, [-3, -3, -1]], index=r.ids, columns=["qu0", "qd0", "h0"]
                 )
                 for r in run_results
             ],

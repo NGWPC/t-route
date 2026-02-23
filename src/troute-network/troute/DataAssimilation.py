@@ -1,7 +1,9 @@
+from __future__ import annotations
 import troute.nhd_io as nhd_io
 import pandas as pd
 import numpy as np
 import pathlib
+import typing
 import xarray as xr
 from datetime import datetime, timedelta
 from abc import ABC
@@ -17,6 +19,9 @@ LOG = logging.getLogger(MODULE_NAME)
 from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data
 
 from troute.network import bmi_array2df as a2df
+
+if typing.TYPE_CHECKING:
+    from troute.routing.compute import NwmResults
 
 # set legacy run flag: option to pass data frames through BMI formalism 
 # not to be used in regular BMI runs any longer, only for debugging
@@ -222,7 +227,7 @@ class NudgingDA(AbstractDA):
                     self._canada_is_created = True                    
         LOG.debug("NudgingDA class is completed in %s seconds." % (time.time() - main_start_time))
         
-    def update_after_compute(self, run_results, time_increment):
+    def update_after_compute(self, run_results: list[NwmResults], time_increment):
         '''
         Function to update data assimilation object after running routing module.
         
@@ -693,7 +698,7 @@ class PersistenceDA(AbstractDA):
             self._usgs_df = self._usgs_df.loc[:,network.t0:]
         LOG.debug("PersistenceDA class is completed in %s seconds." % (time.time() - PersistenceDA_start_time))
     
-    def update_after_compute(self, run_results,):
+    def update_after_compute(self, run_results: list[NwmResults]):
         '''
         Function to update data assimilation object after running routing module.
         
@@ -898,7 +903,7 @@ class great_lake(AbstractDA):
             
         LOG.debug("great_lake class is completed in %s seconds." % (time.time() - great_lake_start_time))
     
-    def update_after_compute(self, run_results, time_increment):
+    def update_after_compute(self, run_results: list[NwmResults], time_increment):
         '''
         Function to update data assimilation object after running routing module.
         
@@ -926,11 +931,11 @@ class great_lake(AbstractDA):
         tmp_list = []
         for r in run_results:   # Corresponds to the ordering of the outflows from line 843 troute/routing/fast_reach/mc_reach.pyx
             
-            if len(r[10][0]) > 0:
-                tmp_df = pd.DataFrame(data = r[10][0], columns = ['lake_id'])
-                tmp_df['previous_assimilated_outflows'] = r[10][1]
-                tmp_df['previous_assimilated_time'] = r[10][2]
-                tmp_df['update_time'] = r[10][3]
+            if len(r.great_lakes[0]) > 0:
+                tmp_df = pd.DataFrame(data = r.great_lakes[0], columns = ['lake_id'])
+                tmp_df['previous_assimilated_outflows'] = r.great_lakes[1]
+                tmp_df['previous_assimilated_time'] = r.great_lakes[2]
+                tmp_df['update_time'] = r.great_lakes[3]
                 tmp_list.append(tmp_df)
         
         if tmp_list:
@@ -1086,7 +1091,7 @@ class RFCDA(AbstractDA):
                 self._reservoir_rfc_param_df = pd.DataFrame()
         LOG.debug("RFCDA class is completed in %s seconds." % (time.time() - RFCDA_start_time))
     
-    def update_after_compute(self, run_results):
+    def update_after_compute(self, run_results: list[NwmResults]):
         '''
         Function to update data assimilation object after running routing module.
         
@@ -1141,7 +1146,7 @@ class DataAssimilation(NudgingDA, PersistenceDA, RFCDA):
         RFCDA.__init__(self, network, from_files, value_dict)
         great_lake.__init__(self, network, from_files, value_dict, da_run)
     
-    def update_after_compute(self, run_results, time_increment):
+    def update_after_compute(self, run_results: list[NwmResults], time_increment):
         '''
         
         '''
@@ -1480,7 +1485,7 @@ def _create_reservoir_df(data_assimilation_parameters, reservoir_da_parameters, 
     LOG.debug(f"Reading {res_source} timeslice files is completed in %s seconds." % (time.time() - reservoir_df_start_time))    
     return reservoir_df, reservoir_param_df
     
-def _set_persistence_reservoir_da_params(run_results):
+def _set_persistence_reservoir_da_params(run_results: list[NwmResults]):
     '''
     Update persistence reservoir DA parameters for subsequent loops
     Arguments:
@@ -1524,30 +1529,30 @@ def _set_persistence_reservoir_da_params(run_results):
     
     for r in run_results:   # Corresponds to the ordering of the outflows from line 843 troute/routing/fast_reach/mc_reach.pyx
         
-        if len(r[4][0]) > 0:
-            tmp_usgs = pd.DataFrame(data = r[4][1], index = r[4][0], columns = ['update_time'])
-            tmp_usgs['prev_persisted_outflow'] = r[4][2]
-            tmp_usgs['persistence_update_time'] = r[4][4]
-            tmp_usgs['persistence_index'] = r[4][3]
+        if len(r.usgs[0]) > 0:
+            tmp_usgs = pd.DataFrame(data = r.usgs[1], index = r.usgs[0], columns = ['update_time'])
+            tmp_usgs['prev_persisted_outflow'] = r.usgs[2]
+            tmp_usgs['persistence_update_time'] = r.usgs[4]
+            tmp_usgs['persistence_index'] = r.usgs[3]
             reservoir_usgs_param_df = pd.concat([reservoir_usgs_param_df, tmp_usgs])
         
-        if len(r[5][0]) > 0:
-            tmp_usace = pd.DataFrame(data = r[5][1], index = r[5][0], columns = ['update_time'])
-            tmp_usace['prev_persisted_outflow'] = r[5][2]
-            tmp_usace['persistence_update_time'] = r[5][4]
-            tmp_usace['persistence_index'] = r[5][3]
+        if len(r.usace[0]) > 0:
+            tmp_usace = pd.DataFrame(data = r.usace[1], index = r.usace[0], columns = ['update_time'])
+            tmp_usace['prev_persisted_outflow'] = r.usace[2]
+            tmp_usace['persistence_update_time'] = r.usace[4]
+            tmp_usace['persistence_index'] = r.usace[3]
             reservoir_usace_param_df = pd.concat([reservoir_usace_param_df, tmp_usace])
     
-        if len(r[6][0]) > 0:
-            tmp_usbr = pd.DataFrame(data = r[6][1], index = r[6][0], columns = ['update_time'])
-            tmp_usbr['prev_persisted_outflow'] = r[6][2]
-            tmp_usbr['persistence_update_time'] = r[6][4]
-            tmp_usbr['persistence_index'] = r[6][3]
+        if len(r.usbr[0]) > 0:
+            tmp_usbr = pd.DataFrame(data = r.usbr[1], index = r.usbr[0], columns = ['update_time'])
+            tmp_usbr['prev_persisted_outflow'] = r.usbr[2]
+            tmp_usbr['persistence_update_time'] = r.usbr[4]
+            tmp_usbr['persistence_index'] = r.usbr[3]
             reservoir_usbr_param_df = pd.concat([reservoir_usbr_param_df, tmp_usbr])
 
     return reservoir_usgs_param_df, reservoir_usace_param_df, reservoir_usbr_param_df
 
-def _set_rfc_reservoir_da_params(reservoir_rfc_param_df, run_results):
+def _set_rfc_reservoir_da_params(reservoir_rfc_param_df, run_results: list[NwmResults]):
     '''
     Update RFC reservoir DA parameters for subsequent loops
     Arguments:
@@ -1567,10 +1572,10 @@ def _set_rfc_reservoir_da_params(reservoir_rfc_param_df, run_results):
     - reservoir_rfc_param_df (DataFrame): RFC reservoir DA parameters (updated)
     '''
     for r in run_results:   # Corresponds to the ordering of the outflows from line 843 troute/routing/fast_reach/mc_reach.pyx
-        if len(r[8][0]) > 0:
-            rfc_idx = r[8][0]
-            reservoir_rfc_param_df.loc[rfc_idx, 'update_time'] = r[8][1]
-            reservoir_rfc_param_df.loc[rfc_idx, 'timeseries_idx'] = r[8][2]
+        if len(r.rfc[0]) > 0:
+            rfc_idx = r.rfc[0]
+            reservoir_rfc_param_df.loc[rfc_idx, 'update_time'] = r.rfc[1]
+            reservoir_rfc_param_df.loc[rfc_idx, 'timeseries_idx'] = r.rfc[2]
     
     return reservoir_rfc_param_df
 
@@ -1679,7 +1684,7 @@ def build_lastobs_df(
     LOG.debug(f"Building last observation dataframe completed in %s seconds." % (time.time() - build_lastobs_start_time))
     return lastobs_df
 
-def new_lastobs(run_results, time_increment):
+def new_lastobs(run_results: list[NwmResults], time_increment):
     """
     Creates new "lastobs" dataframe for the next simulation chunk.
 
@@ -1714,8 +1719,8 @@ def new_lastobs(run_results, time_increment):
         [
             pd.DataFrame(
                 # TODO: Add time_increment (or subtract?) from time_since_lastobs
-                np.array([rr[3][1],rr[3][2]]).T,
-                index=rr[3][0],
+                np.array([rr.last_obs[1],rr.last_obs[2]]).T,
+                index=rr.last_obs[0],
                 columns=["time_since_lastobs", "lastobs_discharge"]
             )
             for rr in run_results

@@ -1,4 +1,6 @@
+from __future__ import annotations
 import time
+import typing
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -9,6 +11,9 @@ from build_tests import parity_check
 import logging
 from troute_ewts import MODULE_NAME
 LOG = logging.getLogger(MODULE_NAME)
+
+if typing.TYPE_CHECKING:
+    from troute.routing.compute import NwmResults
 
 def _reindex_lake_to_link_id(target_df, crosswalk):
     '''
@@ -116,7 +121,7 @@ def _parquet_output_format_converter(df, start_datetime, dt, configuration, pref
 
 def nwm_output_generator(
     run,
-    results,
+    results: list[NwmResults],
     supernetwork_parameters,
     output_parameters,
     parity_parameters,
@@ -211,7 +216,7 @@ def nwm_output_generator(
         ).to_flat_index()
 
         flowveldepth = pd.concat(
-            [pd.DataFrame(r[1], index=r[0], columns=qvd_columns) for r in results],
+            [pd.DataFrame(r.flow_velocity_depth, index=r.ids, columns=qvd_columns) for r in results],
             copy=False,
         )
 
@@ -223,7 +228,7 @@ def nwm_output_generator(
             ).to_flat_index()
 
             wbdy = pd.concat(
-                [pd.DataFrame(r[7], index=r[0], columns=i_columns) for r in results],
+                [pd.DataFrame(r.upstream, index=r.ids, columns=i_columns) for r in results],
                 copy=False,
             )  # Corresponds to the ordering of the outflows from line 843 troute/routing/fast_reach/mc_reach.pyx
 
@@ -265,7 +270,7 @@ def nwm_output_generator(
             ).to_flat_index()
             courant = pd.concat(
                 [
-                    pd.DataFrame(r[2], index=r[0], columns=courant_columns)
+                    pd.DataFrame(r.courant, index=r.ids, columns=courant_columns)
                     for r in results
                 ],
                 copy=False,
@@ -287,8 +292,8 @@ def nwm_output_generator(
         if stream_output_mask:
             stream_output_mask = Path(stream_output_mask)
         
-        nudge = np.concatenate([r[9] for r in results])  # Corresponds to the ordering of the outflows from line 843 troute/routing/fast_reach/mc_reach.pyx
-        usgs_positions_id = np.concatenate([r[3][0] for r in results])
+        nudge = np.concatenate([r.nudge for r in results])  # Corresponds to the ordering of the outflows from line 843 troute/routing/fast_reach/mc_reach.pyx
+        usgs_positions_id = np.concatenate([r.last_obs[0] for r in results])
         nhd_io.write_flowveldepth(
             Path(stream_output_directory),
             stream_output_mask, 

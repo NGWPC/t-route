@@ -1,8 +1,10 @@
+from __future__ import annotations
 import argparse
 import time
 import math
 import asyncio
 import logging
+import typing
 from datetime import datetime, timedelta
 from pathlib import Path
 import concurrent.futures
@@ -23,6 +25,8 @@ from .preprocess import (
 )
 from .output import nwm_output_generator
 from troute.routing.compute import compute_nhd_routing_v02, compute_diffusive_routing, compute_log_mc, compute_log_diff
+if typing.TYPE_CHECKING:
+    from troute.routing.compute import NwmResults
 
 import troute.nhd_io as nhd_io
 import troute.nhd_network_utilities_v02 as nnu
@@ -1172,7 +1176,7 @@ def nwm_route(
     logFileName='troute_run_log.txt',  
     flowveldepth_interorder={},
     from_files=False,
-):
+) -> tuple[list[NwmResults], list]:
 
     ################### Main Execution Loop across ordered networks      
     start_time = time.time()
