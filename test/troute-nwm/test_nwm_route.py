@@ -4,7 +4,8 @@ from typing import Any, Dict
 
 import pandas as pd
 import pytest
-from nwm_routing.__main__ import new_nwm_q0, nwm_route
+from nwm_routing.__main__ import new_nwm_q0
+from nwm_routing.nwm_route import nwm_route
 from nwm_routing.preprocess import nwm_forcing_preprocess
 from test import find_cwd, temporarily_change_dir
 
