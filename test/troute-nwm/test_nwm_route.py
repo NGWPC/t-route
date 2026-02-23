@@ -119,12 +119,16 @@ def test_nwm_route_execution(
             param_df,
             q0,
             qlats,
+            pd.DataFrame(), #empty dataframe for ET .. not supported here
+            0.0, # SSOUT not supported in run
             usgs_df,
             lastobs_df,
             reservoir_usgs_df,
             reservoir_usgs_param_df,
             reservoir_usace_df,
             reservoir_usace_param_df,
+            pd.DataFrame(), #empty dataframe for USBR data...not needed unless running via BMI
+            pd.DataFrame(), #empty dataframe for USBR data...not needed unless running via BMI
             pd.DataFrame(), #empty dataframe for RFC data...not needed unless running via BMI
             pd.DataFrame(), #empty dataframe for RFC param data...not needed unless running via BMI
             pd.DataFrame(), #empty dataframe for great lakes data...

@@ -207,6 +207,10 @@ class Columns(BaseModel):
     """
     mainstem ID
     """
+    divide_id: Optional[str] = None
+    """
+    Divide_id mapping flowpath to catchment
+    """
 
 
 class WaterbodyParameters(BaseModel):
