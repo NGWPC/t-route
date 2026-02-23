@@ -4,6 +4,8 @@ import time
 import yaml
 import numpy as np
 import pandas as pd
+import xarray as xr
+from collections import defaultdict
 from datetime import timedelta, datetime
 from troute.config import Config
 
@@ -135,6 +137,8 @@ class Model:
             flowveldepth_interorder = {bmi_values['upstream_id'][0]: {"results": bmi_values['upstream_fvd']}}
         else:
             flowveldepth_interorder = {}
+
+        self._build_et_array()
 
         LOG.debug("Starting routing function")
         route_start_time = time.time()
@@ -309,6 +313,44 @@ class Model:
     @property
     def t0(self) -> datetime:
         return self._network.t0
+
+    def _build_et_array(self, bmi_values: dict):
+        build_et_array = getattr(self._network, "build_et_array", None)
+        # get values received from NGEN
+        cat_ids = bmi_values["et_forcing_id"]
+        cat_results = bmi_values["et_forcing_data"]
+        num_ids = len(cat_ids)
+        # if network has a builder and et forcing value were received
+        if (build_et_array is not None) and (len(cat_ids) > 0) and (num_ids > 0):
+            LOG.debug("Generating ET forcing values datasets.")
+            start_time = time.time()
+            # unpack raw results into separate data results per catchment
+            field = self.forcing_parameters.get("et_file_value_col", "ACTUAL_ET")
+            ngen_dt = int(self.nts / self.forcing_parameters["qts_subdivisions"])
+            num_timesteps = len(cat_results) // num_ids
+            # create an array of timesteps to be used as dataframe indexes
+            start = self.t0
+            time_index = [start + timedelta(seconds=ngen_dt * i) for i in range(num_timesteps)]
+            # unpack the results and convert to xarray bindary data used by the network
+            datasets = []
+            for cat_index, cat_id in enumerate(cat_ids):
+                df_data = {
+                    "time": time_index,
+                    field: cat_results[cat_index::num_ids]
+                }
+                df = pd.DataFrame(df_data).set_index("time")
+                ds = df.to_xarray().assign_coords(cat_id)
+                datasets.append(ds)
+            # merge datasets and send to the network object for processing
+            combined_ds = xr.concat(datasets, dim="divide_id") \
+                .assign_coords(divde_id=cat_ids)
+            run = {
+                "et_index_name": "divide_id",
+                "et_var_name": field,
+                "et_forcing_ds": combined_ds
+            }
+            build_et_array(run)
+            self._timings["network_creation_time"] += time.time() - start_time
 
     def _log_times(self):
         def sec_and_per(title, key: str):

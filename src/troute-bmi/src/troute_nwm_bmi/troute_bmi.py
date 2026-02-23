@@ -17,6 +17,8 @@ _INPUT_VAR_NAMES = [
     "land_surface_water_source__id",
     "land_surface_water_source__volume_flow_rate",
     "upstream_id",
+    "et_forcing_id",
+    "et_forcing_data",
 ]
 
 
@@ -32,6 +34,8 @@ class BmiTroute(Bmi):
             "land_surface_water_source__volume_flow_rate": np.zeros(0, dtype=float),
             "land_surface_water_source__volume_flow_rate" + _COUNT_SUFFIX: np.zeros(1, dtype=np.int64),
             "upstream_id": np.zeros(0, dtype=int),
+            "et_forcing_id": np.zeros([], dtype=np.intc),
+            "et_forcing_data": np.zeros([], dtype=np.double),
         }
         self._var_loc = "node"
         self._var_grid_id = 0
