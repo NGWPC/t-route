@@ -252,58 +252,404 @@ def find_tailwaters(connections: dict[int, list[int]]) -> set[int]:
     return {fp_id for fp_id, downstream in connections.items() if not downstream}
 
 
-def distribute_qlateral_to_virtual_flowpaths(
-    div_lateralflows_df: pd.DataFrame,
-    vfp_dataframe: pd.DataFrame,
-    flowpath_dict: dict,
+
+def discretize_flowpaths(
+    flowpaths: pd.DataFrame,
+    virtual_flowpaths: pd.DataFrame,
+    virtual_nexus: pd.DataFrame,
+    reference_flowpaths: pd.DataFrame,
+    nexus: pd.DataFrame,
+    discretization_len_m: float = 300.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Distribute lateral flows from divides to virtual flowpaths by area percentage.
-    
+    Discretize flowpaths into links and nodes for MC routing.
+
+    Terminal virtual nexuses (where VFPs meet the main channel) are
+    preserved as special nodes in the link chain. These mark the points
+    where area-scaled lateral flow enters the channel.
+
+    Parameters
+    ----------
+    flowpaths : pd.DataFrame
+        Physical flowpath data with columns: fp_id, div_id, dn_nex_id,
+        length_km, and channel params (n, slope, btmwdth, topwdth, etc.)
+    virtual_flowpaths : pd.DataFrame
+        Virtual flowpath data with columns: virtual_fp_id, dn_virtual_nex_id
+    virtual_nexus : pd.DataFrame
+        Virtual nexus data with columns: virtual_nex_id, dn_virtual_fp_id
+    reference_flowpaths : pd.DataFrame
+        Crosswalk table with columns: fp_id, virtual_fp_id, div_id
+    nexus : pd.DataFrame
+        Regular nexus data with columns: nex_id, dn_fp_id
+    discretization_len_m : float
+        Target link length in meters (default 300m)
+
+    Returns
+    -------
+    links_df : pd.DataFrame
+        Index: link_id
+        Columns: fp_id, div_id, dn_node_id, up_node_id,
+                 length_km, and all channel params from flowpath
+    nodes_df : pd.DataFrame
+        Columns: node_id, dn_link_id, fp_id, is_terminal_nexus
+    """
+    target_length_km = discretization_len_m / 1000.0
+
+    # Compute next_id above all existing IDs to avoid collisions
+    id_pools = []
+    if not flowpaths.empty:
+        id_pools.append(flowpaths['fp_id'].max())
+    if not nexus.empty:
+        id_pools.append(nexus['nex_id'].max())
+    if not virtual_flowpaths.empty:
+        id_pools.append(virtual_flowpaths['virtual_fp_id'].max())
+    if not virtual_nexus.empty:
+        id_pools.append(virtual_nexus['virtual_nex_id'].max())
+    next_id = int(max(id_pools)) + 1 if id_pools else 1
+
+    # Build lookup: for each div_id, find terminal virtual nexus IDs
+    # Terminal virtual nexuses are those with dn_virtual_fp_id == NaN
+    terminal_vnex_ids = set(
+        virtual_nexus.loc[virtual_nexus['dn_virtual_fp_id'].isna(), 'virtual_nex_id']
+    )
+
+    # Map div_id -> list of terminal virtual nexus IDs via reference_flowpaths + virtual_flowpaths
+    vfp_refs = reference_flowpaths[reference_flowpaths['virtual_fp_id'].notna()].copy()
+    if not vfp_refs.empty:
+        vfp_refs['virtual_fp_id'] = vfp_refs['virtual_fp_id'].astype(int)
+        # Merge to get dn_virtual_nex_id for each VFP
+        vfp_with_nex = vfp_refs.merge(
+            virtual_flowpaths[['virtual_fp_id', 'dn_virtual_nex_id']],
+            on='virtual_fp_id',
+            how='left',
+        )
+        # Filter to only terminal virtual nexuses
+        vfp_terminal = vfp_with_nex[
+            vfp_with_nex['dn_virtual_nex_id'].isin(terminal_vnex_ids)
+        ]
+        div_to_terminal_vnex = (
+            vfp_terminal.groupby('div_id')['dn_virtual_nex_id']
+            .apply(lambda x: sorted(x.dropna().astype(int).tolist()))
+            .to_dict()
+        )
+    else:
+        div_to_terminal_vnex = {}
+
+    # Channel parameter columns to inherit from flowpath to links
+    channel_params = [
+        'n', 'slope', 'btmwdth', 'topwdth', 'ncc', 'topwdthcc',
+        'musx', 'chslp', 'musk', 'mainstem_lp',
+    ]
+    # Only include columns that actually exist in flowpaths
+    channel_params = [c for c in channel_params if c in flowpaths.columns]
+
+    link_records = []
+    node_records = []
+
+    for _, fp in flowpaths.iterrows():
+        fp_id = int(fp['fp_id'])
+        div_id = int(fp['div_id'])
+        length_km = fp['length_km']
+        dn_nex_id = int(fp['dn_nex_id'])
+
+        # Handle missing/zero length
+        if pd.isna(length_km) or length_km <= 0:
+            length_km = 0.0
+
+        # Get terminal virtual nexus IDs for this divide
+        tnex_ids = div_to_terminal_vnex.get(div_id, [])
+        n_terminal_nexuses = len(tnex_ids)
+
+        # Compute number of links
+        if length_km <= 0 or target_length_km <= 0:
+            n_links = 1
+        else:
+            n_by_length = max(1, int(length_km / target_length_km))
+            n_links = max(n_by_length, n_terminal_nexuses + 1) if n_terminal_nexuses > 0 else n_by_length
+
+        link_length_km = length_km / n_links if n_links > 0 else length_km
+
+        # Build channel param dict for this flowpath
+        fp_params = {col: fp[col] for col in channel_params if col in fp.index}
+
+        # Create n_links - 1 internal nodes
+        # First n_terminal_nexuses nodes use terminal vnex IDs
+        # Remaining get new IDs
+        n_nodes = n_links - 1
+        node_ids = []
+        for i in range(n_nodes):
+            if i < n_terminal_nexuses:
+                node_ids.append(int(tnex_ids[i]))
+            else:
+                node_ids.append(next_id)
+                next_id += 1
+
+        # Create link records (ordered downstream to upstream)
+        for i in range(n_links):
+            link_id = next_id
+            next_id += 1
+
+            if i == 0:
+                dn_node = dn_nex_id
+            else:
+                dn_node = node_ids[i - 1]
+
+            if i < n_nodes:
+                up_node = node_ids[i]
+            else:
+                up_node = None
+
+            record = {
+                'link_id': link_id,
+                'fp_id': fp_id,
+                'div_id': div_id,
+                'dn_node_id': dn_node,
+                'up_node_id': up_node,
+                'length_km': link_length_km,
+            }
+            record.update(fp_params)
+            link_records.append(record)
+
+        # Create node records
+        for i, nid in enumerate(node_ids):
+            # The link downstream of this node is link at index i
+            # (the link whose up_node_id == nid)
+            # dn_link_id will be set after we know link_ids
+            node_records.append({
+                'node_id': nid,
+                'fp_id': fp_id,
+                'is_terminal_nexus': i < n_terminal_nexuses,
+                '_node_index_in_fp': i,
+            })
+
+    # Build DataFrames
+    if link_records:
+        links_df = pd.DataFrame(link_records).set_index('link_id')
+    else:
+        cols = ['fp_id', 'div_id', 'dn_node_id', 'up_node_id', 'length_km'] + channel_params
+        links_df = pd.DataFrame(columns=cols)
+        links_df.index.name = 'link_id'
+
+    if node_records:
+        nodes_df = pd.DataFrame(node_records)
+        # Compute dn_link_id: for each node, find the link whose up_node_id == node_id
+        up_node_to_link = links_df.reset_index().dropna(subset=['up_node_id'])
+        up_node_to_link = dict(zip(
+            up_node_to_link['up_node_id'].astype(int),
+            up_node_to_link['link_id'],
+        ))
+        nodes_df['dn_link_id'] = nodes_df['node_id'].map(up_node_to_link)
+        nodes_df = nodes_df.drop(columns=['_node_index_in_fp'])
+    else:
+        nodes_df = pd.DataFrame(columns=['node_id', 'dn_link_id', 'fp_id', 'is_terminal_nexus'])
+
+    return links_df, nodes_df
+
+
+def build_link_connections(
+    links_df: pd.DataFrame,
+    nexus: pd.DataFrame,
+) -> dict[int, list[int]]:
+    """
+    Build downstream connectivity for links.
+
+    For adjacent links within the same flowpath:
+        link_upstream.dn_node_id == link_downstream.up_node_id
+
+    For cross-flowpath connections:
+        link's dn_node_id is the flowpath's dn_nex_id →
+        nexus.dn_fp_id gives the downstream flowpath →
+        find the most-upstream link of that flowpath (up_node_id is None)
+
+    Parameters
+    ----------
+    links_df : pd.DataFrame
+        Link DataFrame indexed by link_id with columns:
+        fp_id, dn_node_id, up_node_id
+    nexus : pd.DataFrame
+        Regular nexus DataFrame with columns: nex_id, dn_fp_id
+
+    Returns
+    -------
+    connections : dict[int, list[int]]
+        Mapping of link_id -> [downstream_link_ids]
+    """
+    if links_df.empty:
+        return {}
+
+    # Build lookup: up_node_id -> link_id (for within-flowpath connections)
+    links_with_up = links_df[links_df['up_node_id'].notna()].copy()
+    up_node_to_link = dict(zip(
+        links_with_up['up_node_id'].astype(int),
+        links_with_up.index,
+    ))
+
+    # Build lookup: fp_id -> most-upstream link_id (up_node_id is None)
+    upstream_links = links_df[links_df['up_node_id'].isna()]
+    fp_to_upstream_link = dict(zip(
+        upstream_links['fp_id'].astype(int),
+        upstream_links.index,
+    ))
+
+    # Build lookup: nex_id -> dn_fp_id (cross-flowpath via regular nexus)
+    nex_to_dn_fp = {}
+    if not nexus.empty:
+        valid_nex = nexus[nexus['dn_fp_id'].notna()]
+        nex_to_dn_fp = dict(zip(
+            valid_nex['nex_id'].astype(int),
+            valid_nex['dn_fp_id'].astype(int),
+        ))
+
+    connections = {}
+    for link_id, row in links_df.iterrows():
+        dn_node = int(row['dn_node_id'])
+
+        # Check if there's a link within the same flowpath whose up_node_id == dn_node
+        if dn_node in up_node_to_link:
+            connections[link_id] = [up_node_to_link[dn_node]]
+        elif dn_node in nex_to_dn_fp:
+            # Cross-flowpath: dn_node is a regular nexus
+            dn_fp = nex_to_dn_fp[dn_node]
+            if dn_fp in fp_to_upstream_link:
+                connections[link_id] = [fp_to_upstream_link[dn_fp]]
+            else:
+                connections[link_id] = []
+        else:
+            # Terminal link (network outlet)
+            connections[link_id] = []
+
+    return connections
+
+
+def distribute_qlateral_to_links(
+    div_lateralflows_df: pd.DataFrame,
+    vfp_dataframe: pd.DataFrame,
+    links_df: pd.DataFrame,
+    nodes_df: pd.DataFrame,
+    reference_flowpaths: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Distribute lateral flows from divides to links for routing and
+    to virtual flowpaths for flow-scaling output.
+
+    Strategy:
+    1. For each divide, get total qlat from div_lateralflows_df.
+    2. For VFP-covered area: multiply qlat x percentage_area_contribution per VFP.
+       Assign each VFP's qlat to the link immediately downstream of its
+       terminal nexus node.
+    3. For un-VFP'd area (1 - sum_pct): distribute qlat equally among all
+       links of that flowpath.
+    4. Sum all contributions per link.
+
     Parameters
     ----------
     div_lateralflows_df : pd.DataFrame
         Lateral flows indexed by div_id, columns are timestamps
     vfp_dataframe : pd.DataFrame
-        Virtual flowpath dataframe indexed by virtual_fp_id
-    flowpath_dict : dict
-        Mapping of {dn_virtual_nex_id: downstream_flowpath_id}
-        
+        Virtual flowpath DataFrame indexed by virtual_fp_id with columns:
+        div_id, percentage_area_contribution, dn_virtual_nex_id
+    links_df : pd.DataFrame
+        Link DataFrame indexed by link_id with columns: fp_id, div_id
+    nodes_df : pd.DataFrame
+        Node DataFrame with columns: node_id, dn_link_id, fp_id, is_terminal_nexus
+    reference_flowpaths : pd.DataFrame
+        Crosswalk table with columns: fp_id, virtual_fp_id, div_id
+
     Returns
     -------
     routing_qlats : pd.DataFrame
-        Qlats for routing segments, indexed by virtual_fp_id
+        Qlats indexed by link_id, columns are timestamps
     flow_scaling_df : pd.DataFrame
-        Qlats for non-routing segments, indexed by virtual_fp_id
+        Qlats for VFPs (for non-routing flow-scaling output), indexed by virtual_fp_id
     """
-    vfp_to_div = vfp_dataframe[['div_id', 'percentage_area_contribution', 'dn_virtual_nex_id', 'routing_segment']].copy()
-    vfp_to_div['div_id'] = vfp_to_div['div_id'].astype(int)
-    
-    # Distribute qlat from div to virtual flowpaths by area percentage
-    parent_qlats = div_lateralflows_df.reindex(vfp_to_div['div_id'].values)
-    parent_qlats.index = vfp_to_div.index  # index is virtual_fp_id
-    
-    _qlats_df = parent_qlats.mul(vfp_to_div['percentage_area_contribution'].values, axis=0)
-    
-    # Split routing vs non-routing
-    routing_mask = vfp_to_div['routing_segment']
-    
-    # Routing segments: keep indexed by virtual_fp_id
-    routing_qlats = _qlats_df[routing_mask].copy()
-    
-    # Non-routing segments: remap to downstream routing flowpath
-    non_routing_qlats = _qlats_df[~routing_mask].copy()
-    dn_nex_ids = vfp_to_div.loc[non_routing_qlats.index, 'dn_virtual_nex_id']
-    downstream_fp = dn_nex_ids.map(flowpath_dict)
-    non_routing_qlats.index = downstream_fp.values
-    
-    # Add non-routing flows to their downstream routing flowpaths
-    aggregated_non_routing = non_routing_qlats.groupby(non_routing_qlats.index).sum()
-    routing_qlats = routing_qlats.add(aggregated_non_routing, fill_value=0)
-    
-    # Keep original non-routing indexed by virtual_fp_id for flow scaling reference
-    flow_scaling_df = _qlats_df[~routing_mask].copy()
-    
+    timestamps = div_lateralflows_df.columns
+
+    # Initialize routing qlats with zeros for all links
+    routing_qlats = pd.DataFrame(
+        0.0,
+        index=links_df.index,
+        columns=timestamps,
+    )
+
+    # Build VFP info: div_id, percentage, and terminal nexus node
+    vfp_info = vfp_dataframe[['div_id', 'percentage_area_contribution', 'dn_virtual_nex_id']].copy()
+    vfp_info['div_id'] = vfp_info['div_id'].astype(int)
+
+    # Map terminal nexus node_id -> dn_link_id (the link downstream of that node)
+    tnex_to_link = {}
+    if not nodes_df.empty:
+        terminal_nodes = nodes_df[nodes_df['is_terminal_nexus']]
+        if not terminal_nodes.empty:
+            tnex_to_link = dict(zip(
+                terminal_nodes['node_id'].astype(int),
+                terminal_nodes['dn_link_id'].astype(int),
+            ))
+
+    # Map div_id -> fp_id
+    # Use reference_flowpaths where fp_id IS NOT NULL
+    fp_refs = reference_flowpaths[reference_flowpaths['fp_id'].notna()].copy()
+    div_to_fp = dict(zip(fp_refs['div_id'].astype(int), fp_refs['fp_id'].astype(int)))
+
+    # Map fp_id -> list of link_ids
+    fp_to_links = links_df.reset_index().groupby('fp_id')['link_id'].apply(list).to_dict()
+
+    # Compute flow_scaling_df (VFP-level qlats for non-routing output)
+    flow_scaling_records = []
+
+    # Process each divide
+    for div_id in div_lateralflows_df.index:
+        div_id_int = int(div_id)
+        div_qlat = div_lateralflows_df.loc[div_id]  # Series: timestamps -> values
+
+        fp_id = div_to_fp.get(div_id_int)
+        if fp_id is None:
+            continue
+        link_ids = fp_to_links.get(fp_id, [])
+        if not link_ids:
+            continue
+
+        n_links = len(link_ids)
+
+        # Get VFPs for this divide
+        div_vfps = vfp_info[vfp_info['div_id'] == div_id_int]
+        sum_pct = div_vfps['percentage_area_contribution'].sum()
+
+        # Distribute VFP-covered area to terminal nexus nodes
+        for vfp_id, vfp_row in div_vfps.iterrows():
+            pct = vfp_row['percentage_area_contribution']
+            vfp_qlat = div_qlat * pct
+
+            # Store for flow scaling output
+            flow_scaling_records.append(
+                pd.Series(vfp_qlat.values, index=timestamps, name=vfp_id)
+            )
+
+            # Find the link downstream of the terminal nexus
+            dn_vnex = vfp_row['dn_virtual_nex_id']
+            if pd.notna(dn_vnex) and int(dn_vnex) in tnex_to_link:
+                target_link = tnex_to_link[int(dn_vnex)]
+                routing_qlats.loc[target_link] += vfp_qlat.values
+            else:
+                # VFP has no mapped terminal nexus node; distribute to all links
+                for lid in link_ids:
+                    routing_qlats.loc[lid] += vfp_qlat.values / n_links
+
+        # Distribute un-VFP'd area equally among all links
+        remainder_pct = 1.0 - sum_pct
+        if remainder_pct > 1e-10:
+            remainder_qlat = div_qlat * remainder_pct
+            per_link = remainder_qlat.values / n_links
+            for lid in link_ids:
+                routing_qlats.loc[lid] += per_link
+
+    # Build flow_scaling_df
+    if flow_scaling_records:
+        flow_scaling_df = pd.DataFrame(flow_scaling_records)
+        flow_scaling_df.index.name = 'virtual_fp_id'
+    else:
+        flow_scaling_df = pd.DataFrame(columns=timestamps)
+        flow_scaling_df.index.name = 'virtual_fp_id'
+
     return routing_qlats, flow_scaling_df
 
 
@@ -368,6 +714,7 @@ def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_paramet
             "reference_flowpaths",
             "virtual_flowpaths",
             "virtual_nexus",
+            "nexus",
             "waterbodies",
             "gages",
             "hydrolocations"
@@ -460,7 +807,10 @@ class NHF(AbstractNetwork):
         "_upstream_terminal",
         "_nexus_latlon",
         "_duplicate_ids_df",
-        "_flow_scaling_segment_df"
+        "_flow_scaling_segment_df",
+        "_links_df",
+        "_nodes_df",
+        "_reference_flowpaths",
     ]
 
     def __init__(
@@ -525,6 +875,7 @@ class NHF(AbstractNetwork):
                 reference_flowpaths = nhf["reference_flowpaths"]
                 virtual_flowpaths = nhf["virtual_flowpaths"]
                 virtual_nexus = nhf["virtual_nexus"]
+                nexus = nhf["nexus"]
                 hydrolocations = nhf["hydrolocations"]
             else:
                 raise NotImplementedError("BMI loading not implemented for the NHF")
@@ -537,7 +888,11 @@ class NHF(AbstractNetwork):
                 from_files = False
 
             # Preprocess network objects
-            self.preprocess_network(flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus)
+            discretization_len = self.supernetwork_parameters.get("nhf_discretization_len", 300.0)
+            self.preprocess_network(
+                flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus,
+                nexus, discretization_len,
+            )
 
             self.crosswalk_nex_flowpath_poi(
                 virtual_flowpaths, 
@@ -607,11 +962,11 @@ class NHF(AbstractNetwork):
     @property
     def segment_index(self):
         """
-            Segment IDs of all reaches in parameter dataframe
+            Segment IDs of all reaches (links) in parameter dataframe
             and diffusive domain.
         """
         # list of all segments in the domain (MC + diffusive)
-        self._segment_index = self.dataframe[self.dataframe["routing_segment"]].index  # only getting routing_segment == True virtual_flowpaths
+        self._segment_index = self._links_df.index
         if self._routing.diffusive_network_data:
             for tw in self._routing.diffusive_network_data:
                 self._segment_index = self._segment_index.append(
@@ -619,9 +974,22 @@ class NHF(AbstractNetwork):
                 )
         return self._segment_index
 
+    @property
+    def links_df(self):
+        return self._links_df
 
-    def preprocess_network(self, flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus):
-        assert not virtual_flowpaths.empty, "No virtual flowpaths read to memory from .gpkg" 
+
+    def preprocess_network(
+        self, flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus,
+        nexus=None, discretization_len_m=300.0,
+    ):
+        assert not virtual_flowpaths.empty, "No virtual flowpaths read to memory from .gpkg"
+        if nexus is None:
+            nexus = pd.DataFrame(columns=['nex_id', 'dn_fp_id'])
+
+        # Store reference_flowpaths for use in build_qlateral_array
+        self._reference_flowpaths = reference_flowpaths
+
         vfp_to_fp_map = reference_flowpaths[['virtual_fp_id', 'fp_id', 'div_id']].copy()
         _vfp = virtual_flowpaths.merge(
             vfp_to_fp_map,
@@ -639,37 +1007,56 @@ class NHF(AbstractNetwork):
         cols_to_drop = [col for col in result.columns if col.endswith('_flowpath')]
         result = result.drop(columns=cols_to_drop)
         self._dataframe = result
-        
 
-        # make the flowpath linkage
+        # make the flowpath linkage (kept for VFP qlat distribution compatibility)
         self._flowpath_dict = dict(zip(
-            result.loc[:, 'dn_virtual_nex_id'], 
+            result.loc[:, 'dn_virtual_nex_id'],
             result.loc[:, 'virtual_fp_id']
         ))
 
         self._dataframe.set_index("virtual_fp_id", inplace=True)
         self._dataframe = self.dataframe.sort_index()
-        
-        self._terminal_codes = get_terminal_nexus_ids(virtual_nexus)
-        
-        # Build upstream terminal mapping
-        self._upstream_terminal = build_upstream_terminal(virtual_flowpaths, self._terminal_codes)
-        
-        # Build connections dictionary - only for routing segments
-        routing_vfp = virtual_flowpaths[virtual_flowpaths["routing_segment"]]
-        self._connections = build_downstream_connections(
-            routing_flowpaths=routing_vfp,
-            all_flowpaths=virtual_flowpaths,
-            terminal_nexus_ids=self._terminal_codes,
+
+        # Discretize flowpaths into links and nodes
+        self._links_df, self._nodes_df = discretize_flowpaths(
+            flowpaths=flowpaths,
+            virtual_flowpaths=virtual_flowpaths,
+            virtual_nexus=virtual_nexus,
+            reference_flowpaths=reference_flowpaths,
+            nexus=nexus,
+            discretization_len_m=discretization_len_m,
         )
-        
-        # Validate connections
+
+        # Build link connections
+        self._connections = build_link_connections(
+            links_df=self._links_df,
+            nexus=nexus,
+        )
+
+        # Validate link connections
         is_valid, orphaned = validate_connections(self._connections)
         if not is_valid:
             raise ValueError(
-                f"Invalid network connections: {len(orphaned)} downstream IDs not found. "
+                f"Invalid link connections: {len(orphaned)} downstream IDs not found. "
                 f"First 10: {list(orphaned)[:10]}"
             )
+
+        # Build terminal codes from regular nexuses where dn_fp_id IS NULL (network outlets)
+        if not nexus.empty:
+            self._terminal_codes = set(
+                nexus.loc[nexus['dn_fp_id'].isna(), 'nex_id'].astype(int)
+            )
+        else:
+            self._terminal_codes = get_terminal_nexus_ids(virtual_nexus)
+
+        # Build upstream terminal: links whose dn_node_id is in terminal_codes
+        self._upstream_terminal = {}
+        for nex_id in self._terminal_codes:
+            terminal_links = self._links_df[
+                self._links_df['dn_node_id'] == nex_id
+            ].index.tolist()
+            if terminal_links:
+                self._upstream_terminal[nex_id] = set(terminal_links)
 
         # Store a dataframe containing info about nexus points. This will be reprojected to lat/lon
         # and filtered for only diffusive domain tailwaters in AbstractNetwork.py.
@@ -1076,15 +1463,13 @@ class NHF(AbstractNetwork):
                 # lateral flows [m^3/s] indexed by div_id (divide/catchment)
                 div_lateralflows_df = pd.concat(dfs, axis=1)
 
-                # Distribute to downstream flowpaths for routing, keep virtual_fp_id for flow scaling
-                nexus_to_downstream_fp = dict(zip(
-                    self._dataframe['up_virtual_nex_id'].dropna().astype(int),
-                    self._dataframe.loc[self._dataframe['up_virtual_nex_id'].notna()].index
-                ))
-                qlats_df, self._flow_scaling_segment_df = distribute_qlateral_to_virtual_flowpaths(
+                # Distribute lateral flows to links for routing, keep VFP-level for flow scaling
+                qlats_df, self._flow_scaling_segment_df = distribute_qlateral_to_links(
                     div_lateralflows_df,
                     self._dataframe,
-                    nexus_to_downstream_fp,
+                    self._links_df,
+                    self._nodes_df,
+                    self._reference_flowpaths,
                 )
         else:
             raise ValueError("qlat_input_folder does not exist")
