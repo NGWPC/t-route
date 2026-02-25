@@ -181,7 +181,7 @@ def nhf_routing(argv):
         
         route_start_time = time.time()
 
-        routing_df = network.dataframe[network.dataframe["routing_segment"]][[
+        routing_df = network.links_df[[
             "n",
             "mainstem_lp",
             "topwdth",
