@@ -9,6 +9,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pyogrio
+from shapely.geometry import Point
 import pyarrow.parquet as pq
 import xarray as xr
 from joblib import Parallel, delayed
@@ -309,9 +310,13 @@ def discretize_flowpaths(
 
     # Build lookup: for each div_id, find terminal virtual nexus IDs
     # Terminal virtual nexuses are those with dn_virtual_fp_id == NaN
-    terminal_vnex_ids = set(
-        virtual_nexus.loc[virtual_nexus['dn_virtual_fp_id'].isna(), 'virtual_nex_id']
-    )
+    if 'dn_virtual_fp_id' in virtual_nexus.columns:
+        terminal_vnex_ids = set(
+            virtual_nexus.loc[virtual_nexus['dn_virtual_fp_id'].isna(), 'virtual_nex_id']
+        )
+    else:
+        # NHF 1.1.2+: all virtual nexuses are terminal (no VFP chains)
+        terminal_vnex_ids = set(virtual_nexus['virtual_nex_id'])
 
     # Map div_id -> list of terminal virtual nexus IDs via reference_flowpaths + virtual_flowpaths
     vfp_refs = reference_flowpaths[reference_flowpaths['virtual_fp_id'].notna()].copy()
@@ -343,6 +348,30 @@ def discretize_flowpaths(
     # Only include columns that actually exist in flowpaths
     channel_params = [c for c in channel_params if c in flowpaths.columns]
 
+    # Build geometry lookups for positioning terminal nexuses
+    fp_geom_lookup = {}
+    if 'geometry' in flowpaths.columns:
+        for _, row in flowpaths.iterrows():
+            geom = row['geometry']
+            if geom is not None:
+                fp_geom_lookup[int(row['fp_id'])] = (
+                    geom.geoms[0] if geom.geom_type == 'MultiLineString' else geom
+                )
+
+    vnex_geom_lookup = {}
+    if 'geometry' in virtual_nexus.columns:
+        for _, row in virtual_nexus.iterrows():
+            geom = row['geometry']
+            if geom is not None:
+                vnex_geom_lookup[int(row['virtual_nex_id'])] = geom
+
+    nexus_geom_lookup = {}
+    if 'geometry' in nexus.columns:
+        for _, row in nexus.iterrows():
+            geom = row['geometry']
+            if geom is not None:
+                nexus_geom_lookup[int(row['nex_id'])] = geom
+
     link_records = []
     node_records = []
 
@@ -358,69 +387,153 @@ def discretize_flowpaths(
 
         # Get terminal virtual nexus IDs for this divide
         tnex_ids = div_to_terminal_vnex.get(div_id, [])
-        n_terminal_nexuses = len(tnex_ids)
-
-        # Compute number of links
-        if length_km <= 0 or target_length_km <= 0:
-            n_links = 1
-        else:
-            n_by_length = max(1, int(length_km / target_length_km))
-            n_links = max(n_by_length, n_terminal_nexuses + 1) if n_terminal_nexuses > 0 else n_by_length
-
-        link_length_km = length_km / n_links if n_links > 0 else length_km
 
         # Build channel param dict for this flowpath
         fp_params = {col: fp[col] for col in channel_params if col in fp.index}
 
-        # Create n_links - 1 internal nodes
-        # First n_terminal_nexuses nodes use terminal vnex IDs
-        # Remaining get new IDs
-        n_nodes = n_links - 1
-        node_ids = []
-        for i in range(n_nodes):
-            if i < n_terminal_nexuses:
-                node_ids.append(int(tnex_ids[i]))
+        # Try geometry-aware placement
+        fp_geom = fp_geom_lookup.get(fp_id)
+        has_geometry = fp_geom is not None and tnex_ids
+
+        if has_geometry:
+            fp_geom_length_m = fp_geom.length
+
+            # Project each terminal vnex onto the flowpath LineString
+            vnex_positions = []
+            for vnex_id in tnex_ids:
+                vnex_point = vnex_geom_lookup.get(vnex_id)
+                if vnex_point is not None:
+                    dist_m = fp_geom.project(vnex_point)
+                    vnex_positions.append((vnex_id, dist_m))
+
+            # Determine direction: is the downstream nexus near the start or end?
+            dn_nex_point = nexus_geom_lookup.get(dn_nex_id)
+            if dn_nex_point is not None:
+                dist_to_start = dn_nex_point.distance(Point(fp_geom.coords[0]))
+                dist_to_end = dn_nex_point.distance(Point(fp_geom.coords[-1]))
+                downstream_at_start = dist_to_start < dist_to_end
             else:
-                node_ids.append(next_id)
-                next_id += 1
+                downstream_at_start = True
 
-        # Create link records (ordered downstream to upstream)
-        for i in range(n_links):
-            link_id = next_id
-            next_id += 1
+            # Normalize projected distances to km
+            for i, (vnex_id, dist_m) in enumerate(vnex_positions):
+                fraction = dist_m / fp_geom_length_m if fp_geom_length_m > 0 else 0
+                if downstream_at_start:
+                    pos_km = fraction * length_km
+                else:
+                    pos_km = (1.0 - fraction) * length_km
+                vnex_positions[i] = (vnex_id, pos_km)
 
-            if i == 0:
-                dn_node = dn_nex_id
+            # Sort by position (downstream → upstream)
+            vnex_positions.sort(key=lambda x: x[1])
+
+            # Build fixed-point list: downstream end + vnex positions + upstream end
+            fixed_points = [(None, 0.0)]
+            for vnex_id, pos_km in vnex_positions:
+                pos_km = max(0.0, min(pos_km, length_km))
+                fixed_points.append((vnex_id, pos_km))
+            fixed_points.append((None, length_km))
+
+            # Subdivide each segment into links
+            dn_node_for_next_seg = dn_nex_id
+            for seg_idx in range(len(fixed_points) - 1):
+                seg_start_id, seg_start_km = fixed_points[seg_idx]
+                seg_end_id, seg_end_km = fixed_points[seg_idx + 1]
+                segment_length_km = seg_end_km - seg_start_km
+
+                if segment_length_km <= 0:
+                    continue
+
+                n_sub = max(1, round(segment_length_km / target_length_km))
+                sub_link_length = segment_length_km / n_sub
+
+                for sub_idx in range(n_sub):
+                    link_id = next_id; next_id += 1
+
+                    # Determine up_node_id for this sub-link
+                    if sub_idx == n_sub - 1:
+                        if seg_end_id is not None:
+                            # Terminal vnex node
+                            up_node_id = seg_end_id
+                            node_records.append({
+                                'node_id': seg_end_id,
+                                'fp_id': fp_id,
+                                'is_terminal_nexus': True,
+                                '_node_index_in_fp': len(node_records),
+                            })
+                        elif seg_idx == len(fixed_points) - 2:
+                            # Upstream end of flowpath
+                            up_node_id = None
+                        else:
+                            # Should not happen, but handle gracefully
+                            up_node_id = None
+                    else:
+                        # Internal sub-link: create a new internal node
+                        up_node_id = next_id; next_id += 1
+                        node_records.append({
+                            'node_id': up_node_id,
+                            'fp_id': fp_id,
+                            'is_terminal_nexus': False,
+                            '_node_index_in_fp': len(node_records),
+                        })
+
+                    link_records.append({
+                        'link_id': link_id,
+                        'fp_id': fp_id,
+                        'div_id': div_id,
+                        'dn_node_id': dn_node_for_next_seg,
+                        'up_node_id': up_node_id,
+                        'length_km': sub_link_length,
+                        **fp_params,
+                    })
+                    dn_node_for_next_seg = up_node_id
+
+        else:
+            # Fallback: equal-spacing (no geometry or no terminal nexuses)
+            n_terminal_nexuses = len(tnex_ids)
+            if length_km <= 0 or target_length_km <= 0:
+                n_links = 1
             else:
-                dn_node = node_ids[i - 1]
+                n_by_length = max(1, int(length_km / target_length_km))
+                n_links = max(n_by_length, n_terminal_nexuses + 1) if n_terminal_nexuses > 0 else n_by_length
 
-            if i < n_nodes:
-                up_node = node_ids[i]
-            else:
-                up_node = None
+            link_length_km = length_km / n_links if n_links > 0 else length_km
 
-            record = {
-                'link_id': link_id,
-                'fp_id': fp_id,
-                'div_id': div_id,
-                'dn_node_id': dn_node,
-                'up_node_id': up_node,
-                'length_km': link_length_km,
-            }
-            record.update(fp_params)
-            link_records.append(record)
+            # Create internal nodes
+            n_nodes = n_links - 1
+            node_ids = []
+            for i in range(n_nodes):
+                if i < n_terminal_nexuses:
+                    node_ids.append(int(tnex_ids[i]))
+                else:
+                    node_ids.append(next_id)
+                    next_id += 1
 
-        # Create node records
-        for i, nid in enumerate(node_ids):
-            # The link downstream of this node is link at index i
-            # (the link whose up_node_id == nid)
-            # dn_link_id will be set after we know link_ids
-            node_records.append({
-                'node_id': nid,
-                'fp_id': fp_id,
-                'is_terminal_nexus': i < n_terminal_nexuses,
-                '_node_index_in_fp': i,
-            })
+            # Create link records (ordered downstream to upstream)
+            for i in range(n_links):
+                link_id = next_id; next_id += 1
+
+                dn_node = dn_nex_id if i == 0 else node_ids[i - 1]
+                up_node = node_ids[i] if i < n_nodes else None
+
+                link_records.append({
+                    'link_id': link_id,
+                    'fp_id': fp_id,
+                    'div_id': div_id,
+                    'dn_node_id': dn_node,
+                    'up_node_id': up_node,
+                    'length_km': link_length_km,
+                    **fp_params,
+                })
+
+            # Create node records
+            for i, nid in enumerate(node_ids):
+                node_records.append({
+                    'node_id': nid,
+                    'fp_id': fp_id,
+                    'is_terminal_nexus': i < n_terminal_nexuses,
+                    '_node_index_in_fp': i,
+                })
 
     # Build DataFrames
     if link_records:
@@ -736,19 +849,21 @@ def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_paramet
         # ):
         #     layers_to_read.append("network")
 
+        # Layers whose geometry we need to preserve for discretization
+        keep_geometry_layers = {'flowpaths', 'virtual_nexus', 'nexus'}
+
         def read_layer(layer_name):
             if layer_name:
                 try:
                     _df = gpd.read_file(geo_file_path, layer=layer_name)
-                    if 'geometry' in _df.columns:
+                    if 'geometry' in _df.columns and layer_name not in keep_geometry_layers:
                         _df = _df.drop(columns=["geometry"])
                     return _df
                 except pyogrio.errors.DataSourceError as e:
                     print(f"Error reading file {geo_file_path}: {e}")
                     raise pyogrio.errors.DataSourceError from e
-                except pyogrio.errors.DataLayerError as e:
-                    print(f"Error reading layer {layer_name}: {e}")
-                    raise pyogrio.errors.DataLayerError from e
+                except pyogrio.errors.DataLayerError:
+                    return pd.DataFrame()  # Missing layer → empty DF
 
         # Retrieve geopackage information using matched layer names
         if cpu_pool > 1:
@@ -990,7 +1105,11 @@ class NHF(AbstractNetwork):
         # Store reference_flowpaths for use in build_qlateral_array
         self._reference_flowpaths = reference_flowpaths
 
-        vfp_to_fp_map = reference_flowpaths[['virtual_fp_id', 'fp_id', 'div_id']].copy()
+        vfp_to_fp_map = reference_flowpaths[reference_flowpaths['virtual_fp_id'].notna()][
+            ['virtual_fp_id', 'fp_id', 'div_id']
+        ].copy()
+        # NHF 1.1.2: VFP rows may have NULL fp_id; derive from div_id
+        vfp_to_fp_map['fp_id'] = vfp_to_fp_map['fp_id'].fillna(vfp_to_fp_map['div_id'])
         _vfp = virtual_flowpaths.merge(
             vfp_to_fp_map,
             left_on='virtual_fp_id',
@@ -1006,6 +1125,9 @@ class NHF(AbstractNetwork):
         )
         cols_to_drop = [col for col in result.columns if col.endswith('_flowpath')]
         result = result.drop(columns=cols_to_drop)
+        # Drop geometry columns carried from flowpath merge (not needed for VFP routing)
+        if 'geometry' in result.columns:
+            result = result.drop(columns=['geometry'])
         self._dataframe = result
 
         # make the flowpath linkage (kept for VFP qlat distribution compatibility)
