@@ -314,6 +314,14 @@ class Model:
     def t0(self) -> datetime:
         return self._network.t0
 
+    def _ngen_dt(self, bmi_values: dict):
+        # attempt to read value passed to BMI
+        from_bmi = bmi_values.get("delta_time", [0])
+        if len(from_bmi) and (from_bmi[0] > 0):
+            return int(from_bmi[0])
+        # backup method of assuming NGEN's delta time from config yaml
+        return int(self.dt * self.forcing_parameters["qts_subdivisions"])
+
     def _build_et_array(self, bmi_values: dict):
         build_et_array = getattr(self._network, "build_et_array", None)
         # get values received from NGEN
@@ -326,7 +334,7 @@ class Model:
             start_time = time.time()
             # unpack raw results into separate data results per catchment
             field = self.forcing_parameters.get("et_file_value_col", "ACTUAL_ET")
-            ngen_dt = int(self.dt * self.forcing_parameters["qts_subdivisions"])
+            ngen_dt = self._ngen_dt(bmi_values)
             num_timesteps = len(cat_results) // num_ids
             # create an array of timesteps to be used as dataframe indexes
             start = self.t0

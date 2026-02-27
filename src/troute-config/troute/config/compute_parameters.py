@@ -424,6 +424,10 @@ class ForcingParameters(BaseModel):
     """
     Globbing file pattern to identify ET forcing files.
     """
+    et_file_value_col: Optional[str] = None
+    """
+    Name of column containing ET values in ET forcing files.
+    """
 
     qlat_forcing_sets: Optional[List[QLateralForcingSet]] = None
     binary_nexus_file_folder: Optional[DirectoryPath] = None
