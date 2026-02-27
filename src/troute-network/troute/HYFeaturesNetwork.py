@@ -61,11 +61,10 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
     if any(
         [
             data_assimilation_parameters.get("streamflow_da", {}).get("streamflow_nudging", False),
-            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_usgs", False),
-            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_usace", False),
-            data_assimilation_parameters.get("reservoir_da", {})
-            .get("reservoir_rfc_da", {})
-            .get("reservoir_rfc_forecasts", False),
+            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usgs", False),
+            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usace", False),
+            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usbr", False),
+            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_rfc_da", {}).get("reservoir_rfc_forecasts", False),
         ]
     ):
         layers_to_read.append("network")
@@ -120,7 +119,7 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
 
     # add an "id" column to lakes, by merging with hydrolocations based on "hl_link" (i.e, lake_id in lakes)
     # also, add hl_uri to nexus, by merging with hydrolocations based on nex_id (i.e, id in nexus)
-    if "hydrolocations" in table_dict:
+    if "hydrolocations" in table_dict and not table_dict["hydrolocations"].empty:
         hydro = table_dict["hydrolocations"]
 
         # Filter out non-integer hl_link values and convert to integer (assuming valid lake_id values are integers)
@@ -448,6 +447,11 @@ class HYFeaturesNetwork(AbstractNetwork):
         # Drop 'gages' column if it is present
         if "gages" in self.dataframe:
             self._dataframe = self.dataframe.drop("gages", axis=1)
+
+        # ensure `cat-` is removed from any divide_ids
+        if "divide_id" in self.dataframe.columns:
+            self._dataframe["divide_id"] = self._dataframe['divide_id'].str.split('-').str[1].values.astype(np.int32)
+        
         # numeric code used to indicate network terminal segments
         terminal_code = self.supernetwork_parameters.get("terminal_code", 0)
 
@@ -632,6 +636,9 @@ class HYFeaturesNetwork(AbstractNetwork):
                 "reservoir_persistence_usace"
             ] = False
             self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
+                "reservoir_persistence_usbr"
+            ] = False
+            self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
                 "reservoir_persistence_canada"
             ] = False
             self.data_assimilation_parameters["reservoir_da"]["reservoir_rfc_da"]["reservoir_rfc_forecasts"] = False
@@ -658,11 +665,11 @@ class HYFeaturesNetwork(AbstractNetwork):
             # split the hl_uri column into type and value
             gages_df[["type", "value"]] = gages_df.hl_uri.str.split("-", expand=True, n=1)
             # filter for 'Gages' only
-            gages_df = gages_df[gages_df["type"].isin(["Gages", "NID"])]
+            gages_df = gages_df[gages_df["type"].isin(["gages", "nid", "usbr"])]
             # Some IDs have multiple gages associated with them. This will expand the dataframe so
             # there is a unique row per gage ID. Also adds lake ids to the dataframe for creating
             # lake-gage crosswalk dataframes.
-            gages_df = gages_df[["id", "value", "hydroseq"]]
+            gages_df = gages_df[["id", "value", "hydroseq", "type"]]
             gages_df["value"] = gages_df.value.str.split(" ")
             gages_df = (
                 gages_df.explode(column="value")
@@ -691,13 +698,13 @@ class HYFeaturesNetwork(AbstractNetwork):
             self._canadian_gage_link_df = pd.DataFrame(columns=["gages", "link"]).set_index("link")
 
             # Find furthest downstream gage and create our lake_gage_df to make crosswalk dataframes.
-            lake_gage_hydroseq_df = gages_df[~gages_df["lake_id"].isnull()][["lake_id", "value", "hydroseq"]].rename(
+            lake_gage_hydroseq_df = gages_df[~gages_df["lake_id"].isnull()][["lake_id", "value", "hydroseq", "type"]].rename(
                 columns={"value": "gages"}
             )
             lake_gage_hydroseq_df["lake_id"] = lake_gage_hydroseq_df["lake_id"].astype(int)
-            lake_gage_df = lake_gage_hydroseq_df[["lake_id", "gages"]].drop_duplicates()
+            lake_gage_df = lake_gage_hydroseq_df[["lake_id", "gages", "type"]].drop_duplicates()
             lake_gage_hydroseq_df = (
-                lake_gage_hydroseq_df.groupby(["lake_id", "gages"]).max("hydroseq").reset_index().set_index("lake_id")
+                lake_gage_hydroseq_df.groupby(["lake_id", "gages", "type"]).max("hydroseq").reset_index().set_index("lake_id")
             )
 
             # FIXME: temporary solution, handles USGS and USACE reservoirs. Need to update for
@@ -707,6 +714,7 @@ class HYFeaturesNetwork(AbstractNetwork):
             usgs_ind = lake_gage_df.gages.str.isnumeric()
             self._usgs_lake_gage_crosswalk = (
                 lake_gage_df.loc[usgs_ind]
+                .drop("type", axis=1)  # dropping type to ensure no dups when merging
                 .rename(columns={"lake_id": "usgs_lake_id", "gages": "usgs_gage_id"})
                 .set_index("usgs_lake_id")
                 .merge(
@@ -721,6 +729,7 @@ class HYFeaturesNetwork(AbstractNetwork):
 
             self._usace_lake_gage_crosswalk = (
                 lake_gage_df.loc[~usgs_ind]
+                .drop("type", axis=1)  # dropping type to ensure no dups when merging
                 .rename(columns={"lake_id": "usace_lake_id", "gages": "usace_gage_id"})
                 .set_index("usace_lake_id")
                 .merge(
@@ -729,6 +738,22 @@ class HYFeaturesNetwork(AbstractNetwork):
                 )
                 .sort_values(["usace_gage_id", "hydroseq"])
                 .groupby("usace_lake_id")
+                .last()
+                .drop("hydroseq", axis=1)
+            )
+
+            # Using the USBR type to set the crosswalk
+            self._usbr_lake_gage_crosswalk = (
+                lake_gage_df[lake_gage_df["type"] == "usbr"]
+                .drop("type", axis=1)  # dropping type to ensure no dups when merging
+                .rename(columns={"lake_id": "usbr_lake_id", "gages": "usbr_gage_id"})
+                .set_index("usbr_lake_id")
+                .merge(
+                    lake_gage_hydroseq_df.rename_axis("usbr_lake_id").rename(columns={"gages": "usbr_gage_id"}),
+                    on=["usbr_lake_id", "usbr_gage_id"],
+                )
+                .sort_values(["usbr_gage_id", "hydroseq"])
+                .groupby("usbr_lake_id")
                 .last()
                 .drop("hydroseq", axis=1)
             )
@@ -744,6 +769,11 @@ class HYFeaturesNetwork(AbstractNetwork):
                 .get("reservoir_persistence_da", {})
                 .get("reservoir_persistence_usace", False)
             )
+            usbr_da = (
+                self.data_assimilation_parameters.get("reservoir_da", {})
+                .get("reservoir_persistence_da", {})
+                .get("reservoir_persistence_usbr", False)
+            )
             rfc_da = (
                 self.data_assimilation_parameters.get("reservoir_da", {})
                 .get("reservoir_rfc_da", {})
@@ -754,6 +784,8 @@ class HYFeaturesNetwork(AbstractNetwork):
             # gages in timeslice files), so setting type 2 reservoirs second should overwrite type 3
             # designations
             # FIXME: Related to FIXME above, but we should re-think how to handle waterbody_types...
+            if usbr_da:
+                self._waterbody_types_df.loc[self._usace_lake_gage_crosswalk.index, "reservoir_type"] = 7
             if usace_da:
                 self._waterbody_types_df.loc[self._usace_lake_gage_crosswalk.index, "reservoir_type"] = 3
             if usgs_da:
@@ -773,6 +805,7 @@ class HYFeaturesNetwork(AbstractNetwork):
             self._gages = {}
             self._usgs_lake_gage_crosswalk = pd.DataFrame()
             self._usace_lake_gage_crosswalk = pd.DataFrame()
+            self._usbr_lake_gage_crosswalk = pd.DataFrame()
             self._rfc_lake_gage_crosswalk = pd.DataFrame()
 
     def build_qlateral_array(
@@ -893,6 +926,47 @@ class HYFeaturesNetwork(AbstractNetwork):
 
         self._qlateral = qlats_df
 
+    def build_et_array(
+        self,
+        run,
+    ):
+        col_idx = run.get("et_index_name", "divide_id")
+        var_idx = run.get("et_var_name", "ACTUAL_ET")
+        try:
+            ds = run["et_forcing_ds"]
+        except KeyError as e:
+            raise KeyError("Cannot find et_forcing_ds in runs") from e
+        ds_AET = ds[var_idx]
+
+        # mapping catchments to flowpath IDs
+        mapping_dict = dict(zip(
+            self._dataframe['divide_id'].values,
+            self._dataframe.index.values
+        ))
+        keys = np.array([mapping_dict[key] for key in ds_AET[col_idx].values])
+        
+        time_strings = pd.to_datetime(ds_AET.time.values).strftime('%Y%m%d%H%M')
+        aet_df = pd.DataFrame(
+            data=ds_AET.values,
+            index=keys,
+            columns=time_strings
+        )
+        
+        aet_df.index.name = 'key'
+        ordered_aet_df = aet_df.reindex(self._dataframe.index, fill_value=0) # ordering based on the existing 
+
+        # Convert ET into ELOSS
+        try:
+            A_w = self._dataframe["tw"] * self._dataframe["dx"]
+            _E = ordered_aet_df * self.forcing_parameters["peadj"]
+            TIMINT = 1 # Hardcoding for hourly
+            # _E is in mm/hr. Thus, MM/HR × (1/1000) × (1/3600) -> m/s
+            ELOSS_cms = (_E / 1000 / 3600 / TIMINT).mul(A_w.values, axis=0)
+            ELOSS_cfs = ELOSS_cms * 35.3147  # since NGEN runs in cfs, converting from cms to cfs. Can make a config setting later.
+        except KeyError as e:
+            raise KeyError("Cannot find flowpath attributes to map PET. Can you ensure ") from e
+        self._eloss = ELOSS_cfs
+
     ######################################################################
     # FIXME Temporary solution to hydrofabric issues.
     def bandaid(
@@ -986,6 +1060,7 @@ class HYFeaturesNetwork(AbstractNetwork):
             self._gages = inputs.get("gages", None)
             self._usgs_lake_gage_crosswalk = inputs.get("usgs_lake_gage_crosswalk", None)
             self._usace_lake_gage_crosswalk = inputs.get("usace_lake_gage_crosswalk", None)
+            self._usbr_lake_gage_crosswalk = inputs.get("usbr_lake_gage_crosswalk", None)
             self._rfc_lake_gage_crosswalk = inputs.get("rfc_lake_gage_crosswalk", None)
 
 

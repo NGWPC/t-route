@@ -7,11 +7,13 @@ Test v02 routing on specific test cases
 
 """
 ## Parallel execution
+from __future__ import annotations
 import sys
 import time
 import numpy as np
 import argparse
 import pathlib
+import typing
 import pandas as pd
 from functools import partial
 from joblib import delayed, Parallel
@@ -23,6 +25,9 @@ import troute.routing.compute as nhd_compute
 import troute.nhd_network_utilities_v02 as nnu
 import troute.nhd_network as nhd_network
 import troute.nhd_io as nhd_io
+
+if typing.TYPE_CHECKING:
+    from troute.routing.compute import NwmResults
 
 ENV_IS_CL = False
 if ENV_IS_CL:
@@ -162,7 +167,7 @@ def build_test_parameters(
 
 def parity_check(
     parity_set,
-    results,
+    results: list[NwmResults],
 ):
     nts = parity_set["nts"]
     dt = parity_set["dt"]
@@ -221,7 +226,7 @@ def parity_check(
     # construct a dataframe of simulated flows
     fdv_columns = pd.MultiIndex.from_product([range(nts), ["q", "v", "d"]])
     flowveldepth = pd.concat(
-        [pd.DataFrame(r[1], index=r[0], columns=fdv_columns) for r in results],
+        [pd.DataFrame(r.flow_velocity_depth, index=r.ids, columns=fdv_columns) for r in results],
         copy=False,
     )
     flowveldepth = flowveldepth.sort_index()

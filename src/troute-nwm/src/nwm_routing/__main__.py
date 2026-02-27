@@ -1,8 +1,10 @@
+from __future__ import annotations
 import argparse
 import time
 import math
 import asyncio
 import logging
+import typing
 from datetime import datetime, timedelta
 from pathlib import Path
 import concurrent.futures
@@ -23,6 +25,8 @@ from .preprocess import (
 )
 from .output import nwm_output_generator
 from troute.routing.compute import compute_nhd_routing_v02, compute_diffusive_routing, compute_log_mc, compute_log_diff
+if typing.TYPE_CHECKING:
+    from troute.routing.compute import NwmResults
 
 import troute.nhd_io as nhd_io
 import troute.nhd_network_utilities_v02 as nnu
@@ -221,12 +225,16 @@ def main_v04(argv):
             network.dataframe,
             network.q0,
             network._qlateral,
+            network._eloss,
+            forcing_parameters.get("ssout"),
             data_assimilation.usgs_df,
             data_assimilation.lastobs_df,
             data_assimilation.reservoir_usgs_df,
             data_assimilation.reservoir_usgs_param_df,
             data_assimilation.reservoir_usace_df,
             data_assimilation.reservoir_usace_param_df,
+            data_assimilation.reservoir_usbr_df,
+            data_assimilation.reservoir_usbr_param_df,
             data_assimilation.reservoir_rfc_df,
             data_assimilation.reservoir_rfc_param_df,
             data_assimilation.great_lakes_df,
@@ -1135,12 +1143,16 @@ def nwm_route(
     param_df,
     q0,
     qlats,
+    eloss_df,
+    ssout,
     usgs_df,
     lastobs_df,
     reservoir_usgs_df,
     reservoir_usgs_param_df,
     reservoir_usace_df,
     reservoir_usace_param_df,
+    reservoir_usbr_df,
+    reservoir_usbr_param_df,
     reservoir_rfc_df,
     reservoir_rfc_param_df,
     great_lakes_df,
@@ -1164,7 +1176,7 @@ def nwm_route(
     logFileName='troute_run_log.txt',  
     flowveldepth_interorder={},
     from_files=False,
-):
+) -> tuple[list[NwmResults], list]:
 
     ################### Main Execution Loop across ordered networks      
     start_time = time.time()
@@ -1201,6 +1213,8 @@ def nwm_route(
             reservoir_usgs_param_df,
             reservoir_usace_df,
             reservoir_usace_param_df,
+            reservoir_usbr_df,
+            reservoir_usbr_param_df,
             reservoir_rfc_df,
             reservoir_rfc_param_df,
             assume_short_ts,
@@ -1228,12 +1242,16 @@ def nwm_route(
         param_df,
         q0,
         qlats,
+        eloss_df,
+        ssout,
         usgs_df,
         lastobs_df,
         reservoir_usgs_df,
         reservoir_usgs_param_df,
         reservoir_usace_df,
         reservoir_usace_param_df,
+        reservoir_usbr_df,
+        reservoir_usbr_param_df,
         reservoir_rfc_df,
         reservoir_rfc_param_df,
         great_lakes_df,
@@ -1675,12 +1693,16 @@ def main_v03(argv):
             param_df,
             q0,
             qlats,
+            pd.DataFrame(),  # Empty Dataframe for ET data ... not supported for NHD flow
+            0.0, # SSOUT not supported for nhd routing
             usgs_df,
             lastobs_df,
             reservoir_usgs_df,
             reservoir_usgs_param_df,
             reservoir_usace_df,
             reservoir_usace_param_df,
+            pd.DataFrame(), #empty dataframe for USBR data...
+            pd.DataFrame(), #empty dataframe for USBR param data...
             pd.DataFrame(), #empty dataframe for RFC data...not needed unless running via BMI
             pd.DataFrame(), #empty dataframe for RFC param data...not needed unless running via BMI
             pd.DataFrame(), #empty dataframe for great lakes data...

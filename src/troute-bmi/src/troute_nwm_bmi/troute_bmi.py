@@ -17,6 +17,9 @@ _INPUT_VAR_NAMES = [
     "land_surface_water_source__id",
     "land_surface_water_source__volume_flow_rate",
     "upstream_id",
+    "et_forcing_id",
+    "et_forcing_data",
+    "delta_time"
 ]
 
 
@@ -32,6 +35,9 @@ class BmiTroute(Bmi):
             "land_surface_water_source__volume_flow_rate": np.zeros(0, dtype=float),
             "land_surface_water_source__volume_flow_rate" + _COUNT_SUFFIX: np.zeros(1, dtype=np.int64),
             "upstream_id": np.zeros(0, dtype=int),
+            "et_forcing_id": np.zeros(0, dtype=np.intc),
+            "et_forcing_data": np.zeros(0, dtype=np.double),
+            "delta_time": np.zeros(1, dtype=np.intc),
         }
         self._var_loc = "node"
         self._var_grid_id = 0
@@ -65,7 +71,11 @@ class BmiTroute(Bmi):
             source_var_name = var_name[:-len(_COUNT_SUFFIX)]
             source = self._values.get(source_var_name)
             self._values[source_var_name] = np.resize(source, int(src[0]))
-        self._values[var_name][:] = src
+        var = self._values[var_name]
+        if len(var) == len(src):
+            var[:] = src
+        else:
+            self._values[var_name] = src.astype(var.dtype, copy=True)
 
     def get_value(self, var_name: str):
         """Copy of values.
