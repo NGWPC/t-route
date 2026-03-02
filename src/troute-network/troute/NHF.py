@@ -634,25 +634,30 @@ def build_link_connections(
     return connections
 
 
-def distribute_qlateral_to_links(
+def distribute_catchment_discharge(
     div_lateralflows_df: pd.DataFrame,
     vfp_dataframe: pd.DataFrame,
     links_df: pd.DataFrame,
     nodes_df: pd.DataFrame,
     reference_flowpaths: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    fp_to_dn_nex: dict[int, int],
+    nex_to_dn_fp: dict[int, int],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Distribute lateral flows from divides to links for routing and
-    to virtual flowpaths for flow-scaling output.
+    Distribute catchment discharge to links for routing and to virtual
+    flowpaths for flow-scaling output.
 
-    Strategy:
-    1. For each divide, get total qlat from div_lateralflows_df.
-    2. For VFP-covered area: multiply qlat x percentage_area_contribution per VFP.
-       Assign each VFP's qlat to the link immediately downstream of its
-       terminal nexus node.
-    3. For un-VFP'd area (1 - sum_pct): distribute qlat equally among all
-       links of that flowpath.
-    4. Sum all contributions per link.
+    VFP discharge and the un-VFP'd remainder are routed as upstream
+    boundary flow (q_up) via the offnetwork_upstreams mechanism, not as
+    distributed lateral inflow along the channel.
+
+    - VFP discharge enters at the terminal virtual nexus node (targeting
+      the downstream link within the same flowpath).
+    - Remainder discharge enters at the downstream physical nexus
+      (targeting the first link of the downstream flowpath).
+    - Fallback: if no target link can be found (e.g. terminal flowpaths
+      with no downstream, or VFPs without a mapped terminal nexus), the
+      flow is distributed as lateral inflow (qlat) across all links.
 
     Parameters
     ----------
@@ -667,18 +672,32 @@ def distribute_qlateral_to_links(
         Node DataFrame with columns: node_id, dn_link_id, fp_id, is_terminal_nexus
     reference_flowpaths : pd.DataFrame
         Crosswalk table with columns: fp_id, virtual_fp_id, div_id
+    fp_to_dn_nex : dict[int, int]
+        Mapping of flowpath ID → downstream physical nexus ID
+    nex_to_dn_fp : dict[int, int]
+        Mapping of physical nexus ID → downstream flowpath ID
 
     Returns
     -------
     routing_qlats : pd.DataFrame
-        Qlats indexed by link_id, columns are timestamps
+        Qlats indexed by link_id, columns are timestamps (fallback only)
     flow_scaling_df : pd.DataFrame
         Qlats for VFPs (for non-routing flow-scaling output), indexed by virtual_fp_id
+    upstream_inflow_df : pd.DataFrame
+        Upstream inflow indexed by target link_id, columns are timestamps.
+        Contains VFP and remainder discharge to be injected as q_up.
     """
     timestamps = div_lateralflows_df.columns
 
     # Initialize routing qlats with zeros for all links
     routing_qlats = pd.DataFrame(
+        0.0,
+        index=links_df.index,
+        columns=timestamps,
+    )
+
+    # Initialize upstream inflow with zeros for all links
+    upstream_inflow_df = pd.DataFrame(
         0.0,
         index=links_df.index,
         columns=timestamps,
@@ -706,6 +725,11 @@ def distribute_qlateral_to_links(
     # Map fp_id -> list of link_ids
     fp_to_links = links_df.reset_index().groupby('fp_id')['link_id'].apply(list).to_dict()
 
+    # Map fp_id -> first (most-upstream) link_id
+    fp_to_first_link = {}
+    for lid, row in links_df[links_df['up_node_id'].isna()].iterrows():
+        fp_to_first_link[int(row['fp_id'])] = lid
+
     # Compute flow_scaling_df (VFP-level qlats for non-routing output)
     flow_scaling_records = []
 
@@ -727,7 +751,7 @@ def distribute_qlateral_to_links(
         div_vfps = vfp_info[vfp_info['div_id'] == div_id_int]
         sum_pct = div_vfps['percentage_area_contribution'].sum()
 
-        # Distribute VFP-covered area to terminal nexus nodes
+        # VFP-covered area: upstream inflow at terminal nexus
         for vfp_id, vfp_row in div_vfps.iterrows():
             pct = vfp_row['percentage_area_contribution']
             vfp_qlat = div_qlat * pct
@@ -737,23 +761,30 @@ def distribute_qlateral_to_links(
                 pd.Series(vfp_qlat.values, index=timestamps, name=vfp_id)
             )
 
-            # Find the link downstream of the terminal nexus
+            # Route as upstream inflow at terminal nexus node
             dn_vnex = vfp_row['dn_virtual_nex_id']
             if pd.notna(dn_vnex) and int(dn_vnex) in tnex_to_link:
                 target_link = tnex_to_link[int(dn_vnex)]
-                routing_qlats.loc[target_link] += vfp_qlat.values
+                upstream_inflow_df.loc[target_link] += vfp_qlat.values
             else:
-                # VFP has no mapped terminal nexus node; distribute to all links
+                # Fallback: no mapped terminal nexus → distribute as qlat
                 for lid in link_ids:
                     routing_qlats.loc[lid] += vfp_qlat.values / n_links
 
-        # Distribute un-VFP'd area equally among all links
+        # Remainder: upstream inflow at downstream physical nexus
         remainder_pct = 1.0 - sum_pct
         if remainder_pct > 1e-10:
             remainder_qlat = div_qlat * remainder_pct
-            per_link = remainder_qlat.values / n_links
-            for lid in link_ids:
-                routing_qlats.loc[lid] += per_link
+            dn_nex = fp_to_dn_nex.get(fp_id)
+            dn_fp = nex_to_dn_fp.get(dn_nex) if dn_nex else None
+            target_link = fp_to_first_link.get(dn_fp) if dn_fp else None
+            if target_link is not None:
+                upstream_inflow_df.loc[target_link] += remainder_qlat.values
+            else:
+                # Terminal flowpath (no downstream): fall back to qlat
+                per_link = remainder_qlat.values / n_links
+                for lid in link_ids:
+                    routing_qlats.loc[lid] += per_link
 
     # Build flow_scaling_df
     if flow_scaling_records:
@@ -763,7 +794,7 @@ def distribute_qlateral_to_links(
         flow_scaling_df = pd.DataFrame(columns=timestamps)
         flow_scaling_df.index.name = 'virtual_fp_id'
 
-    return routing_qlats, flow_scaling_df
+    return routing_qlats, flow_scaling_df, upstream_inflow_df
 
 
 def read_ngen_waterbody_df(parm_file, lake_index_field="wb-id", lake_id_mask=None):
@@ -926,6 +957,10 @@ class NHF(AbstractNetwork):
         "_links_df",
         "_nodes_df",
         "_reference_flowpaths",
+        "_fp_to_dn_nex",
+        "_nex_to_dn_fp",
+        "_upstream_inflow_df",
+        "_nexus_virtual_seg_ids",
     ]
 
     def __init__(
@@ -1155,6 +1190,24 @@ class NHF(AbstractNetwork):
             nexus=nexus,
         )
 
+        # Store mappings for upstream inflow routing (used by distribute_catchment_discharge)
+        self._fp_to_dn_nex = dict(zip(
+            flowpaths['fp_id'].astype(int),
+            flowpaths['dn_nex_id'].astype(int),
+        ))
+        self._nex_to_dn_fp = {}
+        if not nexus.empty:
+            valid_nex = nexus[nexus['dn_fp_id'].notna()]
+            if not valid_nex.empty:
+                self._nex_to_dn_fp = dict(zip(
+                    valid_nex['nex_id'].astype(int),
+                    valid_nex['dn_fp_id'].astype(int),
+                ))
+
+        # Initialize upstream inflow state (populated during forcing assembly)
+        self._upstream_inflow_df = None
+        self._nexus_virtual_seg_ids = {}
+
         # Validate link connections
         is_valid, orphaned = validate_connections(self._connections)
         if not is_valid:
@@ -1185,6 +1238,125 @@ class NHF(AbstractNetwork):
         # Location information will be used to advertise tailwater locations of diffusive domains
         # to the model engine/coastal models
         self._nexus_latlon = virtual_nexus
+
+    def _create_upstream_virtual_segments(self, upstream_inflow_df):
+        """
+        Create virtual segments for upstream inflow injection via offnetwork_upstreams.
+
+        For each target link that has nonzero upstream inflow, create a virtual
+        segment that will carry the pre-filled flow-velocity-depth timeseries.
+        Virtual segments are added to _connections (flowing into the target link),
+        and to _links_df (with channel params inherited from the target link).
+
+        On repeated calls (multi-loop runs), previous virtual segments are
+        removed before creating new ones.
+
+        Parameters
+        ----------
+        upstream_inflow_df : pd.DataFrame
+            Upstream inflow indexed by target link_id, columns are timestamps.
+        """
+        # Find target links with nonzero flow
+        nonzero_mask = upstream_inflow_df.abs().sum(axis=1) > 1e-10
+        target_links = upstream_inflow_df.index[nonzero_mask]
+
+        if target_links.empty:
+            self._nexus_virtual_seg_ids = {}
+            # Invalidate cached network properties
+            self._reverse_network = None
+            self._independent_networks = None
+            self._reaches_by_tw = None
+            return
+
+        # Generate virtual segment IDs above existing ID space
+        all_ids = list(self._links_df.index) + list(self._connections.keys())
+        next_id = max(all_ids) + 1
+
+        virtual_seg_ids = {}
+        virtual_link_records = []
+
+        for target_link_id in target_links:
+            virtual_seg_id = next_id
+            next_id += 1
+            virtual_seg_ids[int(target_link_id)] = virtual_seg_id
+
+            # Virtual segment flows into target link — this makes it
+            # appear in rconn as upstream of the target link, which is
+            # how compute.py detects offnetwork_upstreams.
+            self._connections[virtual_seg_id] = [int(target_link_id)]
+
+            # Build row with channel params inherited from target link
+            target_row = self._links_df.loc[target_link_id]
+            record = {
+                'link_id': virtual_seg_id,
+                'fp_id': target_row['fp_id'],
+                'div_id': target_row.get('div_id', 0),
+                'dn_node_id': target_row.get('dn_node_id', 0),
+                'up_node_id': None,
+                'length_km': target_row['length_km'],
+            }
+            # Copy channel params
+            for col in self._links_df.columns:
+                if col not in record:
+                    record[col] = target_row[col]
+            virtual_link_records.append(record)
+
+        # Add virtual segment rows to links_df
+        if virtual_link_records:
+            virtual_df = pd.DataFrame(virtual_link_records).set_index('link_id')
+            self._links_df = pd.concat([self._links_df, virtual_df])
+
+        self._nexus_virtual_seg_ids = virtual_seg_ids
+
+        # Add q0 entries for virtual segments (zeros; kernel pre-fills from FVD)
+        if self._q0 is not None:
+            vseg_q0 = pd.DataFrame(
+                0.0,
+                index=list(virtual_seg_ids.values()),
+                columns=self._q0.columns,
+                dtype="float32",
+            )
+            self._q0 = pd.concat([self._q0, vseg_q0])
+
+        # Invalidate cached network properties so they recompute with virtual segments
+        self._reverse_network = None
+        self._independent_networks = None
+        self._reaches_by_tw = None
+
+    def build_flowveldepth_interorder(self, nts, qts_subdivisions):
+        """
+        Build flowveldepth_interorder dict for upstream inflow virtual segments.
+
+        Each virtual segment gets a pre-filled flow-velocity-depth timeseries
+        that the kernel injects as upstream boundary conditions (q_up).
+
+        Parameters
+        ----------
+        nts : int
+            Number of routing timesteps.
+        qts_subdivisions : int
+            Number of routing timesteps per qlat timestep.
+
+        Returns
+        -------
+        dict
+            {virtual_seg_id: {"results": [q0, 0.0, 0.0, q1, 0.0, 0.0, ...]}}
+        """
+        fvd_interorder = {}
+        if self._upstream_inflow_df is None or not self._nexus_virtual_seg_ids:
+            return fvd_interorder
+
+        for target_link_id, virtual_seg_id in self._nexus_virtual_seg_ids.items():
+            row = self._upstream_inflow_df.loc[target_link_id]
+            n_qlat_steps = len(row)
+            results = []
+            for ts in range(nts):
+                qlat_idx = min(ts // qts_subdivisions, n_qlat_steps - 1)
+                q = float(row.iloc[qlat_idx])
+                results.extend([q, 0.0, 0.0])  # flow, velocity=0, depth=0
+            fvd_interorder[virtual_seg_id] = {"results": results}
+
+        return fvd_interorder
 
     def crosswalk_nex_flowpath_poi(
         self, 
@@ -1585,14 +1757,34 @@ class NHF(AbstractNetwork):
                 # lateral flows [m^3/s] indexed by div_id (divide/catchment)
                 div_lateralflows_df = pd.concat(dfs, axis=1)
 
-                # Distribute lateral flows to links for routing, keep VFP-level for flow scaling
-                qlats_df, self._flow_scaling_segment_df = distribute_qlateral_to_links(
-                    div_lateralflows_df,
-                    self._dataframe,
-                    self._links_df,
-                    self._nodes_df,
-                    self._reference_flowpaths,
-                )
+                # Clean up virtual segments from previous loop before building new mappings
+                if self._nexus_virtual_seg_ids:
+                    old_vseg_ids = set(self._nexus_virtual_seg_ids.values())
+                    self._links_df = self._links_df.drop(
+                        index=[i for i in old_vseg_ids if i in self._links_df.index]
+                    )
+                    if self._q0 is not None:
+                        self._q0 = self._q0.drop(
+                            index=[i for i in old_vseg_ids if i in self._q0.index]
+                        )
+                    for vseg_id in old_vseg_ids:
+                        self._connections.pop(vseg_id, None)
+                    self._nexus_virtual_seg_ids = {}
+
+                # Distribute catchment discharge to links and upstream inflow
+                qlats_df, self._flow_scaling_segment_df, self._upstream_inflow_df = \
+                    distribute_catchment_discharge(
+                        div_lateralflows_df,
+                        self._dataframe,
+                        self._links_df,
+                        self._nodes_df,
+                        self._reference_flowpaths,
+                        self._fp_to_dn_nex,
+                        self._nex_to_dn_fp,
+                    )
+
+                # Create virtual segments for upstream inflow injection
+                self._create_upstream_virtual_segments(self._upstream_inflow_df)
         else:
             raise ValueError("qlat_input_folder does not exist")
         all_df = pd.DataFrame(
