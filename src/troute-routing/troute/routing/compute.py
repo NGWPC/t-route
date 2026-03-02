@@ -709,7 +709,10 @@ def compute_nhd_routing_v02(
         # if 1 == 1:
         with Parallel(n_jobs=cpu_pool, backend="loky") as parallel:
             results_subn = defaultdict(list)
-            flowveldepth_interorder = {}
+            # Preserve any pre-populated entries (e.g., upstream inflow
+            # virtual segments from NHF catchment discharge routing).
+            _prepopulated_fvd = dict(flowveldepth_interorder)
+            flowveldepth_interorder = dict(_prepopulated_fvd)
 
             for order in range(max(subnetworks_only_ordered_jit.keys()), -1, -1):
                 jobs = []
@@ -946,7 +949,8 @@ def compute_nhd_routing_v02(
                 results_subn[order] = parallel(jobs)
    
                 if order > 0:  # This is not needed for the last rank of subnetworks
-                    flowveldepth_interorder = {}
+                    # Start with pre-populated entries (e.g., catchment inflow virtual segments)
+                    flowveldepth_interorder = dict(_prepopulated_fvd)
                     for ci, (cluster, clustered_subns) in enumerate(
                         reaches_ordered_bysubntw_clustered[order].items()
                     ):
@@ -1036,7 +1040,10 @@ def compute_nhd_routing_v02(
         start_para_time = time.time()
         with Parallel(n_jobs=cpu_pool, backend="loky") as parallel:
             results_subn = defaultdict(list)
-            flowveldepth_interorder = {}
+            # Preserve any pre-populated entries (e.g., upstream inflow
+            # virtual segments from NHF catchment discharge routing).
+            _prepopulated_fvd = dict(flowveldepth_interorder)
+            flowveldepth_interorder = dict(_prepopulated_fvd)
 
             for order in range(max(subnetworks_only_ordered_jit.keys()), -1, -1):
                 jobs = []
@@ -1269,7 +1276,8 @@ def compute_nhd_routing_v02(
                 results_subn[order] = parallel(jobs)
 
                 if order > 0:  # This is not needed for the last rank of subnetworks
-                    flowveldepth_interorder = {}
+                    # Start with pre-populated entries (e.g., catchment inflow virtual segments)
+                    flowveldepth_interorder = dict(_prepopulated_fvd)
                     for twi, subn_tw in enumerate(reaches_ordered_bysubntw[order]):
                         # TODO: This index step is necessary because we sort the segment index
                         # TODO: I think there are a number of ways we could remove the sorting step
