@@ -776,15 +776,15 @@ def compute_nhd_routing_v02(
                         param_df_sub.index.tolist() + lake_segs
                     ).sort_index()
                     
-                    if order < max(subnetworks_only_ordered_jit.keys()):
-                        for us_subn_tw in offnetwork_upstreams:
+                    for us_subn_tw in offnetwork_upstreams:
+                        if us_subn_tw in flowveldepth_interorder:
                             subn_tw_sortposition = param_df_sub_super.index.get_loc(
                                 us_subn_tw
                             )
                             flowveldepth_interorder[us_subn_tw][
                                 "position_index"
                             ] = subn_tw_sortposition
-   
+
                     subn_reach_list = clustered_subns["subn_reach_list"]
                     upstreams = clustered_subns["upstreams"]
 
@@ -1109,8 +1109,8 @@ def compute_nhd_routing_v02(
                         param_df_sub.index.tolist() + lake_segs
                     ).sort_index()
                     
-                    if order < max(subnetworks_only_ordered_jit.keys()):
-                        for us_subn_tw in offnetwork_upstreams:
+                    for us_subn_tw in offnetwork_upstreams:
+                        if us_subn_tw in flowveldepth_interorder:
                             subn_tw_sortposition = param_df_sub_super.index.get_loc(
                                 us_subn_tw
                             )
