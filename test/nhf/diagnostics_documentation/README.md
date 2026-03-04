@@ -44,7 +44,7 @@ Re-route upstream inflows and lateral inflows through the reach to record:
 
 ### Metric
 
-$$
+```math
 \Delta V =
 \frac{
 \sum_{t=0}^{n} \left(Q_{us}(t) + Q_{lat}(t)\right)
@@ -53,7 +53,7 @@ $$
 }{
 \sum_{t=0}^{n} Q_{ds}(t)
 }
-$$
+```
 
 ### Test
 
@@ -75,7 +75,7 @@ $$
 
 ### Metric
 
-$$
+```math
 \Delta V =
 \frac{
 \sum_{t=0}^{n} \sum_{i=1}^{N} Q_{lat,i}(t)
@@ -84,7 +84,7 @@ $$
 }{
 \sum_{t=0}^{n} Q_{ds}(t)
 }
-$$
+```
 
 ### Test
 
@@ -102,9 +102,9 @@ $$
 
 ### Metric
 
-$$
+```math
 Q_{out}
-$$
+```
 
 ### Test
 
@@ -116,7 +116,7 @@ $$
 
 ### Metric
 
-$$
+```math
 \text{Attenuation} =
 1 -
 \frac{
@@ -124,7 +124,7 @@ $$
 }{
 \max(Q_{us} + Q_{lat})
 }
-$$
+```
 
 ### Test
 
@@ -161,17 +161,17 @@ $$
 
 ### Metric
 
-$$
+```math
 t_c = \frac{\sum_{t=0}^{n} t \, Q(t)}{\sum_{t=0}^{n} Q(t)}
-$$
-$$
+```
+```math
 \Delta t_c = t_{c,ds} - t_{c,us}
-$$
-$$
+```
+```math
 \text{hydrograph\_translation\_rate}
 =
 \frac{\Delta x}{\Delta t_c}
-$$
+```
 
 ### Visualization
 
@@ -185,64 +185,64 @@ $$
 
 ### Metric
 
-$$
+```math
 q_{\text{ref}} = \frac{\max(Q_{in}) + \min(Q_{in})}{2}
-$$
+```
 
 Let $t^*$ be the index minimizing $|Q_{in}(t) - q_{\text{ref}}|$.
 
 Get reference hydraulic geometry and parameters.
 
-$$
+```math
 q_{\text{ref}}^{*} = Q_{out}(t^*)
-$$
+```
 
-$$
+```math
 c_{\text{ref}} = c(t^*)
-$$
+```
 
-$$
+```math
 T_{w,\text{ref}} = T_w(t^*)
-$$
+```
 
 Calculate ponce optimal dx
 
 
-$$
+```math
 \Delta x_{courant} = \Delta t \, c_{\text{ref}}
-$$
+```
 
-$$
+```math
 \Delta x_{characteristic} =
 \frac{q_{\text{ref}}^{*} / T_{w,\text{ref}}}
 {S_0 \, c_{\text{ref}}}
-$$
+```
 
-$$
+```math
 \Delta x_{\max} = \frac{1}{2} \left( \Delta x_{courant} + \Delta x_{characteristic} \right)
-$$
+```
 
 Let
 
-$$
+```math
 c_{\max} = \max(c)
-$$
+```
 
-$$
+```math
 \Delta x_{\min} = c_{\max} \, \Delta t
-$$
+```
 
 The ideal reach length is
 
-$$
+```math
 \Delta x_{\text{ideal}} = \max(\Delta x_{\min}, \Delta x_{\max})
-$$
+```
 
 Finally,
 
-$$
+```math
 \text{dx\_ratio} = \frac{\Delta x}{\Delta x_{\text{ideal}}}
-$$
+```
 
 ### Visualization
 
