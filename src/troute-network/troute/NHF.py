@@ -432,7 +432,11 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             for ts in range(nts):
                 qlat_idx = min(ts // qts_subdivisions, n_qlat_steps - 1)
                 q = float(row.iloc[qlat_idx])
-                results.extend([q, 0.0, 0.0])  # flow, velocity=0, depth=0
+                # Velocity and depth are set to 0 because the MC kernel
+                # only sums flow (index 0) from upstream segments when
+                # computing q_up; velocity and depth are never propagated
+                # across segment boundaries.
+                results.extend([q, 0.0, 0.0])
             fvd_interorder[virtual_seg_id] = {"results": results}
 
         return fvd_interorder
