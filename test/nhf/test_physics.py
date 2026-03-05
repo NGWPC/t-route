@@ -1,32 +1,26 @@
-import importlib
 import random
-import subprocess
-import sys
 from collections import defaultdict
 from datetime import datetime
 from functools import cached_property
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-import pytest
 import xarray as xr
 import yaml
 from matplotlib import pyplot as plt
-
-FORTRAN_SRC = (Path(__file__).resolve().parents[1] / "src/kernel/muskingum/MCsingleSegStime_f2py_NOLOOP.f90")
-FORTRAN_MODULE_NAME = "mc_fortran_port"
+from troute.routing.fast_reach.reach import compute_reach_kernel
 
 SAMPLE_RANDOM_SEED = 11
 random.seed(SAMPLE_RANDOM_SEED)
 CONFIG_FILES = [
-    # "conecuh_case/test_case.yaml",
-    "conus_working/test_case.yaml",
+    "conecuh_case/test_case.yaml",
+    # "conus_working/test_case.yaml",
     ]
 
-### DEFINE FIXTURES ###
+### DATA ACCESS ###
 
 class RunContext:
     """Relevant data for tests of a t-route run.
@@ -38,11 +32,19 @@ class RunContext:
     def __init__(self, config_key: str):
         self.cdir = Path(__file__).parent
         self.idx = config_key.split("/")[0]
+        self.idx2 = config_key.split("/")[1].split(".")[0]
         self.config_path = self.cdir / config_key
 
         # Load yaml
         with open(self.config_path) as f:
             self.config = yaml.safe_load(f)
+
+    @property
+    def result_output_dir(self) -> Path:
+        """Directory where test results will be saved."""
+        p = self.config_path.parent / self.idx2
+        p.mkdir(parents=True, exist_ok=True)
+        return p
 
     @cached_property
     def max_stream_order(self) -> int:
@@ -157,34 +159,6 @@ class RunContext:
         """Make a mapping from flowpath ID to stream order."""
         return dict(zip(self.flowpaths_gdf["fp_id"].to_numpy(), self.flowpaths_gdf["stream_order"].to_numpy()))
 
-@pytest.fixture
-def run_context(request) -> RunContext:
-    """Return a RunContext for a given run directory."""
-    return RunContext(config_key=request.param)
-
-@pytest.fixture(scope="session", autouse=True)
-def build_fortran_extensions():
-    """Ensure MC kernel is compiled."""
-    ensure_f2py_module()
-
-
-### BUILD TESTING ANALYSIS ###
-# This stretches the definition of a fixture.  We're going to use it to build a big test dataset that can be used for both diagnostics and PyTest assertions.
-
-@pytest.fixture
-def sampled_run_dataset(run_context: RunContext) -> pd.DataFrame:
-    """Build dataset of run diagnostics at the reach and network level."""
-    # Sample from reaches
-    reaches = sample_reaches(run_context)
-
-    for k, v in reaches.items():
-        diagnostics = generate_reach_diagnostics(run_context, k, v, plot=True)
-        reaches[k].update(diagnostics)
-
-    df = pd.DataFrame.from_dict(reaches, orient="index")
-    df.to_parquet(f"{run_context.idx}.parquet")
-    return df
-
 
 ### HELPER FUNCTIONS ###
 
@@ -260,8 +234,6 @@ def attribute_reaches(run_context: RunContext, reach_list: set[int]) -> dict[int
     return reach_attributes
 
 def reroute(qlat: np.ndarray, qus: np.ndarray, dx: float, Bw: float, Tw: float, TwCC: float, n: float, nCC: float, Cs: float, So: float, dt: float, qts_subdivisions: int):
-    import mc_fortran_port_2
-
     qus = np.repeat(qus, qts_subdivisions)
     qlat = np.repeat(qlat, qts_subdivisions)
     qdp = qus[0]
@@ -272,40 +244,37 @@ def reroute(qlat: np.ndarray, qus: np.ndarray, dx: float, Bw: float, Tw: float, 
     courants = []
     celerities = []
     xs = []
-    tws = []
     for i in range(len(qus)):
         quc = qus[i]
         qup = qus[i]
         ql = qlat[i]
-        out = mc_fortran_port_2.muskingcunge_module.muskingcungenwm(
-            dt,
-            qup,
-            quc,
-            qdp,
-            ql,
-            dx,
-            Bw,
-            Tw,
-            TwCC,
-            n,
-            nCC,
-            Cs,
-            So,
-            velp,  # velp
-            depthp,  # depthp
-        )
-        depthp = out[2]
-        qdp = out[0]
-        velp = out[1]
-        geom = hydraulic_geometry(depthp, Bw, Tw, TwCC, Cs)
+        out = compute_reach_kernel(
+            dt=dt,
+            qup=qup,
+            quc=quc,
+            qdp=qdp,
+            ql=ql,
+            dx=dx,
+            bw=Bw,
+            tw=Tw,
+            twcc=TwCC,
+            n=n,
+            ncc=nCC,
+            cs=Cs,
+            s0=So,
+            velp=velp,
+            depthp=depthp
+            )
+        depthp = out["depthc"]
+        qdp = out["qdc"]
+        velp = out["velc"]
         if (i % qts_subdivisions) == 0:
-            outflows.append(out[0])
-            depths.append(out[2])
-            courants.append(out[4])
-            celerities.append(out[3])
-            xs.append(out[5])
-            tws.append(geom["twl"])
-
+            outflows.append(out["qdc"])
+            depths.append(out["depthc"])
+            courants.append(out["cn"])
+            celerities.append(out["ck"])
+            xs.append(out["X"])
+    geom = hydraulic_geometry(np.array(depths), Bw, Tw, TwCC, Cs)
     courant_recalc = (np.array(celerities) * dt) / dx
     # x_recalc = 0.5 * (1 - ((np.array(qlat) + np.array(qus))[::int(qts_subdivisions)] / (np.array(tws) * np.array(celerities) * dx)))
     return {
@@ -314,17 +283,19 @@ def reroute(qlat: np.ndarray, qus: np.ndarray, dx: float, Bw: float, Tw: float, 
         "courant": np.array(courants),
         "celerity": np.array(celerities),
         "x": np.array(xs),
-        "twl": np.array(tws),
+        "twl": geom["twl"],
         "courant_recalc": courant_recalc,
         # "x_recalc": x_recalc
     }
 
-def hydraulic_geometry(depth: float, bw: float, tw: float, twcc: float, cs: float):
+def hydraulic_geometry(h: Union[float, np.ndarray], bw: float, tw: float, twcc: float, cs: float):
+    # Convert rise over run to run over rise
     if cs == 0:
         z = 1
     else:
         z = 1 / cs
 
+    # Calculate bankfull depth
     if bw > tw:
         bfd = bw / 0.00001
     elif bw == tw:
@@ -332,14 +303,25 @@ def hydraulic_geometry(depth: float, bw: float, tw: float, twcc: float, cs: floa
     else:
         bfd = (tw - bw) / (2.0 * z)
 
-    import mc_fortran_port_2
-    twl, R, AREA, AREAC, WP, WPC, h_gt_bf, h_lt_bf = mc_fortran_port_2.muskingcunge_module.hydraulic_geometry(
-        depth,
-        bfd,
-        bw,
-        twcc,
-        z,
-    )
+    # depth below and above bankfull
+    h_gt_bf = np.maximum(h - bfd, 0.0)
+    h_lt_bf = np.minimum(bfd, h)
+
+    # Exception for zero floodplain width
+    mask_zero_twcc = (h_gt_bf > 0) & (twcc <= 0)
+    h_gt_bf = np.where(mask_zero_twcc, 0.0, h_gt_bf)
+    h_lt_bf = np.where(mask_zero_twcc, h, h_lt_bf)
+
+    # Compute geometry
+    twl = bw + 2.0 * z * h
+    AREA = (bw + h_lt_bf * z) * h_lt_bf
+    WP = bw + 2.0 * h_lt_bf * np.sqrt(1.0 + z**2)
+
+    AREAC = twcc * h_gt_bf
+    WPC = np.where(h_gt_bf > 0, twcc + 2.0 * h_gt_bf, 0.0)
+
+    # Hydraulic radius
+    R = (AREA + AREAC) / (WP + WPC)
 
     return {
         "twl": twl,
@@ -348,30 +330,9 @@ def hydraulic_geometry(depth: float, bw: float, tw: float, twcc: float, cs: floa
         "AREAC": AREAC,
         "WP": WP,
         "WPC": WPC,
-        "h_gt_bf": h_gt_bf,
         "h_lt_bf": h_lt_bf,
+        "h_gt_bf": h_gt_bf
     }
-
-def ensure_f2py_module():
-    try:
-        importlib.import_module(FORTRAN_MODULE_NAME)
-        return
-    except ImportError:
-        pass
-
-    cmd = [sys.executable, "-m", "numpy.f2py", "-c", str(FORTRAN_SRC), "-m", FORTRAN_MODULE_NAME]
-
-    result = subprocess.run(cmd, capture_output=True, text=True)
-
-    if result.returncode != 0:
-        raise RuntimeError("Failed to build Fortran test dependency\n\n"
-            f"STDOUT:\n{result.stdout}\n\n"
-            f"STDERR:\n{result.stderr}"
-        )
-
-    # Make sure Python can now import it
-    importlib.invalidate_caches()
-    importlib.import_module(FORTRAN_MODULE_NAME)
 
 def generate_reach_diagnostics(run_context: RunContext, reach_id: int, reach_attributes: dict[str, float], max_walk: float = 50.0, plot: bool = True) -> dict[str, float]:
     """Test mass conservation for a given reach."""
@@ -434,7 +395,7 @@ def generate_reach_diagnostics(run_context: RunContext, reach_id: int, reach_att
     ideal_dx = max([dxmin, dxmax])
     results["dx_ratio"] = reach_attributes["dx"] / ideal_dx
 
-    if plot and results["acceleration"]:
+    if plot:
         plot_hydrograps(qin_hydrograph, qout_hydrograph, rerouted_results["qout"], reach_id, run_context)
     return results
 
@@ -449,9 +410,9 @@ def plot_hydrograps(qin: np.ndarray, qout: np.ndarray, qreroute: np.ndarray, rea
     ax.set_title(f"Reach {reach_id}")
     ax.legend()
     fig.tight_layout()
-    out_dir = Path(__file__).parent / "test_results"
-    out_dir.mkdir(exist_ok=True)
-    fig.savefig(out_dir / f"{run_context.idx}_hydrograph_reach_{reach_id}.png")
+    plot_dir = run_context.result_output_dir / "hydrograph_plots"
+    plot_dir.mkdir(exist_ok=True)
+    fig.savefig(plot_dir / f"{reach_id}.png")
     plt.close(fig)
 
 def virtual_flowpath_mass_conservation_network(reach: int, run_context: RunContext, cur_dist: float = 0, max_walk: float = 10):
@@ -471,8 +432,6 @@ def virtual_flowpath_mass_conservation_network(reach: int, run_context: RunConte
         out_calc += sum([q[0] for q in us_q])
         return out_calc, max([q[1] for q in us_q])
 
-
-
 def get_inflows(run_context: RunContext, reach_id: int) -> np.ndarray:
     """Get inflows to a reach by summing forcing and upstream flow."""
     local_qin = run_context.forcing_data[run_context.vfp_fp_mapping[reach_id]].values  * run_context.da_pct_mapping[reach_id]
@@ -483,9 +442,27 @@ def get_inflows(run_context: RunContext, reach_id: int) -> np.ndarray:
         us_q = run_context.routed_results["flow"].sel(feature_id=us).sum(dim="feature_id").values
         return local_qin, us_q
 
-### TESTS ###
+### MAIN FUNCTIONS ###
 
-@pytest.mark.parametrize("run_context", CONFIG_FILES, indirect=True)
-def test_test(sampled_run_dataset: pd.DataFrame):
-    """Test that testing framework is working."""
-    pass
+
+def generate_sampled_run_dataset(run_context: RunContext, generate_plots: bool = False) -> pd.DataFrame:
+    """Build dataset of run diagnostics at the reach and network level."""
+    # Sample from reaches
+    reaches = sample_reaches(run_context)
+
+    for k, v in reaches.items():
+        diagnostics = generate_reach_diagnostics(run_context, k, v, plot=generate_plots)
+        reaches[k].update(diagnostics)
+
+    df = pd.DataFrame.from_dict(reaches, orient="index")
+    df.to_parquet(run_context.result_output_dir / f"{run_context.idx}.parquet")
+    return df
+
+def main():
+    """Run diagnostics for sampled reaches across all test cases."""
+    for config_key in CONFIG_FILES:
+        run_context = RunContext(config_key)
+        generate_sampled_run_dataset(run_context, generate_plots=True)
+
+if __name__ == "__main__":
+    main()
