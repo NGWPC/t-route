@@ -10,13 +10,13 @@ import yaml
 from dataretrieval import nwis
 
 ### NEED TO INSTALL
-# pip install xarray[zarr] zarr fsspec s3fs
+# pip install xarray[zarr] zarr fsspec s3fs dataretrieval
 
 RETRO_PATH = "s3://noaa-nwm-retrospective-3-0-pds/CONUS/zarr/chrtout.zarr"
 RETROSPECTIVE_LATERAL_FIELD = "q_lateral"
 RETROSPECTIVE_FLOW_FIELD = "streamflow"
 
-def create_forcing_dataset(t_start: str, t_end: str, out_dir: str, hydrofabric_path: str, retrospective_path: str, forcing_file_pattern: str = "CHRTOUT_DOMAIN1", generate_reference_data: bool = False, reference_dir: Union[str, None] = None):
+def create_forcing_dataset(t_start: str, t_end: str, out_dir: str, hydrofabric_path: str, retrospective_path: str, forcing_file_pattern: str = "CHRTOUT_DOMAIN1", generate_reference_data: bool = False, reference_dir: Union[str, None] = None, runout_time: int = 0):
     """Create a dataset of channel forcing files from retrospective data."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -43,6 +43,14 @@ def create_forcing_dataset(t_start: str, t_end: str, out_dir: str, hydrofabric_p
         df = qlat.to_dataframe()
         df = pd.merge(df, crosswalk[["ref_fp_id", "fp_id"]], left_index=True, right_on="ref_fp_id", how="left").rename(columns={"fp_id": "feature_id", RETROSPECTIVE_LATERAL_FIELD: t_str})[["feature_id", t_str]]
         df = df.groupby("feature_id").sum().reset_index()
+        df.to_csv(out_dir / f"{t_str}.{forcing_file_pattern}.csv", index=False)
+    for i in range(1, runout_time + 1):
+        print(f"Processing runout time step {i}...")
+        t_str = (iterator[-1] + pd.Timedelta(hours=i)).strftime("%Y%m%d%H%M")
+        df = pd.DataFrame({
+            "feature_id": feature_ids_retro,
+            t_str: [0.0] * len(feature_ids_retro),
+        })
         df.to_csv(out_dir / f"{t_str}.{forcing_file_pattern}.csv", index=False)
 
     # Generate reference outputs if requested
@@ -132,7 +140,7 @@ def make_config_yaml(config_path: str, hydrofabric_path: str, qlat_input_folder:
     with open(config_path, 'w') as f:
         yaml.dump(config_dict, f)
 
-def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: str, hf_file: str, generate_reference_data: bool = False):
+def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: str, hf_file: str, generate_reference_data: bool = False, add_runout_period: bool = False):
     """Build the forcing dataset and config YAML for a given case and run."""
     start_dt = pd.to_datetime(start_time)
     end_dt = pd.to_datetime(end_time)
@@ -146,6 +154,8 @@ def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: 
         reference_dir.mkdir(parents=True, exist_ok=True)
     else:
         reference_dir = None
+    if add_runout_period:
+        runout_time = int(((end_dt - start_dt) / 2).total_seconds() / 3600)
 
     create_forcing_dataset(
         t_start=start_dt,
@@ -155,6 +165,7 @@ def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: 
         retrospective_path=RETRO_PATH,
         generate_reference_data=generate_reference_data,
         reference_dir=reference_dir,
+        runout_time=runout_time,
     )
 
     nts = int((end_dt - start_dt).total_seconds() / 300) + 1  # Assuming dt=300s
@@ -223,6 +234,12 @@ def main():
         help="Generate reference data (USGS and retrospective outputs) for testing.",
     )
 
+    parser.add_argument(
+        "--add-runout-period",
+        default=True,
+        help="Generate reference data (USGS and retrospective outputs) for testing.",
+    )
+
     args = parser.parse_args()
 
     build_forcing_dataset(
@@ -232,6 +249,7 @@ def main():
         run_id=args.run_id,
         hf_file=args.hf_file,
         generate_reference_data=args.generate_reference_data,
+        add_runout_period=args.add_runout_period,
     )
 
 
