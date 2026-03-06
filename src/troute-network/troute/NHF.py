@@ -211,20 +211,15 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         """Override to add zero-valued q0 rows for virtual segments.
 
         Virtual segments are offnetwork_upstreams whose flow comes from
-        flowveldepth_interorder, so they have no entries in run_results.
-        Without this, q0 lookups in compute.py fail on the next loop.
+        flowveldepth_interorder, so they never appear in run_results.
         """
         super().new_q0(run_results)
         if self._nexus_virtual_seg_ids:
-            missing = [
-                vid for vid in self._nexus_virtual_seg_ids.values()
-                if vid not in self._q0.index
-            ]
-            if missing:
-                vseg_q0 = pd.DataFrame(
-                    0.0, index=missing, columns=self._q0.columns, dtype="float32",
-                )
-                self._q0 = pd.concat([self._q0, vseg_q0])
+            vseg_ids = list(self._nexus_virtual_seg_ids.values())
+            vseg_q0 = pd.DataFrame(
+                0.0, index=vseg_ids, columns=self._q0.columns, dtype="float32",
+            )
+            self._q0 = pd.concat([self._q0, vseg_q0])
         return self._q0
 
     def preprocess_network(
