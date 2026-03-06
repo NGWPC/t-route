@@ -1,3 +1,4 @@
+import argparse
 import random
 from collections import defaultdict
 from datetime import datetime
@@ -8,6 +9,7 @@ from typing import Any, Union
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import xarray as xr
 import yaml
 from matplotlib import pyplot as plt
@@ -15,10 +17,6 @@ from troute.routing.fast_reach.reach import compute_reach_kernel
 
 SAMPLE_RANDOM_SEED = 11
 random.seed(SAMPLE_RANDOM_SEED)
-CONFIG_FILES = [
-    "conecuh_case/test_case.yaml",
-    # "conus_working/test_case.yaml",
-    ]
 
 ### DATA ACCESS ###
 
@@ -29,11 +27,9 @@ class RunContext:
     to compute reach-scale and network-integrated routing performance diagnostics.
     """
 
-    def __init__(self, config_key: str):
-        self.cdir = Path(__file__).parent
-        self.idx = config_key.split("/")[0]
-        self.idx2 = config_key.split("/")[1].split(".")[0]
-        self.config_path = self.cdir / config_key
+    def __init__(self, config_path: str):
+        self.config_path = Path(config_path)
+        self.run_id = self.config_path.stem
 
         # Load yaml
         with open(self.config_path) as f:
@@ -42,8 +38,31 @@ class RunContext:
     @property
     def result_output_dir(self) -> Path:
         """Directory where test results will be saved."""
-        p = self.config_path.parent / self.idx2
+        p = self.config_root / self.run_id
         p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @property
+    def config_root(self) -> Path:
+        """Root directory for config file."""
+        return self.config_path.parent
+
+    @property
+    def reference_data_path(self) -> Path:
+        """Directory where reference data is stored, if it exists."""
+        return self.config_root / self.run_id / "gage_reference_data.nc"
+
+    @property
+    def diagnostic_plot_dir(self) -> Path:
+        """Directory where diagnostic plots are written."""
+        p = self.config_root / self.run_id / "diagnostic_plots"
+        p.mkdir(exist_ok=True)
+        return p
+
+    @property
+    def diagnostic_test_path(self) -> Path:
+        """Directory where diagnostic plots are written."""
+        p = self.config_root / self.run_id / "diagnostic_tests"
         return p
 
     @cached_property
@@ -75,7 +94,7 @@ class RunContext:
     @cached_property
     def routed_results(self) -> xr.Dataset:
         """Load results from t-route run."""
-        output_path = self.config_path.parent / self.config["output_parameters"]["stream_output"]["stream_output_directory"]
+        output_path = self.config_root / self.config["output_parameters"]["stream_output"]["stream_output_directory"]
         paths = sorted(output_path.glob("*.nc"))
         flows = [xr.open_dataset(p, engine="netcdf4") for p in paths]
         return xr.concat(flows, dim="time")
@@ -83,7 +102,7 @@ class RunContext:
     @cached_property
     def forcing_data(self) -> pd.DataFrame:
         """Load channel forcing data that was used to run t-route."""
-        forcing_dir = self.config_path.parent / self.config["compute_parameters"]["forcing_parameters"]["qlat_input_folder"]
+        forcing_dir = self.config_root / self.config["compute_parameters"]["forcing_parameters"]["qlat_input_folder"]
         forcing_files = sorted(forcing_dir.glob("*.csv"))
         t0 = datetime.strptime(forcing_files[0].stem.split(".")[0], "%Y%m%d%H%M")
         tmax = t0 + pd.to_timedelta(self.nts * self.dt, unit="s")
@@ -100,7 +119,7 @@ class RunContext:
     @cached_property
     def hydrofabric_path(self) -> Path:
         """Path to hydrofabric gpkg."""
-        return self.config_path.parent / self.config["network_topology_parameters"]["supernetwork_parameters"]["geo_file_path"]
+        return self.config_root / self.config["network_topology_parameters"]["supernetwork_parameters"]["geo_file_path"]
 
     @cached_property
     def virtual_flowpaths_gdf(self) -> gpd.GeoDataFrame:
@@ -349,10 +368,10 @@ def generate_reach_diagnostics(run_context: RunContext, reach_id: int, reach_att
     rerouted_results = reroute(qlat, qus, reach_attributes["dx"], reach_attributes["Bw"], reach_attributes["Tw"], reach_attributes["TwCC"], reach_attributes["n"], reach_attributes["nCC"], reach_attributes["Cs"], reach_attributes["So"], dt=run_context.dt, qts_subdivisions=run_context.qts_subdivisions)
 
     # Check mass conservation at-reach
-    results["local_mass_conservation_error"] = abs(local_qin - outflow) / outflow if outflow > 0 else np.nan
+    results["local_mass_conservation_error"] = 100 * abs(local_qin - outflow) / outflow if outflow > 0 else np.nan
 
     # Check mass conservation across network
-    results["network_mass_conservation_error"] = abs(network_qin - outflow) / outflow if outflow > 0 else np.nan
+    results["network_mass_conservation_error"] = 100 * abs(network_qin - outflow) / outflow if outflow > 0 else np.nan
     results["network_mass_conservation_walk_dist"] = max_walk_actual
 
     # Calculate hydrograph lag
@@ -364,6 +383,7 @@ def generate_reach_diagnostics(run_context: RunContext, reach_id: int, reach_att
     inflow_centroid = np.sum(qin_hydrograph * dt_seconds) / qin_sum if qin_sum > 0 else 0
     outflow_centroid = np.sum(qout_hydrograph * dt_seconds) / qout_sum if qout_sum > 0 else 0
     results["hydrograph_lag"] = (outflow_centroid - inflow_centroid)
+    results["normalized_lag"] = results["hydrograph_lag"] / (reach_attributes["dx"] * 1000)
 
     # Check courant conditions
     for i in ["courant", "celerity", "x", "courant_recalc"]:
@@ -373,7 +393,7 @@ def generate_reach_diagnostics(run_context: RunContext, reach_id: int, reach_att
         results[f"median_{i}"] = np.median(rerouted_results[i])
         results[f"std_{i}"] = np.std(rerouted_results[i])
     results["negative_qout"] = np.min(rerouted_results["qout"]) < 0
-    results["pct_attenuation"] = 1 - (np.max(qout_hydrograph) / np.max(qin_hydrograph)) if np.max(qin_hydrograph) > 0 else np.nan
+    results["pct_attenuation"] = 100 * (1 - (np.max(qout_hydrograph) / np.max(qin_hydrograph))) if np.max(qin_hydrograph) > 0 else np.nan
     results["acceleration"] = np.max(qout_hydrograph) > np.max(qin_hydrograph)
     results["reroute_mass_error"] = abs(np.sum(rerouted_results["qout"]) - outflow) / outflow if outflow > 0 else np.nan
     reroute_sum = np.sum(rerouted_results["qout"])
@@ -399,21 +419,7 @@ def generate_reach_diagnostics(run_context: RunContext, reach_id: int, reach_att
         plot_hydrograps(qin_hydrograph, qout_hydrograph, rerouted_results["qout"], reach_id, run_context)
     return results
 
-def plot_hydrograps(qin: np.ndarray, qout: np.ndarray, qreroute: np.ndarray, reach_id: int, run_context: RunContext):
-    fig, ax = plt.subplots()
-    timesteps = run_context.routed_results["time"].values
-    ax.plot(timesteps, qin, label="qin", color="blue")
-    ax.plot(timesteps, qout, label="qout", color="orange")
-    ax.plot(timesteps, qreroute, label="reroute", color="green", linestyle="--")
-    ax.set_xlabel("Time")
-    ax.set_ylabel("Discharge (m3/s)")
-    ax.set_title(f"Reach {reach_id}")
-    ax.legend()
-    fig.tight_layout()
-    plot_dir = run_context.result_output_dir / "hydrograph_plots"
-    plot_dir.mkdir(exist_ok=True)
-    fig.savefig(plot_dir / f"{reach_id}.png")
-    plt.close(fig)
+
 
 def virtual_flowpath_mass_conservation_network(reach: int, run_context: RunContext, cur_dist: float = 0, max_walk: float = 10):
     cur_dist += run_context.vfp_length_mapping[reach]
@@ -442,6 +448,163 @@ def get_inflows(run_context: RunContext, reach_id: int) -> np.ndarray:
         us_q = run_context.routed_results["flow"].sel(feature_id=us).sum(dim="feature_id").values
         return local_qin, us_q
 
+
+### PLOTS ###
+
+def plot_hydrograps(qin: np.ndarray, qout: np.ndarray, qreroute: np.ndarray, reach_id: int, run_context: RunContext):
+    fig, ax = plt.subplots()
+    timesteps = run_context.routed_results["time"].values
+    ax.plot(timesteps, qin, label="qin", color="blue")
+    ax.plot(timesteps, qout, label="qout", color="orange")
+    ax.plot(timesteps, qreroute, label="reroute", color="green", linestyle="--")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Discharge (m3/s)")
+    ax.set_title(f"Reach {reach_id}")
+    ax.legend()
+    fig.tight_layout()
+    plot_dir = run_context.result_output_dir / "hydrograph_plots"
+    plot_dir.mkdir(exist_ok=True)
+    fig.savefig(plot_dir / f"{reach_id}.png")
+    plt.close(fig)
+
+def generate_reference_gage_plots(run_context: RunContext) -> None:
+    """Generate plots comparing t-route to retrospective and USGS observed datasets."""
+    # Check if reference data exists. If not, skip.
+    if not run_context.reference_data_path.exists():
+        return
+
+    ref_out_dir = run_context.result_output_dir / "reference_gages"
+    ref_out_dir.mkdir(exist_ok=True)
+
+    ds = xr.open_dataset(run_context.reference_data_path)
+    for site_no in ds["gage"].values:
+        sub_ds = ds.sel(gage=site_no)
+        site_no = sub_ds["site_no"].item()
+        fp_id = sub_ds["fp_id"].item()
+        last_t = sub_ds["time"].values[-1]
+
+        # Load t-route data
+        vfp_id = run_context.reference_flowpaths_gdf.loc[run_context.reference_flowpaths_gdf["fp_id"] == fp_id, "virtual_fp_id"].values.min()
+        trdf = run_context.routed_results.sel(feature_id=vfp_id).to_dataframe().reset_index()
+        trdf = trdf[trdf["time"] <= last_t]  # Remove runout period
+
+        # Plot
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(sub_ds["time"].values, sub_ds['usgs_q'], label=f'USGS Site No {site_no}', c="k")
+        ax.plot(sub_ds["time"].values, sub_ds['retrospective_q'] * 35.31, label='NWM Retrospective Streamflow', color='k', ls="--")  # convert from m3/s to cfs
+        ax.plot(trdf.time, trdf['flow'] * 35.31, label='NHF T-route Streamflow', color='k', marker="o", markevery=10, markerfacecolor="w")  # convert from m3/s to cfs
+        ax.set_xlabel('Time')
+        ax.set_ylabel('Discharge (cfs)')
+        ax.legend()
+        ax.set_facecolor("whitesmoke")
+        fig.tight_layout()
+        fig.savefig(ref_out_dir / f"{fp_id}.png")
+
+def plot_reach_mass_conservation(df: pd.DataFrame, out_path: Path) -> None:
+    """Plot mass conservation across a reach."""
+    fig, ax = plt.subplots()
+    rng = (df["local_mass_conservation_error"].min(), df["local_mass_conservation_error"].max())
+    rng = (df["local_mass_conservation_error"].min(), 100)
+    sns.kdeplot(df, x="local_mass_conservation_error", hue="stream_order", palette="viridis", clip=rng, ax=ax)
+    ax.axvline(0, ls="dashed", c="k", alpha=0.3)
+    ax.set_xlabel("Volume Difference Across Reach (as % of outflow volume)")
+    ax.grid()
+    ax.set_axisbelow(True)
+    ax.set_facecolor("whitesmoke")
+    fig.tight_layout()
+    fig.savefig(out_path / "local_mass_conservation_error.png", dpi=300)
+
+def plot_reach_mass_conservation_vs_dx(df: pd.DataFrame, out_path: Path) -> None:
+    """Plot mass conservation across a reach versus reach length."""
+    fig, ax = plt.subplots()
+    sns.scatterplot(df, x="dx", y="local_mass_conservation_error")
+    ax.set_ylabel("Volume Difference Across Reach (as % of outflow volume)")
+    ax.set_xlabel("Reach Length (m)")
+    ax.grid()
+    ax.set_axisbelow(True)
+    ax.set_facecolor("whitesmoke")
+    fig.tight_layout()
+    fig.savefig(out_path / "local_mass_conservation_error_vs_dx.png", dpi=300)
+
+def plot_network_mass_conservation(df: pd.DataFrame, out_path: Path) -> None:
+    """Plot mass conservation across a network walk."""
+    fig, ax = plt.subplots()
+    ax.set_ylabel("Volume Difference Across Reaches (as % of outflow volume)")
+    ax.set_xlabel("Maximum Distance Walked Upstream (km)")
+    ax.grid()
+    ax.set_axisbelow(True)
+    ax.set_facecolor("whitesmoke")
+    sns.scatterplot(df, x="network_mass_conservation_walk_dist", y="network_mass_conservation_error", hue="stream_order", palette="viridis")
+    fig.tight_layout()
+    fig.savefig(out_path / "network_mass_conservation_error_vs_walk_dist.png", dpi=300)
+
+def plot_attenuation(df: pd.DataFrame, out_path: Path) -> None:
+    """Plot distribution of attenuation values across a reach."""
+    fig, ax = plt.subplots()
+    min_val = np.floor(df["pct_attenuation"].min() * 2) / 2
+    max_val = np.ceil(df["pct_attenuation"].max() * 2) / 2
+    bins = np.arange(min_val, max_val + 0.5, 0.5)
+    sns.histplot(df, x="pct_attenuation", ax=ax, bins=bins)
+    ax.axvline(0, ls="dashed", c="k", alpha=0.3)
+    ax.set_xlabel("Attenuation (as % of peak inflow)")
+    ax.grid()
+    ax.set_axisbelow(True)
+    ax.set_facecolor("whitesmoke")
+    fig.tight_layout()
+    fig.savefig(out_path / "attenuation_histogram.png", dpi=300)
+
+
+def plot_courant(df: pd.DataFrame, out_path: Path) -> None:
+    """Plot distribution of Courant number for each reach."""
+    fig, axs = plt.subplots(nrows=2, figsize=(6, 10))
+    sns.kdeplot(df, x="max_courant", hue="stream_order", palette="viridis", fill=True, ax=axs[0], clip=(0, 10))
+    axs[0].set_xlabel("Maximum Courant Number")
+    sns.kdeplot(df, x="min_courant", hue="stream_order", palette="viridis", fill=True, ax=axs[1], clip=(0, 10))
+    axs[1].set_xlabel("Minimum Courant Number")
+    for ax in axs:
+        ax.grid()
+        ax.set_axisbelow(True)
+        ax.set_facecolor("whitesmoke")
+        ax.set_xlim(0, 1)
+    fig.tight_layout()
+    fig.savefig(out_path / "courant_number_distributions.png", dpi=300)
+
+def plot_celerity_vs_lag(df: pd.DataFrame, out_path: Path) -> None:
+    """Plot mean celerity vs hydrograph lag rate."""
+    fig, ax = plt.subplots()
+    df["inv_normalized_lag"] = 1 / df["normalized_lag"]
+    sns.scatterplot(df, x="mean_celerity", y="inv_normalized_lag", hue="stream_order", palette="viridis")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_ylabel("Hydrograph Translation Rate (m/s)")
+    ax.set_xlabel("Mean Celerity Over Hydrograph (m/s)")
+    ax.grid()
+    ax.set_axisbelow(True)
+    ax.set_facecolor("whitesmoke")
+    fig.tight_layout()
+
+    fig.savefig(out_path / "hydrograph_lag_and_celerity.png", dpi=300)
+
+
+def plot_optimal_reach_length(df: pd.DataFrame, out_path: Path) -> None:
+    """Plot distribution of reach lengths relative to Ponce optimal."""
+    fig, ax = plt.subplots()
+    df["dx_ratio_clip"]=df["dx_ratio"].clip(0, 75)
+    sns.histplot(df, x="dx_ratio_clip", ax=ax, bins=25, stat="percent")
+    ax2 = ax.twinx()
+    ax2.plot(np.sort(df["dx_ratio_clip"]), np.linspace(0, 100, len(df)), color="k")
+    ax.axvline(1, ls="dashed", c="k", alpha=0.3)
+    ax.set_xlabel("Ratio of Reach Length to Ideal DX")
+    ax.set_ylabel("Percentage of Reaches")
+    ax2.set_ylabel("Cumulative Percentage")
+    ax.grid()
+    ax.set_axisbelow(True)
+    ax.set_facecolor("whitesmoke")
+    fig.tight_layout()
+
+
+    fig.savefig(out_path / "dx_ratio_distribution.png", dpi=300)
+
 ### MAIN FUNCTIONS ###
 
 
@@ -455,14 +618,47 @@ def generate_sampled_run_dataset(run_context: RunContext, generate_plots: bool =
         reaches[k].update(diagnostics)
 
     df = pd.DataFrame.from_dict(reaches, orient="index")
-    df.to_parquet(run_context.result_output_dir / f"{run_context.idx}.parquet")
+    df.to_parquet(run_context.result_output_dir / f"{run_context.run_id}.parquet")
     return df
+
+def export_test_summary(diag_df: pd.DataFrame, out_path: Path) -> None:
+    """Check if diagnostic df is within tolerance thresholds."""
+    pass
+
+def create_diagnostics(diag_df: pd.DataFrame, run_context: RunContext):
+    """Generate summary file for sampled run dataset on a t-route run."""
+    plot_reach_mass_conservation(diag_df, run_context.diagnostic_plot_dir)
+    plot_reach_mass_conservation_vs_dx(diag_df, run_context.diagnostic_plot_dir)
+    plot_network_mass_conservation(diag_df, run_context.diagnostic_plot_dir)
+    plot_attenuation(diag_df, run_context.diagnostic_plot_dir)
+    plot_courant(diag_df, run_context.diagnostic_plot_dir)
+    plot_celerity_vs_lag(diag_df, run_context.diagnostic_plot_dir)
+    plot_optimal_reach_length(diag_df, run_context.diagnostic_plot_dir)
+
+    export_test_summary(diag_df, run_context.diagnostic_test_path)
+
+def process_run(config_key: str):
+    """Export diagnostics for a t-route run."""
+    run_context = RunContext(config_key)
+    generate_reference_gage_plots(run_context)
+    diag_df = generate_sampled_run_dataset(run_context, generate_plots=False)
+    create_diagnostics(diag_df, run_context)
 
 def main():
     """Run diagnostics for sampled reaches across all test cases."""
-    for config_key in CONFIG_FILES:
-        run_context = RunContext(config_key)
-        generate_sampled_run_dataset(run_context, generate_plots=True)
+    parser = argparse.ArgumentParser(
+        description="Generate forcing dataset and config YAML for a case."
+    )
+
+    parser.add_argument(
+        "-f",
+        "--file",
+        help="Path to t-route config yaml.",
+    )
+
+    args = parser.parse_args()
+
+    process_run(args.file)
 
 if __name__ == "__main__":
     main()
