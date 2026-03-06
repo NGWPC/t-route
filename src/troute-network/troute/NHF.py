@@ -425,20 +425,25 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         if self._upstream_inflow_df is None or not self._nexus_virtual_seg_ids:
             return fvd_interorder
 
-        for target_link_id, virtual_seg_id in self._nexus_virtual_seg_ids.items():
-            row = self._upstream_inflow_df.loc[target_link_id]
-            n_qlat_steps = len(row)
-            results = []
-            for ts in range(nts):
-                qlat_idx = min(ts // qts_subdivisions, n_qlat_steps - 1)
-                q = float(row.iloc[qlat_idx])
-                # Velocity and depth are set to 0 because the MC kernel
-                # only sums flow (index 0) from upstream segments when
-                # computing q_up; velocity and depth are never propagated
-                # across segment boundaries.
-                results.extend([q, 0.0, 0.0])
-            fvd_interorder[virtual_seg_id] = {"results": results}
+        # Precompute qlat indices for all routing timesteps
+        qlat_idx = np.arange(nts) // qts_subdivisions
 
+        for target_link_id, virtual_seg_id in self._nexus_virtual_seg_ids.items():
+            row = self._upstream_inflow_df.loc[target_link_id].to_numpy(dtype=float)
+
+            # Clamp indices to last qlat step
+            idx = np.minimum(qlat_idx, len(row) - 1)
+
+            q_series = row[idx]
+
+            # Velocity and depth are set to 0 because the MC kernel
+            # only sums flow (index 0) from upstream segments when
+            # computing q_up; velocity and depth are never propagated
+            # across segment boundaries.
+            results = np.zeros(nts * 3, dtype=float)
+            results[0::3] = q_series
+
+            fvd_interorder[virtual_seg_id] = {"results": results.tolist()}
         return fvd_interorder
 
     def build_qlateral_array(
