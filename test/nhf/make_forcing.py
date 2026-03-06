@@ -10,17 +10,14 @@ import xarray as xr
 import yaml
 from dataretrieval import nwis
 
-### NEED TO INSTALL
-# pip install xarray[zarr] zarr fsspec s3fs dataretrieval
-
 RETRO_PATH = "s3://noaa-nwm-retrospective-3-0-pds/CONUS/zarr/chrtout.zarr"
 RETROSPECTIVE_LATERAL_FIELD = "q_lateral"
 RETROSPECTIVE_FLOW_FIELD = "streamflow"
 
-def create_forcing_dataset(t_start: str, t_end: str, out_dir: str, hydrofabric_path: str, retrospective_path: str, forcing_file_pattern: str = "CHRTOUT_DOMAIN1", generate_reference_data: bool = False, reference_dir: Union[str, None] = None, runout_time: int = 0):
+def create_forcing_dataset(t_start: str, t_end: str, forcing_dir: str, hydrofabric_path: str, retrospective_path: str, forcing_file_pattern: str = "CHRTOUT_DOMAIN1", generate_reference_data: bool = False, reference_dir: Union[str, None] = None, runout_time: int = 0):
     """Create a dataset of channel forcing files from retrospective data."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    forcing_dir = Path(forcing_dir)
+    forcing_dir.mkdir(parents=True, exist_ok=True)
 
     # Load the data
     crosswalk = gpd.read_file(hydrofabric_path, layer="reference_flowpaths")
@@ -44,7 +41,7 @@ def create_forcing_dataset(t_start: str, t_end: str, out_dir: str, hydrofabric_p
         df = qlat.to_dataframe()
         df = pd.merge(df, crosswalk[["ref_fp_id", "fp_id"]], left_index=True, right_on="ref_fp_id", how="left").rename(columns={"fp_id": "feature_id", RETROSPECTIVE_LATERAL_FIELD: t_str})[["feature_id", t_str]]
         df = df.groupby("feature_id").sum().reset_index()
-        df.to_csv(out_dir / f"{t_str}.{forcing_file_pattern}.csv", index=False)
+        df.to_csv(forcing_dir / f"{t_str}.{forcing_file_pattern}.csv", index=False)
     for i in range(1, runout_time + 1):
         print(f"Processing runout time step {i}...")
         t_str = (iterator[-1] + pd.Timedelta(hours=i)).strftime("%Y%m%d%H%M")
@@ -52,7 +49,7 @@ def create_forcing_dataset(t_start: str, t_end: str, out_dir: str, hydrofabric_p
             "feature_id": feature_ids_retro,
             t_str: [0.0] * len(feature_ids_retro),
         })
-        df.to_csv(out_dir / f"{t_str}.{forcing_file_pattern}.csv", index=False)
+        df.to_csv(forcing_dir / f"{t_str}.{forcing_file_pattern}.csv", index=False)
 
     # Generate reference outputs if requested
     if generate_reference_data and reference_dir is not None:
@@ -107,7 +104,7 @@ def create_forcing_dataset(t_start: str, t_end: str, out_dir: str, hydrofabric_p
 
 
 
-def make_config_yaml(config_path: str, hydrofabric_path: str, qlat_input_folder: str, nts: int, restart_time: str, file_pattern_filter: str = "*.CHRTOUT_DOMAIN1.csv", max_loop_size: int = 288):
+def make_config_yaml(config_path: str, hydrofabric_path: str, qlat_input_folder: str, nts: int, restart_time: str, output_dir: str, file_pattern_filter: str = "*.CHRTOUT_DOMAIN1.csv", max_loop_size: int = 288):
     """Create a config YAML for running the test case."""
     config_path = Path(config_path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -158,7 +155,7 @@ def make_config_yaml(config_path: str, hydrofabric_path: str, qlat_input_folder:
         },
         "output_parameters": {
             "stream_output": {
-                "stream_output_directory": "output/",
+                "stream_output_directory": output_dir,
                 "stream_output_time": -1,
                 "stream_output_type": ".nc",
                 "stream_output_internal_frequency": 60,
@@ -176,8 +173,9 @@ def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: 
     run_dir = Path(__file__).parent / case_id
     forcing_subdir = f"channel_forcing_{run_id}"
     config_path = run_dir / f"{run_id}.yaml"
-    out_path = run_dir / forcing_subdir
+    forcing_dir = run_dir / forcing_subdir
     hf_path = run_dir / "domain" / hf_file
+    output_dir = f"output_{run_id}/"
     if generate_reference_data:
         reference_dir = run_dir / run_id
         reference_dir.mkdir(parents=True, exist_ok=True)
@@ -189,7 +187,7 @@ def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: 
     create_forcing_dataset(
         t_start=start_dt,
         t_end=end_dt,
-        out_dir=out_path,
+        forcing_dir=forcing_dir,
         hydrofabric_path=hf_path,
         retrospective_path=RETRO_PATH,
         generate_reference_data=generate_reference_data,
@@ -199,8 +197,8 @@ def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: 
     dt = 300 # could be an input argument if we want to vary it across runs
     sim_time = (end_dt - start_dt).total_seconds()
     if add_runout_period:
-        sim_time += runout_time * 3600
-    nts = int(sim_time / dt) + 1
+        sim_time += (runout_time + 1) * 3600
+    nts = int(sim_time / dt)
 
     make_config_yaml(
         config_path=config_path,
@@ -208,6 +206,7 @@ def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: 
         qlat_input_folder=f"{forcing_subdir}/",
         nts=nts,
         restart_time=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        output_dir=output_dir
     )
 
 def conecuh_retro():
