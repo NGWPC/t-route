@@ -16,6 +16,11 @@ dependencies = {file = ["requirements.txt"]}
 test = [
     "pytest==8.3.2",
     "bmipy==2.0.0",
+    "xarray[zarr]~=2024.7.0",
+    "zarr~=2.18.2",
+    "fsspec~=2025.10.0",
+    "dataretrieval~=1.1.2",
+    "s3fs~=2025.10.0"
 ]
 
 jupyter = [
