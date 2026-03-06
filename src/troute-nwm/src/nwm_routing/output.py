@@ -134,7 +134,9 @@ def nwm_output_generator(
     link_lake_crosswalk = None,
     nexus_dict = None,
     poi_crosswalk = None,
-    logFileName='NONE' 
+    logFileName='NONE',
+    fp_outlet_crosswalk = None,
+    link_ids = None,
 ):
   
     dt = run.get("dt")
@@ -254,9 +256,19 @@ def nwm_output_generator(
         # replace waterbody lake_ids with outlet link ids
         if (link_lake_crosswalk):
             flowveldepth = _reindex_lake_to_link_id(flowveldepth, link_lake_crosswalk)
-            
+
+        # reindex from link_id to fp_id, keeping outlet links + non-link rows (VFPs)
+        if fp_outlet_crosswalk:
+            outlet_link_ids = set(fp_outlet_crosswalk.keys())
+            all_link_ids = set(link_ids) if link_ids is not None else outlet_link_ids
+            # Keep outlet links and any non-link rows (e.g. VFP flow-scaled)
+            flowveldepth = flowveldepth.loc[
+                flowveldepth.index.isin(outlet_link_ids) | ~flowveldepth.index.isin(all_link_ids)
+            ]
+            flowveldepth = flowveldepth.rename(index=fp_outlet_crosswalk)
+
         # todo: create a unit test by saving FVD array to disk and then checking that
-        # it matches FVD array from parent branch or other configurations. 
+        # it matches FVD array from parent branch or other configurations.
         # flowveldepth.to_pickle(output_parameters['test_output'])
 
         if return_courant:
@@ -275,7 +287,16 @@ def nwm_output_generator(
             if link_lake_crosswalk:
                 # (re) set the flowveldepth index
                 courant.set_index(fvdidxs, inplace = True)
-            
+
+            # reindex courant from link_id to fp_id
+            if fp_outlet_crosswalk:
+                outlet_link_ids_c = set(fp_outlet_crosswalk.keys())
+                all_link_ids_c = set(link_ids) if link_ids is not None else outlet_link_ids_c
+                courant = courant.loc[
+                    courant.index.isin(outlet_link_ids_c) | ~courant.index.isin(all_link_ids_c)
+                ]
+                courant = courant.rename(index=fp_outlet_crosswalk)
+
         LOG.debug("Constructing the FVD DataFrame took %s seconds." % (time.time() - start))
     
     if stream_output:
