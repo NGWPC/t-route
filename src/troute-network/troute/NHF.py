@@ -85,37 +85,25 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             raise NotImplementedError("Preprocessed data reads not implemented")
             # self.read_preprocessed_data()
         else:
-            # FIXME: Temporary solution, from_files should only be from command line.
-            # Update this once ngen framework is capable of providing this info via BMI.
-            from_files_copy = from_files
-            if not from_files_copy:
-                from_files = True
-            if from_files:
-                nhf = read_geo_file(
-                    self.supernetwork_parameters,
-                    self.waterbody_parameters,
-                    self.compute_parameters,
-                    self.compute_parameters.get("cpu_pool", 1),
-                )
+            # NHF always reads topology from .gpkg files, even in BMI mode.
+            # The ngen framework provides only qlat data via BMI; network
+            # geometry comes from the geopackage specified in supernetwork_parameters.
+            nhf = read_geo_file(
+                self.supernetwork_parameters,
+                self.waterbody_parameters,
+                self.compute_parameters,
+                self.compute_parameters.get("cpu_pool", 1),
+            )
 
-                # Handle different key column names between flowpaths and flowpath_attributes
-                flowpaths = nhf["flowpaths"]
-                waterbodies = nhf["waterbodies"]
-                gages = nhf["gages"]
-                reference_flowpaths = nhf["reference_flowpaths"]
-                virtual_flowpaths = nhf["virtual_flowpaths"]
-                virtual_nexus = nhf["virtual_nexus"]
-                nexus = nhf["nexus"]
-                hydrolocations = nhf["hydrolocations"]
-            else:
-                raise NotImplementedError("BMI loading not implemented for the NHF")
-                # flowpaths, lakes, network = load_bmi_data(
-                #     value_dict,
-                #     bmi_parameters,
-                # )
-            # FIXME: See FIXME above.
-            if not from_files_copy:
-                from_files = False
+            # Handle different key column names between flowpaths and flowpath_attributes
+            flowpaths = nhf["flowpaths"]
+            waterbodies = nhf["waterbodies"]
+            gages = nhf["gages"]
+            reference_flowpaths = nhf["reference_flowpaths"]
+            virtual_flowpaths = nhf["virtual_flowpaths"]
+            virtual_nexus = nhf["virtual_nexus"]
+            nexus = nhf["nexus"]
+            hydrolocations = nhf["hydrolocations"]
 
             # Preprocess network objects
             discretization_len = self.supernetwork_parameters.get("nhf_discretization_len", 300.0)
