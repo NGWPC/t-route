@@ -10,7 +10,7 @@ These tests verify that the network connection logic correctly:
 
 import pandas as pd
 
-from troute.NHF import (
+from troute.nhf_topology import (
     build_downstream_connections,
     build_upstream_terminal,
     find_headwaters,
