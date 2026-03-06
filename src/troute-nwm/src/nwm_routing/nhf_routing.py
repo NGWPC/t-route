@@ -332,8 +332,10 @@ def nhf_routing(argv):
             network.link_gage_df,
             network.link_lake_crosswalk,
             network.nexus_dict,
-            poi_crosswalk, 
-            logFileName            
+            poi_crosswalk,
+            logFileName,
+            fp_outlet_crosswalk=network.fp_outlet_crosswalk,
+            link_ids=network.links_df.index,
         )
         
 
