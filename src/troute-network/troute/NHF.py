@@ -40,6 +40,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         "_nex_to_dn_fp",
         "_upstream_inflow_df",
         "_nexus_virtual_seg_ids",
+        "_fp_outlet_crosswalk",
     ]
 
     def __init__(
@@ -206,6 +207,19 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
     @property
     def links_df(self):
         return self._links_df
+
+    @property
+    def fp_outlet_crosswalk(self):
+        """Map outlet link_id -> fp_id for reindexing outputs."""
+        if not hasattr(self, '_fp_outlet_crosswalk') or self._fp_outlet_crosswalk is None:
+            self._fp_outlet_crosswalk = {}
+            for fp_id, dn_nex in self._fp_to_dn_nex.items():
+                # Find the link belonging to this fp whose dn_node_id matches the fp's downstream nexus
+                mask = (self._links_df['fp_id'] == fp_id) & (self._links_df['dn_node_id'] == dn_nex)
+                matches = self._links_df.index[mask]
+                if len(matches) > 0:
+                    self._fp_outlet_crosswalk[matches[0]] = fp_id
+        return self._fp_outlet_crosswalk
 
     def new_q0(self, run_results):
         """Override to add zero-valued q0 rows for virtual segments.
@@ -503,12 +517,17 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
                 # lateral flows [m^3/s] indexed by div_id (divide/catchment)
                 div_lateralflows_df = pd.concat(dfs, axis=1)
 
-                # Distribute catchment discharge to links and upstream inflow
+                # Distribute catchment discharge to links and upstream inflow.
+                # Exclude virtual segments so fp_to_first_link resolves to
+                # real links (virtual segs share fp_id and up_node_id=None,
+                # which would shadow real first-links and misdirect remainder flow).
+                vseg_ids = set(self._nexus_virtual_seg_ids.values()) if self._nexus_virtual_seg_ids else set()
+                real_links_df = self._links_df.drop(index=list(vseg_ids), errors='ignore')
                 qlats_df, self._flow_scaling_segment_df, self._upstream_inflow_df = \
                     distribute_catchment_discharge(
                         div_lateralflows_df,
                         self._dataframe,
-                        self._links_df,
+                        real_links_df,
                         self._nodes_df,
                         self._reference_flowpaths,
                         self._fp_to_dn_nex,
