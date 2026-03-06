@@ -3,7 +3,7 @@ import pytest
 import pandas as pd
 import numpy as np
 
-from troute.NHF import distribute_catchment_discharge
+from troute.nhf_discretize import distribute_catchment_discharge
 
 
 def _make_links(records):
