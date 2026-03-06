@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Union
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import xarray as xr
 import yaml
@@ -34,7 +35,7 @@ def create_forcing_dataset(t_start: str, t_end: str, out_dir: str, hydrofabric_p
     iterator = pd.date_range(
         start=t_start,
         end=t_end,
-        freq="H"
+        freq="h"
     )
     for i in iterator:
         print(f"Processing time step {i}...")
@@ -56,8 +57,11 @@ def create_forcing_dataset(t_start: str, t_end: str, out_dir: str, hydrofabric_p
     # Generate reference outputs if requested
     if generate_reference_data and reference_dir is not None:
         gages = gpd.read_file(hydrofabric_path, sql="SELECT * FROM gages WHERE status = 'USGS-active'", ignore_geometry=True)
+        data_vars = {}
+        fp_ids = []
+        site_nos = []
+        first = True
         for _, gage in gages.iterrows():
-
             # Load retrospective flow for the gage's reference flowpath
             fp_id = int(gage["fp_id"])
             ref_fp_id = crosswalk.loc[crosswalk["fp_id"] == fp_id, "ref_fp_id"].values[0]
@@ -65,18 +69,43 @@ def create_forcing_dataset(t_start: str, t_end: str, out_dir: str, hydrofabric_p
             retro_q.index = retro_q.index.tz_localize("UTC")
 
             # Load USGS data, if available
-            gage_id = gage["site_no"]
-            usgs_q = nwis.get_iv(site=gage_id, start=t_start, end=t_end, parameterCd="00060")[0].rename(columns={"00060": "usgs_q"})
+            site_no = gage["site_no"]
+            usgs_q = nwis.get_iv(site=site_no, start=t_start.strftime("%Y-%m-%dT%H:%MZ"), end=t_end.strftime("%Y-%m-%dT%H:%MZ"), parameterCd="00060")[0].rename(columns={"00060": "usgs_q"})
             usgs_q.index = pd.to_datetime(usgs_q.index)
             usgs_q = usgs_q.reindex(retro_q.index, method="nearest", tolerance=pd.Timedelta("15min"))
 
-            # Combine and save
-            df = pd.DataFrame({
-                "time": retro_q.index,
-                "retrospective_q": retro_q[RETROSPECTIVE_FLOW_FIELD].values,
-                "usgs_q": usgs_q["usgs_q"].values,
-            }).set_index("time")
-            df.to_xarray().to_netcdf(Path(reference_dir) / f"gage_at_{fp_id}_reference.nc")
+            if first:
+                time_index = pd.DatetimeIndex(retro_q.index).tz_localize(None)
+                first = False
+            # Log metadata
+            fp_ids.append(fp_id)
+            site_nos.append(site_no)
+
+            # Stack along gage dimension
+            data_vars.setdefault("retrospective_q", []).append(retro_q[RETROSPECTIVE_FLOW_FIELD].values)
+            data_vars.setdefault("usgs_q", []).append(usgs_q["usgs_q"].values)
+
+        # Convert to arrays (gage x time)
+        retrospective_array = np.stack(data_vars["retrospective_q"], axis=0)
+        usgs_array = np.stack(data_vars["usgs_q"], axis=0)
+
+        # Build xarray dataset
+        ds = xr.Dataset(
+            {
+                "retrospective_q": (("gage", "time"), retrospective_array),
+                "usgs_q": (("gage", "time"), usgs_array),
+            },
+            coords={
+                "site_no": ("gage", site_nos),
+                "fp_id": ("gage", fp_ids),
+                "time": time_index,
+            },
+        )
+
+        # Save single NetCDF
+        ds.to_netcdf(Path(reference_dir) / "gage_reference_data.nc")
+
+
 
 def make_config_yaml(config_path: str, hydrofabric_path: str, qlat_input_folder: str, nts: int, restart_time: str, file_pattern_filter: str = "*.CHRTOUT_DOMAIN1.csv", max_loop_size: int = 288):
     """Create a config YAML for running the test case."""
@@ -145,12 +174,12 @@ def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: 
     start_dt = pd.to_datetime(start_time)
     end_dt = pd.to_datetime(end_time)
     run_dir = Path(__file__).parent / case_id
-    forcing_subdir = f"channel_forcing_{run_id}" if run_id else "channel_forcing"
-    config_path = run_dir / f"test_case_{run_id}.yaml" if run_id else run_dir / "test_case.yaml"
+    forcing_subdir = f"channel_forcing_{run_id}"
+    config_path = run_dir / f"{run_id}.yaml"
     out_path = run_dir / forcing_subdir
     hf_path = run_dir / "domain" / hf_file
     if generate_reference_data:
-        reference_dir = run_dir / f"reference_outputs_{run_id}" if run_id else run_dir / "reference_outputs"
+        reference_dir = run_dir / run_id
         reference_dir.mkdir(parents=True, exist_ok=True)
     else:
         reference_dir = None
@@ -167,8 +196,12 @@ def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: 
         reference_dir=reference_dir,
         runout_time=runout_time,
     )
+    dt = 300 # could be an input argument if we want to vary it across runs
+    sim_time = (end_dt - start_dt).total_seconds()
+    if add_runout_period:
+        sim_time += runout_time * 3600
+    nts = int(sim_time / dt) + 1
 
-    nts = int((end_dt - start_dt).total_seconds() / 300) + 1  # Assuming dt=300s
     make_config_yaml(
         config_path=config_path,
         hydrofabric_path=f"domain/{hf_file}",
