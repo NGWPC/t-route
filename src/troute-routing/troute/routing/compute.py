@@ -709,7 +709,10 @@ def compute_nhd_routing_v02(
         # if 1 == 1:
         with Parallel(n_jobs=cpu_pool, backend="loky") as parallel:
             results_subn = defaultdict(list)
-            flowveldepth_interorder = {}
+            # Preserve any pre-populated entries (e.g., upstream inflow
+            # virtual segments from NHF catchment discharge routing).
+            _prepopulated_fvd = dict(flowveldepth_interorder)
+            flowveldepth_interorder = dict(_prepopulated_fvd)
 
             for order in range(max(subnetworks_only_ordered_jit.keys()), -1, -1):
                 jobs = []
@@ -717,6 +720,17 @@ def compute_nhd_routing_v02(
                     order
                 ].items():
                     segs = clustered_subns["segs"]
+
+                    # Identify virtual segments (those with pre-filled FVD
+                    # data) that were absorbed into this cluster. They must
+                    # be treated as offnetwork_upstreams so the kernel
+                    # injects their flow via flowveldepth_interorder instead
+                    # of routing through them as regular segments.
+                    fvd_keys = set(flowveldepth_interorder.keys())
+                    cluster_virtual_segs = fvd_keys & set(segs)
+                    if cluster_virtual_segs:
+                        segs = [s for s in segs if s not in cluster_virtual_segs]
+
                     offnetwork_upstreams = set()
                     segs_set = set(segs)
                     for seg in segs:
@@ -724,11 +738,12 @@ def compute_nhd_routing_v02(
                             if us not in segs_set:
                                 offnetwork_upstreams.add(us)
 
+                    offnetwork_upstreams |= cluster_virtual_segs
                     segs.extend(offnetwork_upstreams)
-                    
+
                     common_segs = list(param_df.index.intersection(segs))
                     wbodies_segs = set(segs).symmetric_difference(common_segs)
-                    
+
                     #Declare empty dataframe
                     waterbody_types_df_sub = pd.DataFrame()
 
@@ -750,7 +765,7 @@ def compute_nhd_routing_v02(
                                 "h0",
                             ],
                         ]
-                        
+
                         #If reservoir types other than Level Pool are active
                         if not waterbody_types_df.empty:
                             waterbody_types_df_sub = waterbody_types_df.loc[
@@ -768,21 +783,29 @@ def compute_nhd_routing_v02(
                         common_segs,
                         ["dt", "bw", "tw", "twcc", "dx", "n", "ncc", "cs", "s0", "alt"],
                     ].sort_index()
-                    
+
                     param_df_sub_super = param_df_sub.reindex(
                         param_df_sub.index.tolist() + lake_segs
                     ).sort_index()
-                    
-                    if order < max(subnetworks_only_ordered_jit.keys()):
-                        for us_subn_tw in offnetwork_upstreams:
+
+                    for us_subn_tw in offnetwork_upstreams:
+                        if us_subn_tw in flowveldepth_interorder:
                             subn_tw_sortposition = param_df_sub_super.index.get_loc(
                                 us_subn_tw
                             )
                             flowveldepth_interorder[us_subn_tw][
                                 "position_index"
                             ] = subn_tw_sortposition
-   
+
                     subn_reach_list = clustered_subns["subn_reach_list"]
+                    # Remove virtual segments from reach lists so the kernel
+                    # doesn't route through them (they get flow from FVD)
+                    if cluster_virtual_segs:
+                        subn_reach_list = [
+                            [s for s in reach if s not in cluster_virtual_segs]
+                            for reach in subn_reach_list
+                        ]
+                        subn_reach_list = [r for r in subn_reach_list if r]
                     upstreams = clustered_subns["upstreams"]
 
                     subn_reach_list_with_type = _build_reach_type_list(subn_reach_list, wbodies_segs)
@@ -946,7 +969,8 @@ def compute_nhd_routing_v02(
                 results_subn[order] = parallel(jobs)
    
                 if order > 0:  # This is not needed for the last rank of subnetworks
-                    flowveldepth_interorder = {}
+                    # Start with pre-populated entries (e.g., catchment inflow virtual segments)
+                    flowveldepth_interorder = dict(_prepopulated_fvd)
                     for ci, (cluster, clustered_subns) in enumerate(
                         reaches_ordered_bysubntw_clustered[order].items()
                     ):
@@ -1036,7 +1060,10 @@ def compute_nhd_routing_v02(
         start_para_time = time.time()
         with Parallel(n_jobs=cpu_pool, backend="loky") as parallel:
             results_subn = defaultdict(list)
-            flowveldepth_interorder = {}
+            # Preserve any pre-populated entries (e.g., upstream inflow
+            # virtual segments from NHF catchment discharge routing).
+            _prepopulated_fvd = dict(flowveldepth_interorder)
+            flowveldepth_interorder = dict(_prepopulated_fvd)
 
             for order in range(max(subnetworks_only_ordered_jit.keys()), -1, -1):
                 jobs = []
@@ -1046,6 +1073,19 @@ def compute_nhd_routing_v02(
                     # TODO: Confirm that a list here is best -- we are sorting,
                     # so a set might be sufficient/better
                     segs = list(chain.from_iterable(subn_reach_list))
+
+                    # Identify virtual segments (those with pre-filled FVD
+                    # data) that were absorbed into this subnetwork.
+                    fvd_keys = set(flowveldepth_interorder.keys())
+                    cluster_virtual_segs = fvd_keys & set(segs)
+                    if cluster_virtual_segs:
+                        segs = [s for s in segs if s not in cluster_virtual_segs]
+                        subn_reach_list = [
+                            [s for s in reach if s not in cluster_virtual_segs]
+                            for reach in subn_reach_list
+                        ]
+                        subn_reach_list = [r for r in subn_reach_list if r]
+
                     offnetwork_upstreams = set()
                     segs_set = set(segs)
                     for seg in segs:
@@ -1053,14 +1093,15 @@ def compute_nhd_routing_v02(
                             if us not in segs_set:
                                 offnetwork_upstreams.add(us)
 
+                    offnetwork_upstreams |= cluster_virtual_segs
                     segs.extend(offnetwork_upstreams)
-                    
+
                     common_segs = list(param_df.index.intersection(segs))
                     wbodies_segs = set(segs).symmetric_difference(common_segs)
-                    
+
                     #Declare empty dataframe
                     waterbody_types_df_sub = pd.DataFrame()
-                
+
                     if not waterbodies_df.empty:
                         lake_segs = list(waterbodies_df.index.intersection(segs))
                         waterbodies_df_sub = waterbodies_df.loc[
@@ -1079,7 +1120,7 @@ def compute_nhd_routing_v02(
                                 "h0",
                             ],
                         ]
-                        
+
                         #If reservoir types other than Level Pool are active
                         if not waterbody_types_df.empty:
                             waterbody_types_df_sub = waterbody_types_df.loc[
@@ -1092,18 +1133,18 @@ def compute_nhd_routing_v02(
                     else:
                         lake_segs = []
                         waterbodies_df_sub = pd.DataFrame()
-                    
+
                     param_df_sub = param_df.loc[
                         common_segs,
                         ["dt", "bw", "tw", "twcc", "dx", "n", "ncc", "cs", "s0", "alt"],
                     ].sort_index()
-                    
+
                     param_df_sub_super = param_df_sub.reindex(
                         param_df_sub.index.tolist() + lake_segs
                     ).sort_index()
-                    
-                    if order < max(subnetworks_only_ordered_jit.keys()):
-                        for us_subn_tw in offnetwork_upstreams:
+
+                    for us_subn_tw in offnetwork_upstreams:
+                        if us_subn_tw in flowveldepth_interorder:
                             subn_tw_sortposition = param_df_sub_super.index.get_loc(
                                 us_subn_tw
                             )
@@ -1269,7 +1310,8 @@ def compute_nhd_routing_v02(
                 results_subn[order] = parallel(jobs)
 
                 if order > 0:  # This is not needed for the last rank of subnetworks
-                    flowveldepth_interorder = {}
+                    # Start with pre-populated entries (e.g., catchment inflow virtual segments)
+                    flowveldepth_interorder = dict(_prepopulated_fvd)
                     for twi, subn_tw in enumerate(reaches_ordered_bysubntw[order]):
                         # TODO: This index step is necessary because we sort the segment index
                         # TODO: I think there are a number of ways we could remove the sorting step

@@ -1,466 +1,45 @@
 import time
-from collections import defaultdict
-from itertools import chain
 from pathlib import Path
 from pprint import pformat
-from typing import Optional
 
-import geopandas as gpd
 import numpy as np
 import pandas as pd
-import pyogrio
-import pyarrow.parquet as pq
-import xarray as xr
-from joblib import Parallel, delayed
-from troute.nhd_network import reverse_network
 
 from .AbstractNetwork import AbstractNetwork
+from troute.nhf_topology import (
+    build_link_connections,
+    get_terminal_nexus_ids,
+    validate_connections,
+)
+from troute.nhf_discretize import (
+    discretize_flowpaths,
+    distribute_catchment_discharge,
+)
+from troute.nhf_preprocess import (
+    NHFPreprocessMixin,
+    read_geo_file,
+    read_file,
+)
 
 __verbose__ = False
 __showtiming__ = False
 
-def build_downstream_connections(
-    routing_flowpaths: pd.DataFrame,
-    all_flowpaths: pd.DataFrame,
-    terminal_nexus_ids: Optional[set[int]] = None,
-) -> dict[int, list[int]]:
-    """
-    Build downstream connectivity dictionary mapping flowpath IDs to their downstream flowpath IDs.
-    
-    The NHF data model uses nexus points as connection nodes between flowpaths:
-    - Flowpath A has dn_virtual_nex_id = X (A drains TO nexus X)
-    - Flowpath B has up_virtual_nex_id = X (B receives FROM nexus X)
-    - Therefore A -> B (A flows into B)
-    
-    Parameters
-    ----------
-    routing_flowpaths : pd.DataFrame
-        DataFrame containing ONLY routing segment flowpaths (routing_segment == True).
-        These are the flowpaths that will appear as keys in the connections dict.
-        Must have columns: virtual_fp_id, dn_virtual_nex_id, up_virtual_nex_id
-    all_flowpaths : pd.DataFrame
-        DataFrame containing ALL virtual flowpaths (both routing and non-routing).
-        Used to build the nexus-to-downstream-flowpath mapping.
-        Must have columns: virtual_fp_id, dn_virtual_nex_id, up_virtual_nex_id
-    terminal_nexus_ids : set[int], optional
-        Set of nexus IDs that are terminal (no downstream flowpath).
-        If provided, flowpaths draining to these nexuses will have empty downstream lists.
-        
-    Returns
-    -------
-    dict[int, list[int]]
-        Dictionary mapping each routing virtual_fp_id to a list of downstream virtual_fp_ids.
-        Terminal flowpaths will have empty lists [].
-        
-    Examples
-    --------
-    >>> all_vfp = pd.DataFrame({
-    ...     'virtual_fp_id': [1, 2, 3],
-    ...     'dn_virtual_nex_id': [100, 101, 102],
-    ...     'up_virtual_nex_id': [None, 100, 101],
-    ...     'routing_segment': [True, True, True]
-    ... })
-    >>> routing_vfp = all_vfp[all_vfp['routing_segment']]
-    >>> connections = build_downstream_connections(routing_vfp, all_vfp, terminal_nexus_ids={102})
-    >>> connections
-    {1: [2], 2: [3], 3: []}
-    """
-    if terminal_nexus_ids is None:
-        terminal_nexus_ids = set()
-    
-    # Get the set of routing flowpath IDs for filtering downstream connections
-    routing_fp_ids = set(routing_flowpaths['virtual_fp_id'].tolist())
-    
-    # Map: nexus_id -> list of ROUTING flowpaths that have this nexus as their UPSTREAM nexus
-    # We use all_flowpaths to find the mapping, but filter to only routing segments
-    routing_vfp = all_flowpaths[all_flowpaths['virtual_fp_id'].isin(routing_fp_ids)]
-    nex_to_downstream_fps = (
-        routing_vfp[routing_vfp['up_virtual_nex_id'].notna()]
-        .groupby('up_virtual_nex_id')['virtual_fp_id']
-        .apply(list)
-        .to_dict()
-    )
-    
-    # Build connections: for each routing flowpath, find downstream routing flowpath(s)
-    connections = {}
-    for _, row in routing_flowpaths.iterrows():
-        fp_id = row['virtual_fp_id']
-        dn_nex = row['dn_virtual_nex_id']
-        
-        if pd.isna(dn_nex):
-            # No downstream nexus
-            connections[fp_id] = []
-        elif dn_nex in terminal_nexus_ids:
-            # Downstream nexus is terminal (no further flowpaths)
-            connections[fp_id] = []
-        else:
-            # Find routing flowpaths whose up_virtual_nex_id == this flowpath's dn_virtual_nex_id
-            downstream_fps = nex_to_downstream_fps.get(dn_nex, [])
-            connections[fp_id] = downstream_fps
-    
-    return connections
 
-
-def build_upstream_terminal(
-    virtual_flowpaths: pd.DataFrame,
-    terminal_nexus_ids: set[int],
-) -> dict[int, set[int]]:
-    """
-    Build mapping of terminal nexus IDs to their upstream flowpath IDs.
-    
-    This identifies which flowpaths drain into terminal nexuses (network outlets).
-    
-    Parameters
-    ----------
-    virtual_flowpaths : pd.DataFrame
-        DataFrame containing virtual flowpath information with columns:
-        - virtual_fp_id: unique flowpath identifier
-        - dn_virtual_nex_id: downstream nexus ID for each flowpath
-    terminal_nexus_ids : set[int]
-        Set of nexus IDs that are terminal (no downstream flowpath).
-        
-    Returns
-    -------
-    dict[int, set[int]]
-        Dictionary mapping each terminal nexus ID to a set of upstream flowpath IDs.
-        
-    Examples
-    --------
-    >>> vfp = pd.DataFrame({
-    ...     'virtual_fp_id': [1, 2, 3],
-    ...     'dn_virtual_nex_id': [100, 101, 101],  # fp2 and fp3 both drain to terminal nex 101
-    ... })
-    >>> upstream_terminal = build_upstream_terminal(vfp, terminal_nexus_ids={101})
-    >>> upstream_terminal
-    {101: {2, 3}}
-    """
-    upstream_terminal = {}
-    
-    for _, row in virtual_flowpaths.iterrows():
-        dn_nex = row['dn_virtual_nex_id']
-        if pd.notna(dn_nex) and dn_nex in terminal_nexus_ids:
-            fp_id = row['virtual_fp_id']
-            upstream_terminal.setdefault(dn_nex, set()).add(fp_id)
-    
-    return upstream_terminal
-
-
-def get_terminal_nexus_ids(virtual_nexus: pd.DataFrame) -> set[int]:
-    """
-    Extract terminal nexus IDs from the virtual nexus DataFrame.
-    
-    Terminal nexuses are those with no downstream flowpath (dn_virtual_fp_id is NaN).
-    
-    Parameters
-    ----------
-    virtual_nexus : pd.DataFrame
-        DataFrame containing virtual nexus information with columns:
-        - virtual_nex_id: unique nexus identifier
-        - dn_virtual_fp_id: downstream flowpath ID (NaN for terminals)
-        
-    Returns
-    -------
-    set[int]
-        Set of terminal nexus IDs.
-    """
-    terminals = virtual_nexus[pd.isna(virtual_nexus["dn_virtual_fp_id"])]
-    return set(terminals["virtual_nex_id"].tolist())
-
-
-def validate_connections(connections: dict[int, list[int]]) -> tuple[bool, set[int]]:
-    """
-    Validate that all downstream flowpath IDs in the connections dictionary
-    exist as keys (i.e., they are valid flowpath IDs).
-    
-    This catches the case where nexus IDs are accidentally used instead of
-    flowpath IDs in the connections values.
-    
-    Parameters
-    ----------
-    connections : dict[int, list[int]]
-        Dictionary mapping flowpath IDs to lists of downstream flowpath IDs.
-        
-    Returns
-    -------
-    tuple[bool, set[int]]
-        - bool: True if all downstream IDs are valid, False otherwise
-        - set[int]: Set of orphaned IDs (downstream IDs not found as keys)
-        
-    Examples
-    --------
-    >>> connections = {1: [2], 2: [3], 3: []}
-    >>> is_valid, orphaned = validate_connections(connections)
-    >>> is_valid
-    True
-    >>> orphaned
-    set()
-    
-    >>> bad_connections = {1: [2], 2: [999], 3: []}  # 999 doesn't exist as key
-    >>> is_valid, orphaned = validate_connections(bad_connections)
-    >>> is_valid
-    False
-    >>> orphaned
-    {999}
-    """
-    all_downstream_fps = set(chain.from_iterable(connections.values()))
-    all_fp_ids = set(connections.keys())
-    
-    orphaned = all_downstream_fps - all_fp_ids
-    
-    return len(orphaned) == 0, orphaned
-
-
-def find_headwaters(connections: dict[int, list[int]]) -> set[int]:
-    """
-    Find headwater flowpaths in the network.
-    
-    Headwaters are flowpaths that are never referenced as downstream of any other
-    flowpath (i.e., they appear as keys but never in any values list).
-    
-    Parameters
-    ----------
-    connections : dict[int, list[int]]
-        Dictionary mapping flowpath IDs to lists of downstream flowpath IDs.
-        
-    Returns
-    -------
-    set[int]
-        Set of headwater flowpath IDs.
-    """
-    all_downstream_fps = set(chain.from_iterable(connections.values()))
-    all_fp_ids = set(connections.keys())
-    
-    return all_fp_ids - all_downstream_fps
-
-
-def find_tailwaters(connections: dict[int, list[int]]) -> set[int]:
-    """
-    Find tailwater flowpaths in the network.
-    
-    Tailwaters are flowpaths with no downstream connections (empty list).
-    
-    Parameters
-    ----------
-    connections : dict[int, list[int]]
-        Dictionary mapping flowpath IDs to lists of downstream flowpath IDs.
-        
-    Returns
-    -------
-    set[int]
-        Set of tailwater flowpath IDs.
-    """
-    return {fp_id for fp_id, downstream in connections.items() if not downstream}
-
-
-def distribute_qlateral_to_virtual_flowpaths(
-    div_lateralflows_df: pd.DataFrame,
-    vfp_dataframe: pd.DataFrame,
-    flowpath_dict: dict,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Distribute lateral flows from divides to virtual flowpaths by area percentage.
-    
-    Parameters
-    ----------
-    div_lateralflows_df : pd.DataFrame
-        Lateral flows indexed by div_id, columns are timestamps
-    vfp_dataframe : pd.DataFrame
-        Virtual flowpath dataframe indexed by virtual_fp_id
-    flowpath_dict : dict
-        Mapping of {dn_virtual_nex_id: downstream_flowpath_id}
-        
-    Returns
-    -------
-    routing_qlats : pd.DataFrame
-        Qlats for routing segments, indexed by virtual_fp_id
-    flow_scaling_df : pd.DataFrame
-        Qlats for non-routing segments, indexed by virtual_fp_id
-    """
-    vfp_to_div = vfp_dataframe[['div_id', 'percentage_area_contribution', 'dn_virtual_nex_id', 'routing_segment']].copy()
-    vfp_to_div['div_id'] = vfp_to_div['div_id'].astype(int)
-    
-    # Distribute qlat from div to virtual flowpaths by area percentage
-    parent_qlats = div_lateralflows_df.reindex(vfp_to_div['div_id'].values)
-    parent_qlats.index = vfp_to_div.index  # index is virtual_fp_id
-    
-    _qlats_df = parent_qlats.mul(vfp_to_div['percentage_area_contribution'].values, axis=0)
-    
-    # Split routing vs non-routing
-    routing_mask = vfp_to_div['routing_segment']
-    
-    # Routing segments: keep indexed by virtual_fp_id
-    routing_qlats = _qlats_df[routing_mask].copy()
-    
-    # Non-routing segments: remap to downstream routing flowpath
-    non_routing_qlats = _qlats_df[~routing_mask].copy()
-    dn_nex_ids = vfp_to_div.loc[non_routing_qlats.index, 'dn_virtual_nex_id']
-    downstream_fp = dn_nex_ids.map(flowpath_dict)
-    non_routing_qlats.index = downstream_fp.values
-    
-    # Add non-routing flows to their downstream routing flowpaths
-    aggregated_non_routing = non_routing_qlats.groupby(non_routing_qlats.index).sum()
-    routing_qlats = routing_qlats.add(aggregated_non_routing, fill_value=0)
-    
-    # Keep original non-routing indexed by virtual_fp_id for flow scaling reference
-    flow_scaling_df = _qlats_df[~routing_mask].copy()
-    
-    return routing_qlats, flow_scaling_df
-
-
-def read_ngen_waterbody_df(parm_file, lake_index_field="wb-id", lake_id_mask=None):
-    """
-    Reads .gpkg or lake.json file and prepares a dataframe, filtered
-    to the relevant reservoirs, to provide the parameters
-    for level-pool reservoir computation.
-    """
-
-    def node_key_func(x):
-        return int(x.split("-")[-1])
-
-    if Path(parm_file).suffix == ".gpkg":
-        df = gpd.read_file(parm_file, layer="lakes")
-
-        df = df.drop(["id", "toid", "hl_id", "hl_reference", "hl_uri", "geometry"], axis=1).rename(
-            columns={"hl_link": "lake_id"}
-        )
-        df["lake_id"] = df.lake_id.astype(float).astype(int)
-        df = df.set_index("lake_id").drop_duplicates().sort_index()
-    elif Path(parm_file).suffix == ".json":
-        df = pd.read_json(parm_file, orient="index")
-        df.index = df.index.map(node_key_func)
-        df.index.name = lake_index_field
-
-    if lake_id_mask:
-        df = df.loc[lake_id_mask]
-    return df
-
-
-def read_ngen_waterbody_type_df(parm_file, lake_index_field="wb-id", lake_id_mask=None):
-    """ """
-
-    # FIXME: this function is likely not correct. Unclear how we will get
-    # reservoir type from the gpkg files. Information should be in 'crosswalk'
-    # layer, but as of now (Nov 22, 2022) there doesn't seem to be a differentiation
-    # between USGS reservoirs, USACE reservoirs, or RFC reservoirs...
-    def node_key_func(x):
-        return int(x.split("-")[-1])
-
-    if Path(parm_file).suffix == ".gpkg":
-        df = gpd.read_file(parm_file, layer="crosswalk").set_index("id")
-    elif Path(parm_file).suffix == ".json":
-        df = pd.read_json(parm_file, orient="index")
-
-    df.index = df.index.map(node_key_func)
-    df.index.name = lake_index_field
-    if lake_id_mask:
-        df = df.loc[lake_id_mask]
-
-    return df
-
-
-def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_parameters, cpu_pool):
-    geo_file_path = supernetwork_parameters["geo_file_path"]
-    file_type = Path(geo_file_path).suffix
-    if file_type == ".gpkg":
-
-        layers_to_read = [
-            "flowpaths",
-            "reference_flowpaths",
-            "virtual_flowpaths",
-            "virtual_nexus",
-            "waterbodies",
-            "gages",
-            "hydrolocations"
-        ]
-
-        # TODO enable lakes to be read into the routing solution here
-        # if waterbody_parameters.get("break_network_at_waterbodies", False):
-        #     layers_to_read.extend(["lakes", "nexus"])
-
-        # data_assimilation_parameters = compute_parameters.get("data_assimilation_parameters", {})
-        # if any(
-        #     [
-        #         data_assimilation_parameters.get("streamflow_da", {}).get("streamflow_nudging", False),
-        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usgs", False),
-        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usace", False),
-        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usbr", False),
-        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_rfc_da", {}).get("reservoir_rfc_forecasts", False),
-        #     ]
-        # ):
-        #     layers_to_read.append("network")
-
-        def read_layer(layer_name):
-            if layer_name:
-                try:
-                    _df = gpd.read_file(geo_file_path, layer=layer_name)
-                    if 'geometry' in _df.columns:
-                        _df = _df.drop(columns=["geometry"])
-                    return _df
-                except pyogrio.errors.DataSourceError as e:
-                    print(f"Error reading file {geo_file_path}: {e}")
-                    raise pyogrio.errors.DataSourceError from e
-                except pyogrio.errors.DataLayerError as e:
-                    print(f"Error reading layer {layer_name}: {e}")
-                    raise pyogrio.errors.DataLayerError from e
-
-        # Retrieve geopackage information using matched layer names
-        if cpu_pool > 1:
-            with Parallel(n_jobs=min(cpu_pool, len(layers_to_read))) as parallel:
-                gpkg_list = parallel(delayed(read_layer)(layer) for layer in layers_to_read)
-
-            table_dict = {layers_to_read[i]: gpkg_list[i] for i in range(len(layers_to_read))}
-        else:
-            table_dict = {layer: read_layer(layer) for layer in layers_to_read}
-
-    else:
-        raise RuntimeError("Unsupported file type: {}".format(file_type))
-
-    return table_dict
-
-
-def load_bmi_data(
-    value_dict,
-    bmi_parameters,
-):
-    # Get the column names that we need from each table of the geopackage
-    flowpath_columns = bmi_parameters.get("flowpath_columns")
-    attributes_columns = bmi_parameters.get("attributes_columns")
-    lakes_columns = bmi_parameters.get("waterbody_columns")
-    network_columns = bmi_parameters.get("network_columns")
-
-    # Create dataframes with the relevent columns
-    flowpaths = pd.DataFrame(data=None, columns=flowpath_columns)
-    for col in flowpath_columns:
-        flowpaths[col] = value_dict[col]
-
-    flowpath_attributes = pd.DataFrame(data=None, columns=attributes_columns)
-    for col in attributes_columns:
-        flowpath_attributes[col] = value_dict[col]
-    flowpath_attributes = flowpath_attributes.rename(columns={"attributes_id": "id"})
-
-    lakes = pd.DataFrame(data=None, columns=lakes_columns)
-    for col in lakes_columns:
-        lakes[col] = value_dict[col]
-
-    network = pd.DataFrame(data=None, columns=network_columns)
-    for col in network_columns:
-        network[col] = value_dict[col]
-    network = network.rename(columns={"network_id": "id"})
-
-    # Merge the two flowpath tables into one
-    flowpaths = pd.merge(flowpaths, flowpath_attributes, on="id")
-
-    return flowpaths, lakes, network
-
-
-class NHF(AbstractNetwork):
+class NHF(NHFPreprocessMixin, AbstractNetwork):
     """ """
 
     __slots__ = [
         "_upstream_terminal",
         "_nexus_latlon",
         "_duplicate_ids_df",
-        "_flow_scaling_segment_df"
+        "_flow_scaling_segment_df",
+        "_links_df",
+        "_nodes_df",
+        "_reference_flowpaths",
+        "_fp_to_dn_nex",
+        "_nex_to_dn_fp",
+        "_upstream_inflow_df",
+        "_nexus_virtual_seg_ids",
     ]
 
     def __init__(
@@ -525,6 +104,7 @@ class NHF(AbstractNetwork):
                 reference_flowpaths = nhf["reference_flowpaths"]
                 virtual_flowpaths = nhf["virtual_flowpaths"]
                 virtual_nexus = nhf["virtual_nexus"]
+                nexus = nhf["nexus"]
                 hydrolocations = nhf["hydrolocations"]
             else:
                 raise NotImplementedError("BMI loading not implemented for the NHF")
@@ -537,10 +117,14 @@ class NHF(AbstractNetwork):
                 from_files = False
 
             # Preprocess network objects
-            self.preprocess_network(flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus)
+            discretization_len = self.supernetwork_parameters.get("nhf_discretization_len", 300.0)
+            self.preprocess_network(
+                flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus,
+                nexus, discretization_len,
+            )
 
             self.crosswalk_nex_flowpath_poi(
-                virtual_flowpaths, 
+                virtual_flowpaths,
                 hydrolocations,
                 waterbodies,
                 gages,
@@ -552,9 +136,9 @@ class NHF(AbstractNetwork):
 
             # Preprocess data assimilation objects #TODO: Move to DataAssimilation.py?
             self.preprocess_data_assimilation(
-                flowpaths, 
-                reference_flowpaths, 
-                virtual_flowpaths, 
+                flowpaths,
+                reference_flowpaths,
+                virtual_flowpaths,
                 virtual_nexus,
                 waterbodies,
                 gages
@@ -607,11 +191,11 @@ class NHF(AbstractNetwork):
     @property
     def segment_index(self):
         """
-            Segment IDs of all reaches in parameter dataframe
+            Segment IDs of all reaches (links) in parameter dataframe
             and diffusive domain.
         """
         # list of all segments in the domain (MC + diffusive)
-        self._segment_index = self.dataframe[self.dataframe["routing_segment"]].index  # only getting routing_segment == True virtual_flowpaths
+        self._segment_index = self._links_df.index
         if self._routing.diffusive_network_data:
             for tw in self._routing.diffusive_network_data:
                 self._segment_index = self._segment_index.append(
@@ -619,10 +203,27 @@ class NHF(AbstractNetwork):
                 )
         return self._segment_index
 
+    @property
+    def links_df(self):
+        return self._links_df
 
-    def preprocess_network(self, flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus):
-        assert not virtual_flowpaths.empty, "No virtual flowpaths read to memory from .gpkg" 
-        vfp_to_fp_map = reference_flowpaths[['virtual_fp_id', 'fp_id', 'div_id']].copy()
+
+    def preprocess_network(
+        self, flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus,
+        nexus=None, discretization_len_m=300.0,
+    ):
+        assert not virtual_flowpaths.empty, "No virtual flowpaths read to memory from .gpkg"
+        if nexus is None:
+            nexus = pd.DataFrame(columns=['nex_id', 'dn_fp_id'])
+
+        # Store reference_flowpaths for use in build_qlateral_array
+        self._reference_flowpaths = reference_flowpaths
+
+        vfp_to_fp_map = reference_flowpaths[reference_flowpaths['virtual_fp_id'].notna()][
+            ['virtual_fp_id', 'fp_id', 'div_id']
+        ].copy()
+        # NHF 1.1.2: VFP rows may have NULL fp_id; derive from div_id
+        vfp_to_fp_map['fp_id'] = vfp_to_fp_map['fp_id'].fillna(vfp_to_fp_map['div_id'])
         _vfp = virtual_flowpaths.merge(
             vfp_to_fp_map,
             left_on='virtual_fp_id',
@@ -638,38 +239,78 @@ class NHF(AbstractNetwork):
         )
         cols_to_drop = [col for col in result.columns if col.endswith('_flowpath')]
         result = result.drop(columns=cols_to_drop)
+        # Drop geometry columns carried from flowpath merge (not needed for VFP routing)
+        if 'geometry' in result.columns:
+            result = result.drop(columns=['geometry'])
         self._dataframe = result
-        
 
-        # make the flowpath linkage
+        # make the flowpath linkage (kept for VFP qlat distribution compatibility)
         self._flowpath_dict = dict(zip(
-            result.loc[:, 'dn_virtual_nex_id'], 
+            result.loc[:, 'dn_virtual_nex_id'],
             result.loc[:, 'virtual_fp_id']
         ))
 
         self._dataframe.set_index("virtual_fp_id", inplace=True)
         self._dataframe = self.dataframe.sort_index()
-        
-        self._terminal_codes = get_terminal_nexus_ids(virtual_nexus)
-        
-        # Build upstream terminal mapping
-        self._upstream_terminal = build_upstream_terminal(virtual_flowpaths, self._terminal_codes)
-        
-        # Build connections dictionary - only for routing segments
-        routing_vfp = virtual_flowpaths[virtual_flowpaths["routing_segment"]]
-        self._connections = build_downstream_connections(
-            routing_flowpaths=routing_vfp,
-            all_flowpaths=virtual_flowpaths,
-            terminal_nexus_ids=self._terminal_codes,
+
+        # Discretize flowpaths into links and nodes
+        self._links_df, self._nodes_df = discretize_flowpaths(
+            flowpaths=flowpaths,
+            virtual_flowpaths=virtual_flowpaths,
+            virtual_nexus=virtual_nexus,
+            reference_flowpaths=reference_flowpaths,
+            nexus=nexus,
+            discretization_len_m=discretization_len_m,
         )
-        
-        # Validate connections
+
+        # Build link connections
+        self._connections = build_link_connections(
+            links_df=self._links_df,
+            nexus=nexus,
+        )
+
+        # Store mappings for upstream inflow routing (used by distribute_catchment_discharge)
+        self._fp_to_dn_nex = dict(zip(
+            flowpaths['fp_id'].astype(int),
+            flowpaths['dn_nex_id'].astype(int),
+        ))
+        self._nex_to_dn_fp = {}
+        if not nexus.empty:
+            valid_nex = nexus[nexus['dn_fp_id'].notna()]
+            if not valid_nex.empty:
+                self._nex_to_dn_fp = dict(zip(
+                    valid_nex['nex_id'].astype(int),
+                    valid_nex['dn_fp_id'].astype(int),
+                ))
+
+        # Initialize upstream inflow state (populated during forcing assembly)
+        self._upstream_inflow_df = None
+        self._nexus_virtual_seg_ids = {}
+
+        # Validate link connections
         is_valid, orphaned = validate_connections(self._connections)
         if not is_valid:
             raise ValueError(
-                f"Invalid network connections: {len(orphaned)} downstream IDs not found. "
+                f"Invalid link connections: {len(orphaned)} downstream IDs not found. "
                 f"First 10: {list(orphaned)[:10]}"
             )
+
+        # Build terminal codes from regular nexuses where dn_fp_id IS NULL (network outlets)
+        if not nexus.empty:
+            self._terminal_codes = set(
+                nexus.loc[nexus['dn_fp_id'].isna(), 'nex_id'].astype(int)
+            )
+        else:
+            self._terminal_codes = get_terminal_nexus_ids(virtual_nexus)
+
+        # Build upstream terminal: links whose dn_node_id is in terminal_codes
+        self._upstream_terminal = {}
+        for nex_id in self._terminal_codes:
+            terminal_links = self._links_df[
+                self._links_df['dn_node_id'] == nex_id
+            ].index.tolist()
+            if terminal_links:
+                self._upstream_terminal[nex_id] = set(terminal_links)
 
         # Store a dataframe containing info about nexus points. This will be reprojected to lat/lon
         # and filtered for only diffusive domain tailwaters in AbstractNetwork.py.
@@ -677,363 +318,133 @@ class NHF(AbstractNetwork):
         # to the model engine/coastal models
         self._nexus_latlon = virtual_nexus
 
-    def crosswalk_nex_flowpath_poi(
-        self, 
-        virtual_flowpaths, 
-        hydrolocations,
-        waterbodies,
-        gages,
-        reference_flowpaths
-    ):
-        self._nexus_dict = virtual_flowpaths.groupby("dn_virtual_nex_id")["virtual_fp_id"].apply(list).to_dict()  ##{id: toid}
-        if not hydrolocations.empty:
-            waterbody_ids = hydrolocations.merge(
-                waterbodies,
-                left_on='hy_id',
-                right_on='hy_id',
-                how='right'
+    def _create_upstream_virtual_segments(self, upstream_inflow_df):
+        """
+        Create virtual segments for upstream inflow injection via offnetwork_upstreams.
+
+        For each target link that has nonzero upstream inflow, create a virtual
+        segment that will carry the pre-filled flow-velocity-depth timeseries.
+        Virtual segments are added to _connections (flowing into the target link),
+        and to _links_df (with channel params inherited from the target link).
+
+        On repeated calls (multi-loop runs), previous virtual segments are
+        removed before creating new ones.
+
+        Parameters
+        ----------
+        upstream_inflow_df : pd.DataFrame
+            Upstream inflow indexed by target link_id, columns are timestamps.
+        """
+        # Find target links with nonzero flow
+        nonzero_mask = upstream_inflow_df.abs().sum(axis=1) > 1e-10
+        target_links = upstream_inflow_df.index[nonzero_mask]
+
+        if target_links.empty:
+            self._nexus_virtual_seg_ids = {}
+            # Invalidate cached network properties
+            self._reverse_network = None
+            self._independent_networks = None
+            self._reaches_by_tw = None
+            return
+
+        # Generate virtual segment IDs above existing ID space
+        all_ids = list(self._links_df.index) + list(self._connections.keys())
+        next_id = max(all_ids) + 1
+
+        virtual_seg_ids = {}
+        virtual_link_records = []
+
+        for target_link_id in target_links:
+            virtual_seg_id = next_id
+            next_id += 1
+            virtual_seg_ids[int(target_link_id)] = virtual_seg_id
+
+            # Virtual segment flows into target link — this makes it
+            # appear in rconn as upstream of the target link, which is
+            # how compute.py detects offnetwork_upstreams.
+            self._connections[virtual_seg_id] = [int(target_link_id)]
+
+            # Build row with channel params inherited from target link
+            target_row = self._links_df.loc[target_link_id]
+            record = {
+                'link_id': virtual_seg_id,
+                'fp_id': target_row['fp_id'],
+                'div_id': target_row.get('div_id', 0),
+                'dn_node_id': target_row.get('dn_node_id', 0),
+                'up_node_id': None,
+                'length_km': target_row['length_km'],
+            }
+            # Copy channel params
+            for col in self._links_df.columns:
+                if col not in record:
+                    record[col] = target_row[col]
+            virtual_link_records.append(record)
+
+        # Add virtual segment rows to links_df
+        if virtual_link_records:
+            virtual_df = pd.DataFrame(virtual_link_records).set_index('link_id')
+            self._links_df = pd.concat([self._links_df, virtual_df])
+
+        self._nexus_virtual_seg_ids = virtual_seg_ids
+
+        # Add q0 entries for virtual segments (zeros; kernel pre-fills from FVD)
+        if self._q0 is not None:
+            vseg_q0 = pd.DataFrame(
+                0.0,
+                index=list(virtual_seg_ids.values()),
+                columns=self._q0.columns,
+                dtype="float32",
             )
-            gage_ids = hydrolocations.merge(
-                gages,
-                left_on='hy_id',
-                right_on='hy_id',
-                how='right'
-            )
-            hy_id_to_ref_id = pd.concat([waterbody_ids[["hy_id", "ref_fp_id"]].copy(), gage_ids[["hy_id", "ref_fp_id"]]])
-            _ref_ids = reference_flowpaths.merge(
-                hy_id_to_ref_id,
-                left_on='ref_fp_id',
-                right_on='ref_fp_id',
-                how='right',
-            )
-            result = _ref_ids.merge(
-                virtual_flowpaths,
-                left_on='virtual_fp_id',
-                right_on='virtual_fp_id',
-                how='left',
-            )
-            self._poi_nex_dict = result.groupby("hy_id")["dn_virtual_nex_id"].apply(list).to_dict()
-        else:
-            self._poi_nex_dict = None
+            self._q0 = pd.concat([self._q0, vseg_q0])
 
-    def preprocess_waterbodies(self, lakes, nexus):
-        # TODO work on waterbodies support for NHF
-        # If waterbodies are being simulated, create waterbody dataframes and dictionaries
-        # if not lakes.empty:
-        #     self._waterbody_df = lakes[
-        #         [
-        #             "lake_id",
-        #             "id",
-        #             "ifd",
-        #             "LkArea",
-        #             "LkMxE",
-        #             "OrificeA",
-        #             "OrificeC",
-        #             "OrificeE",
-        #             "WeirC",
-        #             "WeirE",
-        #             "WeirL",
-        #         ]
-        #     ]
+        # Invalidate cached network properties so they recompute with virtual segments
+        self._reverse_network = None
+        self._independent_networks = None
+        self._reaches_by_tw = None
 
-        #     id = self.waterbody_dataframe["id"].str.split("-", expand=True).iloc[:, 1]
-        #     self._waterbody_df.loc[:, "id"] = id
-        #     self._waterbody_df.loc[:, "id"] = self._waterbody_df.id.astype(float).astype(int)
-        #     self._waterbody_df.loc[:, "lake_id"] = self.waterbody_dataframe.lake_id.astype(float).astype(int)
-        #     self._waterbody_df = self.waterbody_dataframe.set_index("lake_id").drop_duplicates().sort_index()
+    def build_flowveldepth_interorder(self, nts, qts_subdivisions):
+        """
+        Build flowveldepth_interorder dict for upstream inflow virtual segments.
 
-        #     # Drop any waterbodies that do not have parameters
-        #     self._waterbody_df = self.waterbody_dataframe.dropna()
+        Each virtual segment gets a pre-filled flow-velocity-depth timeseries
+        that the kernel injects as upstream boundary conditions (q_up).
 
-        #     # Check if there are any lake_ids that are also segment_ids. If so, add a large value
-        #     # to the lake_ids:
-        #     duplicate_ids = list(set(self.waterbody_dataframe.index).intersection(set(self.dataframe.index)))
-        #     self._duplicate_ids_df = pd.DataFrame(
-        #         {"lake_id": duplicate_ids, "synthetic_ids": [int(id + 9.99e11) for id in duplicate_ids]}
-        #     )
-        #     update_dict = dict(self._duplicate_ids_df[["lake_id", "synthetic_ids"]].values)
+        Parameters
+        ----------
+        nts : int
+            Number of routing timesteps.
+        qts_subdivisions : int
+            Number of routing timesteps per qlat timestep.
 
-        #     tmp_wbody_conn = self.dataframe[["waterbody"]].dropna()
-        #     tmp_wbody_conn = (
-        #         tmp_wbody_conn["waterbody"]
-        #         .str.split(",", expand=True)
-        #         .reset_index()
-        #         .melt(id_vars="key")
-        #         .drop("variable", axis=1)
-        #         .dropna()
-        #         .astype(int)
-        #     )
-        #     tmp_wbody_conn = tmp_wbody_conn[tmp_wbody_conn["value"].isin(self.waterbody_dataframe.index)]
-        #     self._dataframe = (
-        #         self.dataframe.reset_index()
-        #         .merge(tmp_wbody_conn, how="left", on="key")
-        #         .drop("waterbody", axis=1)
-        #         .rename(columns={"value": "waterbody"})
-        #         .set_index("key")
-        #     )
+        Returns
+        -------
+        dict
+            {virtual_seg_id: {"results": [q0, 0.0, 0.0, q1, 0.0, 0.0, ...]}}
+        """
+        fvd_interorder = {}
+        if self._upstream_inflow_df is None or not self._nexus_virtual_seg_ids:
+            return fvd_interorder
 
-        #     self._waterbody_df = self.waterbody_dataframe.rename(index=update_dict).sort_index()
-        #     self._dataframe = self.dataframe.replace({"waterbody": update_dict})
+        # Precompute qlat indices for all routing timesteps
+        qlat_idx = np.arange(nts) // qts_subdivisions
 
-        #     # FIXME temp solution for missing waterbody info in hydrofabric
-        #     self.bandaid()
+        for target_link_id, virtual_seg_id in self._nexus_virtual_seg_ids.items():
+            row = self._upstream_inflow_df.loc[target_link_id].to_numpy(dtype=float)
 
-        #     wbody_conn = self.dataframe[["waterbody"]].dropna().astype(int).reset_index()
+            # Clamp indices to last qlat step
+            idx = np.minimum(qlat_idx, len(row) - 1)
 
-        #     self._waterbody_connections = (
-        #         wbody_conn[wbody_conn["waterbody"].isin(self.waterbody_dataframe.index)]
-        #         .set_index("key")["waterbody"]
-        #         .to_dict()
-        #     )
+            q_series = row[idx]
 
-        #     # if waterbodies are being simulated, adjust the connections graph so that
-        #     # waterbodies are collapsed to single nodes. Also, build a mapping between
-        #     # waterbody outlet segments and lake ids
-        #     break_network_at_waterbodies = self.waterbody_parameters.get("break_network_at_waterbodies", False)
-        #     if break_network_at_waterbodies:
-        #         self._connections, self._link_lake_crosswalk = replace_waterbodies_connections(
-        #             self.connections, self.waterbody_connections
-        #         )
-        #     else:
-        #         self._link_lake_crosswalk = None
+            # Velocity and depth are set to 0 because the MC kernel
+            # only sums flow (index 0) from upstream segments when
+            # computing q_up; velocity and depth are never propagated
+            # across segment boundaries.
+            results = np.zeros(nts * 3, dtype=float)
+            results[0::3] = q_series
 
-        #     # Add lat, lon, and crs columns for LAKEOUT files:
-        #     lakeout = self.output_parameters.get("lakeout_output", None)
-        #     if lakeout:
-        #         lat_lon_crs = lakes[["hl_link", "hl_reference", "geometry"]].rename(columns={"hl_link": "lake_id"})
-        #         lat_lon_crs = lat_lon_crs[lat_lon_crs["hl_reference"] == "WBOut"]
-        #         lat_lon_crs["lake_id"] = lat_lon_crs.lake_id.astype(float).astype(int)
-        #         lat_lon_crs = lat_lon_crs.set_index("lake_id").drop_duplicates().sort_index()
-        #         lat_lon_crs = lat_lon_crs[lat_lon_crs.index.isin(self.waterbody_dataframe.index)]
-        #         lat_lon_crs = lat_lon_crs.to_crs(crs=4326)
-        #         lat_lon_crs["lon"] = lat_lon_crs.geometry.x
-        #         lat_lon_crs["lat"] = lat_lon_crs.geometry.y
-        #         lat_lon_crs["crs"] = str(lat_lon_crs.crs)
-        #         lat_lon_crs = lat_lon_crs[["lon", "lat", "crs"]]
-
-        #         self._waterbody_df = self.waterbody_dataframe.join(lat_lon_crs)
-        #     else:
-        #         self._waterbody_df["lon"] = np.nan
-        #         self._waterbody_df["lat"] = np.nan
-        #         self._waterbody_df["crs"] = np.nan
-
-        #     # Add the Great Lakes to the connections dictionary and waterbody dataframe
-        #     nexus["WBOut_id"] = nexus["hl_uri"].str.extract(r"WBOut-(\d+)").astype(float)
-        #     great_lakes_df = nexus[nexus["WBOut_id"].isin([4800002, 4800004, 4800006, 4800007])][["WBOut_id", "toid"]]
-        #     if not great_lakes_df.empty:
-        #         great_lakes_df["toid"] = great_lakes_df["toid"].str.extract(r"wb-(\d+)").astype(float)
-        #         great_lakes_df = great_lakes_df.astype(int)
-        #         great_lakes_df["toid"] = great_lakes_df["toid"].apply(lambda x: [x])
-        #         gl_dict = great_lakes_df.set_index("WBOut_id")["toid"].to_dict()
-        #         self._connections.update(gl_dict)
-
-        #         gl_wbody_df = pd.DataFrame(
-        #             data=np.ones([len(gl_dict), self.waterbody_dataframe.shape[1]]),
-        #             index=gl_dict.keys(),
-        #             columns=self.waterbody_dataframe.columns,
-        #         )
-        #         gl_wbody_df.index.name = self.waterbody_dataframe.index.name
-
-        #         self._waterbody_df = pd.concat([self.waterbody_dataframe, gl_wbody_df]).sort_index()
-
-        #         self._gl_climatology_df = get_great_lakes_climatology()
-
-        #     else:
-        #         gl_dict = {}
-        #         self._gl_climatology_df = pd.DataFrame()
-
-        #     self._waterbody_types_df = pd.DataFrame(
-        #         data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
-        #     ).sort_index()
-
-        #     # Add Great Lakes waterbody type (6)
-        #     self._waterbody_types_df.loc[gl_dict.keys(), "reservoir_type"] = 6
-
-        #     self._waterbody_type_specified = True
-
-        # else:
-        self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
-            "reservoir_persistence_usgs"
-        ] = False
-        self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
-            "reservoir_persistence_usace"
-        ] = False
-        self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
-            "reservoir_persistence_usbr"
-        ] = False
-        self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
-            "reservoir_persistence_canada"
-        ] = False
-        self.data_assimilation_parameters["reservoir_da"]["reservoir_rfc_da"]["reservoir_rfc_forecasts"] = False
-        self.waterbody_parameters["break_network_at_waterbodies"] = False
-
-        self._waterbody_df = pd.DataFrame()
-        self._waterbody_types_df = pd.DataFrame()
-        self._waterbody_connections = {}
-        self._waterbody_type_specified = False
-        self._link_lake_crosswalk = None
-        self._duplicate_ids_df = pd.DataFrame()
-
-
-    def preprocess_data_assimilation(
-        self, 
-        flowpaths, 
-        reference_flowpaths, 
-        virtual_flowpaths, 
-        virtual_nexus,
-        waterbodies,
-        gages
-    ):
-        # TODO enable DA methods
-        # gages_df = network[["id", "hl_uri", "hydroseq"]].drop_duplicates()
-        # # clear out missing values
-        # gages_df = gages_df[~gages_df["hl_uri"].isnull()]
-        # gages_df = gages_df[~gages_df["hydroseq"].isnull()]
-        # # make 'id' an integer
-        # gages_df["id"] = gages_df["id"].str.split("-", expand=True).loc[:, 1].astype(float).astype(int)
-        # # split the hl_uri column into type and value
-        # gages_df[["type", "value"]] = gages_df.hl_uri.str.split("-", expand=True, n=1)
-        # # filter for 'Gages' only
-        # gages_df = gages_df[gages_df["type"].isin(["gages", "nid", "usbr"])]
-        # # Some IDs have multiple gages associated with them. This will expand the dataframe so
-        # # there is a unique row per gage ID. Also adds lake ids to the dataframe for creating
-        # # lake-gage crosswalk dataframes.
-        # gages_df = gages_df[["id", "value", "hydroseq", "type"]]
-        # gages_df["value"] = gages_df.value.str.split(" ")
-        # gages_df = (
-        #     gages_df.explode(column="value")
-        #     .set_index("id")
-        #     .join(pd.DataFrame().from_dict(self.waterbody_connections, orient="index", columns=["lake_id"]))
-        # )
-        # # transform dataframe into a dictionary where key is segment ID and value is gage ID
-        # usgs_ind = gages_df.value.str.isnumeric()  # usgs gages used for streamflow DA
-        # # Use hydroseq information to determine furthest downstream gage when multiple are present.
-        # idx_id = gages_df.index.name
-        # if not idx_id:
-        #     idx_id = "index"
-        # self._gages = (
-        #     gages_df.loc[usgs_ind]
-        #     .reset_index()
-        #     .sort_values("hydroseq")
-        #     .drop_duplicates(["value"], keep="last")
-        #     .set_index(idx_id)[["value"]]
-        #     .rename(columns={"value": "gages"})
-        #     .rename_axis(None, axis=0)
-        #     .to_dict()
-        # )
-
-        # # FIXME: temporary solution, add canadian gage crosswalk dataframe. This should come from
-        # # the hydrofabric.
-        # self._canadian_gage_link_df = pd.DataFrame(columns=["gages", "link"]).set_index("link")
-
-        # # Find furthest downstream gage and create our lake_gage_df to make crosswalk dataframes.
-        # lake_gage_hydroseq_df = gages_df[~gages_df["lake_id"].isnull()][["lake_id", "value", "hydroseq", "type"]].rename(
-        #     columns={"value": "gages"}
-        # )
-        # lake_gage_hydroseq_df["lake_id"] = lake_gage_hydroseq_df["lake_id"].astype(int)
-        # lake_gage_df = lake_gage_hydroseq_df[["lake_id", "gages", "type"]].drop_duplicates()
-        # lake_gage_hydroseq_df = (
-        #     lake_gage_hydroseq_df.groupby(["lake_id", "gages", "type"]).max("hydroseq").reset_index().set_index("lake_id")
-        # )
-
-        # # FIXME: temporary solution, handles USGS and USACE reservoirs. Need to update for
-        # # RFC reservoirs...
-        # # NOTE: In the event a lake ID has multiple gages, this also finds the gage furthest
-        # # downstream (based on hydroseq) separately for USGS and USACE crosswalks.
-        # usgs_ind = lake_gage_df.gages.str.isnumeric()
-        # self._usgs_lake_gage_crosswalk = (
-        #     lake_gage_df.loc[usgs_ind]
-        #     .drop("type", axis=1)  # dropping type to ensure no dups when merging
-        #     .rename(columns={"lake_id": "usgs_lake_id", "gages": "usgs_gage_id"})
-        #     .set_index("usgs_lake_id")
-        #     .merge(
-        #         lake_gage_hydroseq_df.rename_axis("usgs_lake_id").rename(columns={"gages": "usgs_gage_id"}),
-        #         on=["usgs_lake_id", "usgs_gage_id"],
-        #     )
-        #     .sort_values(["usgs_gage_id", "hydroseq"])
-        #     .groupby("usgs_lake_id")
-        #     .last()
-        #     .drop("hydroseq", axis=1)
-        # )
-
-        # self._usace_lake_gage_crosswalk = (
-        #     lake_gage_df.loc[~usgs_ind]
-        #     .drop("type", axis=1)  # dropping type to ensure no dups when merging
-        #     .rename(columns={"lake_id": "usace_lake_id", "gages": "usace_gage_id"})
-        #     .set_index("usace_lake_id")
-        #     .merge(
-        #         lake_gage_hydroseq_df.rename_axis("usace_lake_id").rename(columns={"gages": "usace_gage_id"}),
-        #         on=["usace_lake_id", "usace_gage_id"],
-        #     )
-        #     .sort_values(["usace_gage_id", "hydroseq"])
-        #     .groupby("usace_lake_id")
-        #     .last()
-        #     .drop("hydroseq", axis=1)
-        # )
-
-        # # Using the USBR type to set the crosswalk
-        # self._usbr_lake_gage_crosswalk = (
-        #     lake_gage_df[lake_gage_df["type"] == "usbr"]
-        #     .drop("type", axis=1)  # dropping type to ensure no dups when merging
-        #     .rename(columns={"lake_id": "usbr_lake_id", "gages": "usbr_gage_id"})
-        #     .set_index("usbr_lake_id")
-        #     .merge(
-        #         lake_gage_hydroseq_df.rename_axis("usbr_lake_id").rename(columns={"gages": "usbr_gage_id"}),
-        #         on=["usbr_lake_id", "usbr_gage_id"],
-        #     )
-        #     .sort_values(["usbr_gage_id", "hydroseq"])
-        #     .groupby("usbr_lake_id")
-        #     .last()
-        #     .drop("hydroseq", axis=1)
-        # )
-
-        # # Set waterbody types if DA is turned on:
-        # usgs_da = (
-        #     self.data_assimilation_parameters.get("reservoir_da", {})
-        #     .get("reservoir_persistence_da", {})
-        #     .get("reservoir_persistence_usgs", False)
-        # )
-        # usace_da = (
-        #     self.data_assimilation_parameters.get("reservoir_da", {})
-        #     .get("reservoir_persistence_da", {})
-        #     .get("reservoir_persistence_usace", False)
-        # )
-        # usbr_da = (
-        #     self.data_assimilation_parameters.get("reservoir_da", {})
-        #     .get("reservoir_persistence_da", {})
-        #     .get("reservoir_persistence_usbr", False)
-        # )
-        # rfc_da = (
-        #     self.data_assimilation_parameters.get("reservoir_da", {})
-        #     .get("reservoir_rfc_da", {})
-        #     .get("reservoir_rfc_forecasts", False)
-        # )
-        # # NOTE: The order here matters. Some waterbody IDs have both a USGS gage designation and
-        # # a NID ID used for USACE gages. It seems the USGS gages should take precedent (based on
-        # # gages in timeslice files), so setting type 2 reservoirs second should overwrite type 3
-        # # designations
-        # # FIXME: Related to FIXME above, but we should re-think how to handle waterbody_types...
-        # if usbr_da:
-        #     self._waterbody_types_df.loc[self._usace_lake_gage_crosswalk.index, "reservoir_type"] = 7
-        # if usace_da:
-        #     self._waterbody_types_df.loc[self._usace_lake_gage_crosswalk.index, "reservoir_type"] = 3
-        # if usgs_da:
-        #     self._waterbody_types_df.loc[self._usgs_lake_gage_crosswalk.index, "reservoir_type"] = 2
-        # if rfc_da:
-        #     # FIXME: Temporary fix, load predefined rfc lake gage crosswalk info for rfc reservoirs.
-        #     # Replace relevant waterbody_types as type 4.
-        #     rfc_lake_gage_crosswalk = get_rfc_lake_gage_crosswalk().reset_index()
-        #     self._rfc_lake_gage_crosswalk = rfc_lake_gage_crosswalk[
-        #         rfc_lake_gage_crosswalk["rfc_lake_id"].isin(self.waterbody_dataframe.index)
-        #     ].set_index("rfc_lake_id")
-        #     self._waterbody_types_df.loc[self._rfc_lake_gage_crosswalk.index, "reservoir_type"] = 4
-        # else:
-        #     self._rfc_lake_gage_crosswalk = pd.DataFrame()
-        self._gages = {}
-        self._usgs_lake_gage_crosswalk = pd.DataFrame()
-        self._usace_lake_gage_crosswalk = pd.DataFrame()
-        self._usbr_lake_gage_crosswalk = pd.DataFrame()
-        self._rfc_lake_gage_crosswalk = pd.DataFrame()
+            fvd_interorder[virtual_seg_id] = {"results": results.tolist()}
+        return fvd_interorder
 
     def build_qlateral_array(
         self,
@@ -1076,16 +487,34 @@ class NHF(AbstractNetwork):
                 # lateral flows [m^3/s] indexed by div_id (divide/catchment)
                 div_lateralflows_df = pd.concat(dfs, axis=1)
 
-                # Distribute to downstream flowpaths for routing, keep virtual_fp_id for flow scaling
-                nexus_to_downstream_fp = dict(zip(
-                    self._dataframe['up_virtual_nex_id'].dropna().astype(int),
-                    self._dataframe.loc[self._dataframe['up_virtual_nex_id'].notna()].index
-                ))
-                qlats_df, self._flow_scaling_segment_df = distribute_qlateral_to_virtual_flowpaths(
-                    div_lateralflows_df,
-                    self._dataframe,
-                    nexus_to_downstream_fp,
-                )
+                # Clean up virtual segments from previous loop before building new mappings
+                if self._nexus_virtual_seg_ids:
+                    old_vseg_ids = set(self._nexus_virtual_seg_ids.values())
+                    self._links_df = self._links_df.drop(
+                        index=[i for i in old_vseg_ids if i in self._links_df.index]
+                    )
+                    if self._q0 is not None:
+                        self._q0 = self._q0.drop(
+                            index=[i for i in old_vseg_ids if i in self._q0.index]
+                        )
+                    for vseg_id in old_vseg_ids:
+                        self._connections.pop(vseg_id, None)
+                    self._nexus_virtual_seg_ids = {}
+
+                # Distribute catchment discharge to links and upstream inflow
+                qlats_df, self._flow_scaling_segment_df, self._upstream_inflow_df = \
+                    distribute_catchment_discharge(
+                        div_lateralflows_df,
+                        self._dataframe,
+                        self._links_df,
+                        self._nodes_df,
+                        self._reference_flowpaths,
+                        self._fp_to_dn_nex,
+                        self._nex_to_dn_fp,
+                    )
+
+                # Create virtual segments for upstream inflow injection
+                self._create_upstream_virtual_segments(self._upstream_inflow_df)
         else:
             raise ValueError("qlat_input_folder does not exist")
         all_df = pd.DataFrame(
@@ -1127,16 +556,16 @@ class NHF(AbstractNetwork):
             self._dataframe.index.values
         ))
         keys = np.array([mapping_dict[key] for key in ds_AET[col_idx].values])
-        
+
         time_strings = pd.to_datetime(ds_AET.time.values).strftime('%Y%m%d%H%M')
         aet_df = pd.DataFrame(
             data=ds_AET.values,
             index=keys,
             columns=time_strings
         )
-        
+
         aet_df.index.name = 'key'
-        ordered_aet_df = aet_df.reindex(self._dataframe.index, fill_value=0) # ordering based on the existing 
+        ordered_aet_df = aet_df.reindex(self._dataframe.index, fill_value=0) # ordering based on the existing
 
         # Convert ET into ELOSS
         try:
@@ -1149,48 +578,6 @@ class NHF(AbstractNetwork):
         except KeyError as e:
             raise KeyError("Cannot find flowpath attributes to map PET. Can you ensure ") from e
         self._eloss = ELOSS_cfs
-
-    ######################################################################
-    # FIXME Temporary solution to hydrofabric issues.
-    def bandaid(
-        self,
-    ):
-        # Identify waterbody IDs that have problematic data. There are underlying stream
-        # segments that should be referenced to the waterbody ID, but are not. This causes
-        # our connections dictionary to have multiple downstream segments for waterbodies which
-        # is not allowed:
-        conn_df = self.dataframe.reset_index()[["key", "downstream"]]
-        lake_id = self.waterbody_dataframe.index.unique()
-
-        wbody_conn_df = self.dataframe["waterbody"].dropna().astype(int).reset_index()
-        wbody_conn_df = wbody_conn_df[wbody_conn_df["waterbody"].isin(lake_id)]
-
-        conn_df2 = (
-            conn_df.merge(wbody_conn_df, on="key", how="left")
-            .assign(key=lambda x: x["waterbody"].fillna(x["key"]))
-            .drop("waterbody", axis=1)
-            .merge(wbody_conn_df.rename(columns={"key": "downstream"}), on="downstream", how="left")
-            .assign(downstream=lambda x: x["waterbody"].fillna(x["downstream"]))
-            .drop("waterbody", axis=1)
-            .drop_duplicates()
-            .query("key != downstream")
-            .astype(int)
-        )
-
-        # Find missing segments
-        bad_lake_ids = conn_df2.loc[conn_df2.duplicated(subset=["key"])].key.unique()
-        # Drop waterbodies that are problematic. Instead t-route will simply treat them as
-        # flowpaths and run MC routing.
-        self._waterbody_df = self.waterbody_dataframe.drop(bad_lake_ids)
-
-        # This chunk replaces waterbody_id 1711354 with 1710676. I don't know where the
-        # former came from, but the latter is listed in the flowpath_attributes table
-        # and exists in NWMv2.1 LAKEPARM file. See hydrofabric github issue 16:
-        # https://github.com/NOAA-OWP/hydrofabric/issues/16
-        self._dataframe["waterbody"] = self._dataframe["waterbody"].replace("1711354", "1710676")
-        self._waterbody_df.rename(index={1711354: 1710676}, inplace=True)
-
-    #######################################################################
 
     def write_preprocessed_data(
         self,
@@ -1247,138 +634,13 @@ class NHF(AbstractNetwork):
             self._rfc_lake_gage_crosswalk = inputs.get("rfc_lake_gage_crosswalk", None)
 
 
-def read_file(file_name):
-    extension = file_name.suffix
-    if extension == ".csv":
-        df = pd.read_csv(file_name)
-    elif extension == ".parquet":
-        df = pq.read_table(file_name).to_pandas().reset_index()
-        df.index.name = None
-    elif extension == ".nc":
-        nc = xr.open_dataset(file_name)
-        ts = str(nc.get("time").values)
-        df = nc.to_pandas().reset_index()[["feature_id", "q_lateral"]]
-        df.rename(columns={"q_lateral": f"{ts}"}, inplace=True)
-        df.index.name = None
-
-    return df
-
-
-def tailwaters(N):
-    """
-    Find network tailwaters
-
-    Arguments
-    ---------
-    N (dict, int: [int]): Network connections graph
-
-    Returns
-    -------
-    (iterable): tailwater segments
-
-    Notes
-    -----
-    - If reverse connections graph is handed as input, then function
-      will return network headwaters.
-
-    """
-    tw = chain.from_iterable(N.values()) - N.keys()
-    for m, n in N.items():
-        if not n:
-            tw.add(m)
-    return tw
-
-
-def reservoir_shore(connections, waterbody_nodes):
-    wbody_set = set(waterbody_nodes)
-    not_in = lambda x: x not in wbody_set
-
-    shore = set()
-    for node in wbody_set:
-        shore.update(filter(not_in, connections[node]))
-    return list(shore)
-
-
-def reservoir_boundary(connections, waterbodies, n):
-    if n not in waterbodies and n in connections:
-        return any(x in waterbodies for x in connections[n])
-    return False
-
-
-def reverse_surjective_mapping(d):
-    rd = defaultdict(list)
-    for src, dst in d.items():
-        rd[dst].append(src)
-    rd.default_factory = None
-    return rd
-
-
-def separate_waterbodies(connections, waterbodies):
-    waterbody_nodes = {}
-    for wb, nodes in reverse_surjective_mapping(waterbodies).items():
-        waterbody_nodes[wb] = net = {}
-        for n in nodes:
-            if n in connections:
-                net[n] = list(filter(waterbodies.__contains__, connections[n]))
-    return waterbody_nodes
-
-
-def replace_waterbodies_connections(connections, waterbodies):
-    """
-    Use a single node to represent waterbodies. The node id is the
-    waterbody id. Create a cross walk dictionary that relates lake_ids
-    to the terminal segments within the waterbody footprint.
-
-    Arguments
-    ---------
-    - connections (dict):
-    - waterbodies (dict): dictionary relating segment linkIDs to the
-                          waterbody lake_id that they lie in
-
-    Returns
-    -------
-    - new_conn  (dict): connections dictionary with waterbodies represented by single nodes.
-                        Waterbody node ids are lake_ids
-    - link_lake (dict): cross walk dictionary where keys area lake_ids and values are lists
-                        of waterbody tailwater nodes (i.e. the nodes connected to the
-                        waterbody outlet).
-    """
-    new_conn = {}
-    link_lake = {}
-    waterbody_nets = separate_waterbodies(connections, waterbodies)
-    rconn = reverse_network(connections)
-
-    for n in connections:
-        if n in waterbodies:
-            wbody_code = waterbodies[n]
-            if wbody_code in new_conn:
-                continue
-
-            # get all nodes from waterbody
-            wbody_nodes = [k for k, v in waterbodies.items() if v == wbody_code]
-            outgoing = reservoir_shore(connections, wbody_nodes)
-            new_conn[wbody_code] = outgoing
-
-            if len(outgoing) >= 1:
-                if outgoing[0] in waterbodies:
-                    new_conn[wbody_code] = [waterbodies.get(outgoing[0])]
-                link_lake[wbody_code] = list(set(rconn[outgoing[0]]).intersection(set(wbody_nodes)))[0]
-            else:
-                subset_dict = {key: value for key, value in connections.items() if key in wbody_nodes}
-                link_lake[wbody_code] = list(tailwaters(subset_dict))[0]
-
-        elif reservoir_boundary(connections, waterbodies, n):
-            # one of the children of n is a member of a waterbody
-            # replace that child with waterbody code.
-            new_conn[n] = []
-
-            for child in connections[n]:
-                if child in waterbodies:
-                    new_conn[n].append(waterbodies[child])
-                else:
-                    new_conn[n].append(child)
-        else:
-            # copy to new network unchanged
-            new_conn[n] = connections[n]
-
-    return new_conn, link_lake
+# Re-exports for backward compatibility
+from troute.nhf_topology import (
+    build_downstream_connections,
+    build_upstream_terminal,
+    find_headwaters,
+    find_tailwaters,
+    get_terminal_nexus_ids,
+    validate_connections,
+)
+from troute.nhf_discretize import distribute_catchment_discharge

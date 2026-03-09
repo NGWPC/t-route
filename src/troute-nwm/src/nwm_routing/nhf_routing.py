@@ -181,7 +181,7 @@ def nhf_routing(argv):
         
         route_start_time = time.time()
 
-        routing_df = network.dataframe[network.dataframe["routing_segment"]][[
+        routing_df = network.links_df[[
             "n",
             "mainstem_lp",
             "topwdth",
@@ -206,11 +206,13 @@ def nhf_routing(argv):
         })
         routing_df["dx"] = routing_df["dx"] * 1000  # converted to meters
 
+        # Build flowveldepth_interorder for upstream inflow virtual segments
+        flowveldepth_interorder = network.build_flowveldepth_interorder(nts, qts_subdivisions)
 
         run_results, subnetwork_list = nwm_route(
-            network.connections, 
-            network.reverse_network, 
-            network.waterbody_connections, 
+            network.connections,
+            network.reverse_network,
+            network.waterbody_connections,
             network.reaches_by_tailwater,
             parallel_compute_method,
             compute_kernel,
@@ -220,7 +222,7 @@ def nhf_routing(argv):
             dt,
             nts,
             qts_subdivisions,
-            network.independent_networks, 
+            network.independent_networks,
             routing_df, # only routing where there are routing segments
             network.q0,
             network._qlateral,
@@ -254,7 +256,8 @@ def nhf_routing(argv):
             network.coastal_boundary_depth_df,
             network.unrefactored_topobathy_df,
             firstRun,
-            logFileName            
+            logFileName,
+            flowveldepth_interorder=flowveldepth_interorder,
         )
         
         route_end_time = time.time()
