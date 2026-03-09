@@ -11,6 +11,17 @@ uv pip install -r requirements.txt
 uv run python -m nwm_routing -V5 -f test_case.yaml
 ```
 
+## BMI Path
+
+The test case can also be run via the BMI interface, which simulates how ngen would drive t-route:
+
+```sh
+cd test/nhf/conecuh_case
+uv run python run_bmi.py
+```
+
+This uses `test_case_bmi.yaml` (sets `network_type: NHF` and `qts_subdivisions: 1` since forcing is fed per-dt via BMI).
+
 # Streamflow Attribution
 
 Streamflow estimates in the `channel_forcing/` folder were obtained from the following paper/dataset:

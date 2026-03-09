@@ -40,6 +40,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         "_nex_to_dn_fp",
         "_upstream_inflow_df",
         "_nexus_virtual_seg_ids",
+        "_fp_outlet_crosswalk",
     ]
 
     def __init__(
@@ -84,37 +85,25 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             raise NotImplementedError("Preprocessed data reads not implemented")
             # self.read_preprocessed_data()
         else:
-            # FIXME: Temporary solution, from_files should only be from command line.
-            # Update this once ngen framework is capable of providing this info via BMI.
-            from_files_copy = from_files
-            if not from_files_copy:
-                from_files = True
-            if from_files:
-                nhf = read_geo_file(
-                    self.supernetwork_parameters,
-                    self.waterbody_parameters,
-                    self.compute_parameters,
-                    self.compute_parameters.get("cpu_pool", 1),
-                )
+            # NHF always reads topology from .gpkg files, even in BMI mode.
+            # The ngen framework provides only qlat data via BMI; network
+            # geometry comes from the geopackage specified in supernetwork_parameters.
+            nhf = read_geo_file(
+                self.supernetwork_parameters,
+                self.waterbody_parameters,
+                self.compute_parameters,
+                self.compute_parameters.get("cpu_pool", 1),
+            )
 
-                # Handle different key column names between flowpaths and flowpath_attributes
-                flowpaths = nhf["flowpaths"]
-                waterbodies = nhf["waterbodies"]
-                gages = nhf["gages"]
-                reference_flowpaths = nhf["reference_flowpaths"]
-                virtual_flowpaths = nhf["virtual_flowpaths"]
-                virtual_nexus = nhf["virtual_nexus"]
-                nexus = nhf["nexus"]
-                hydrolocations = nhf["hydrolocations"]
-            else:
-                raise NotImplementedError("BMI loading not implemented for the NHF")
-                # flowpaths, lakes, network = load_bmi_data(
-                #     value_dict,
-                #     bmi_parameters,
-                # )
-            # FIXME: See FIXME above.
-            if not from_files_copy:
-                from_files = False
+            # Handle different key column names between flowpaths and flowpath_attributes
+            flowpaths = nhf["flowpaths"]
+            waterbodies = nhf["waterbodies"]
+            gages = nhf["gages"]
+            reference_flowpaths = nhf["reference_flowpaths"]
+            virtual_flowpaths = nhf["virtual_flowpaths"]
+            virtual_nexus = nhf["virtual_nexus"]
+            nexus = nhf["nexus"]
+            hydrolocations = nhf["hydrolocations"]
 
             # Preprocess network objects
             discretization_len = self.supernetwork_parameters.get("nhf_discretization_len", 300.0)
@@ -207,6 +196,33 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
     def links_df(self):
         return self._links_df
 
+    @property
+    def fp_outlet_crosswalk(self):
+        """Map outlet link_id -> fp_id for reindexing outputs."""
+        if not hasattr(self, '_fp_outlet_crosswalk') or self._fp_outlet_crosswalk is None:
+            self._fp_outlet_crosswalk = {}
+            for fp_id, dn_nex in self._fp_to_dn_nex.items():
+                # Find the link belonging to this fp whose dn_node_id matches the fp's downstream nexus
+                mask = (self._links_df['fp_id'] == fp_id) & (self._links_df['dn_node_id'] == dn_nex)
+                matches = self._links_df.index[mask]
+                if len(matches) > 0:
+                    self._fp_outlet_crosswalk[matches[0]] = fp_id
+        return self._fp_outlet_crosswalk
+
+    def new_q0(self, run_results):
+        """Override to add zero-valued q0 rows for virtual segments.
+
+        Virtual segments are offnetwork_upstreams whose flow comes from
+        flowveldepth_interorder, so they never appear in run_results.
+        """
+        super().new_q0(run_results)
+        if self._nexus_virtual_seg_ids:
+            vseg_ids = list(self._nexus_virtual_seg_ids.values())
+            vseg_q0 = pd.DataFrame(
+                0.0, index=vseg_ids, columns=self._q0.columns, dtype="float32",
+            )
+            self._q0 = pd.concat([self._q0, vseg_q0])
+        return self._q0
 
     def preprocess_network(
         self, flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus,
@@ -287,6 +303,12 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         self._upstream_inflow_df = None
         self._nexus_virtual_seg_ids = {}
 
+        # Create static virtual segments for all upstream inflow injection
+        # points.  This must happen before validation and before any forcing
+        # assembly so that _connections (and therefore rconn / subnetwork_list)
+        # never change between loops.
+        self._create_static_virtual_segments()
+
         # Validate link connections
         is_valid, orphaned = validate_connections(self._connections)
         if not is_valid:
@@ -318,33 +340,44 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # to the model engine/coastal models
         self._nexus_latlon = virtual_nexus
 
-    def _create_upstream_virtual_segments(self, upstream_inflow_df):
+    def _create_static_virtual_segments(self):
         """
-        Create virtual segments for upstream inflow injection via offnetwork_upstreams.
+        Create virtual segments for ALL upstream inflow injection points.
 
-        For each target link that has nonzero upstream inflow, create a virtual
-        segment that will carry the pre-filled flow-velocity-depth timeseries.
-        Virtual segments are added to _connections (flowing into the target link),
-        and to _links_df (with channel params inherited from the target link).
+        Injection points are determined purely from the network topology:
+          1. Terminal virtual nexus targets — the link downstream of each
+             terminal nexus node (where a VFP meets the main channel).
+          2. Remainder-flow targets — the most-upstream link of each
+             downstream flowpath (where the un-VFP'd remainder enters).
 
-        On repeated calls (multi-loop runs), previous virtual segments are
-        removed before creating new ones.
-
-        Parameters
-        ----------
-        upstream_inflow_df : pd.DataFrame
-            Upstream inflow indexed by target link_id, columns are timestamps.
+        Virtual segments are created once during __init__ and never removed,
+        so that _connections (and therefore rconn / subnetwork_list) stay
+        stable across forcing loops.
         """
-        # Find target links with nonzero flow
-        nonzero_mask = upstream_inflow_df.abs().sum(axis=1) > 1e-10
-        target_links = upstream_inflow_df.index[nonzero_mask]
+        target_link_ids = set()
 
-        if target_links.empty:
-            self._nexus_virtual_seg_ids = {}
-            # Invalidate cached network properties
-            self._reverse_network = None
-            self._independent_networks = None
-            self._reaches_by_tw = None
+        # (1) Terminal nexus targets: dn_link_id for each terminal nexus node
+        if not self._nodes_df.empty:
+            tnex = self._nodes_df[self._nodes_df['is_terminal_nexus']]
+            if not tnex.empty:
+                target_link_ids.update(tnex['dn_link_id'].dropna().astype(int))
+
+        # (2) Remainder-flow targets: most-upstream link of each downstream fp
+        fp_to_first_link = {}
+        for lid, row in self._links_df[self._links_df['up_node_id'].isna()].iterrows():
+            fp_to_first_link[int(row['fp_id'])] = lid
+
+        for fp_id, dn_nex in self._fp_to_dn_nex.items():
+            dn_fp = self._nex_to_dn_fp.get(dn_nex)
+            if dn_fp is not None:
+                first_link = fp_to_first_link.get(dn_fp)
+                if first_link is not None:
+                    target_link_ids.add(int(first_link))
+
+        # Filter to links that actually exist in _links_df
+        target_link_ids = sorted(target_link_ids & set(self._links_df.index))
+
+        if not target_link_ids:
             return
 
         # Generate virtual segment IDs above existing ID space
@@ -354,7 +387,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         virtual_seg_ids = {}
         virtual_link_records = []
 
-        for target_link_id in target_links:
+        for target_link_id in target_link_ids:
             virtual_seg_id = next_id
             next_id += 1
             virtual_seg_ids[int(target_link_id)] = virtual_seg_id
@@ -386,21 +419,6 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             self._links_df = pd.concat([self._links_df, virtual_df])
 
         self._nexus_virtual_seg_ids = virtual_seg_ids
-
-        # Add q0 entries for virtual segments (zeros; kernel pre-fills from FVD)
-        if self._q0 is not None:
-            vseg_q0 = pd.DataFrame(
-                0.0,
-                index=list(virtual_seg_ids.values()),
-                columns=self._q0.columns,
-                dtype="float32",
-            )
-            self._q0 = pd.concat([self._q0, vseg_q0])
-
-        # Invalidate cached network properties so they recompute with virtual segments
-        self._reverse_network = None
-        self._independent_networks = None
-        self._reaches_by_tw = None
 
     def build_flowveldepth_interorder(self, nts, qts_subdivisions):
         """
@@ -487,34 +505,22 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
                 # lateral flows [m^3/s] indexed by div_id (divide/catchment)
                 div_lateralflows_df = pd.concat(dfs, axis=1)
 
-                # Clean up virtual segments from previous loop before building new mappings
-                if self._nexus_virtual_seg_ids:
-                    old_vseg_ids = set(self._nexus_virtual_seg_ids.values())
-                    self._links_df = self._links_df.drop(
-                        index=[i for i in old_vseg_ids if i in self._links_df.index]
-                    )
-                    if self._q0 is not None:
-                        self._q0 = self._q0.drop(
-                            index=[i for i in old_vseg_ids if i in self._q0.index]
-                        )
-                    for vseg_id in old_vseg_ids:
-                        self._connections.pop(vseg_id, None)
-                    self._nexus_virtual_seg_ids = {}
-
-                # Distribute catchment discharge to links and upstream inflow
+                # Distribute catchment discharge to links and upstream inflow.
+                # Exclude virtual segments so fp_to_first_link resolves to
+                # real links (virtual segs share fp_id and up_node_id=None,
+                # which would shadow real first-links and misdirect remainder flow).
+                vseg_ids = set(self._nexus_virtual_seg_ids.values()) if self._nexus_virtual_seg_ids else set()
+                real_links_df = self._links_df.drop(index=list(vseg_ids), errors='ignore')
                 qlats_df, self._flow_scaling_segment_df, self._upstream_inflow_df = \
                     distribute_catchment_discharge(
                         div_lateralflows_df,
                         self._dataframe,
-                        self._links_df,
+                        real_links_df,
                         self._nodes_df,
                         self._reference_flowpaths,
                         self._fp_to_dn_nex,
                         self._nex_to_dn_fp,
                     )
-
-                # Create virtual segments for upstream inflow injection
-                self._create_upstream_virtual_segments(self._upstream_inflow_df)
         else:
             raise ValueError("qlat_input_folder does not exist")
         all_df = pd.DataFrame(
@@ -632,15 +638,3 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             self._usace_lake_gage_crosswalk = inputs.get("usace_lake_gage_crosswalk", None)
             self._usbr_lake_gage_crosswalk = inputs.get("usbr_lake_gage_crosswalk", None)
             self._rfc_lake_gage_crosswalk = inputs.get("rfc_lake_gage_crosswalk", None)
-
-
-# Re-exports for backward compatibility
-from troute.nhf_topology import (
-    build_downstream_connections,
-    build_upstream_terminal,
-    find_headwaters,
-    find_tailwaters,
-    get_terminal_nexus_ids,
-    validate_connections,
-)
-from troute.nhf_discretize import distribute_catchment_discharge

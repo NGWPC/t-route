@@ -9,12 +9,15 @@ from troute.config import Config
 
 from troute.NHDNetwork import NHDNetwork
 from troute.HYFeaturesNetwork import HYFeaturesNetwork
+from troute.NHF import NHF
 from troute.DataAssimilation import DataAssimilation
+from troute.nhf_discretize import distribute_catchment_discharge
 
 import troute.hyfeature_network_utilities as hnu
 
 import nwm_routing.nwm_route as nwm_routing
 from nwm_routing.output import nwm_output_generator
+from nwm_routing.flow_scaling_utils import append_nonrouting_to_run_results
 from nwm_routing.log_level_set import log_level_set
 
 LOG = logging.getLogger("")
@@ -64,8 +67,25 @@ class Model:
                 verbose=self.verbose,
                 showtiming=self.show_timing,
             )
+        elif self.supernetwork_parameters["network_type"] == "NHF":
+            self._network = NHF(
+                supernetwork_parameters=self.supernetwork_parameters,
+                waterbody_parameters=self.waterbody_parameters,
+                data_assimilation_parameters=self.data_assimilation_parameters,
+                restart_parameters=self.restart_parameters,
+                compute_parameters=self.compute_parameters,
+                forcing_parameters=self.forcing_parameters,
+                hybrid_parameters=self.hybrid_parameters,
+                preprocessing_parameters=self.preprocessing_parameters,
+                output_parameters=self.output_parameters,
+                verbose=self.verbose,
+                showtiming=self.show_timing,
+                from_files=True,
+                bmi_parameters=self.bmi_parameters,
+            )
         else:
-            raise Exception("Supernetwork network type must be HYFeaturesNetwork or NHDNetwork")
+            raise Exception("Supernetwork network type must be HYFeaturesNetwork, NHDNetwork, or NHF")
+        self._is_nhf = (self.supernetwork_parameters["network_type"] == "NHF")
         network_creation_time = time.time() - network_start_time
 
         # Data data assimilation
@@ -116,33 +136,84 @@ class Model:
 
 
     def run(self, bmi_values: dict):
+        network = self._network
         nts = self.nts
         qts_subdivisions = self.forcing_parameters.get('qts_subdivisions', 12)
 
         LOG.debug("Assembling forcing dataframe")
         forcing_start_time = time.time()
-        ## setup the qlats dataframe from the update() data
-        qlats = pd.DataFrame(data=self._df_data, index=bmi_values["land_surface_water_source__id"])
-        # Take flowpath ids entering NEXUS and replace NEXUS ids by the upstream flowpath ids
-        qlats = qlats.rename(index=self._network.downstream_flowpath_dict)
-        # create zero values for missing values
-        missing = self._network.segment_index[~self._network.segment_index.isin(qlats.index)]
-        zeros = pd.DataFrame(data=0.0, index=missing, columns=qlats.columns)
-        qlats = pd.concat([qlats, zeros]).sort_index()
+
+        if self._is_nhf:
+            # NHF: BMI IDs are div_ids (catchment IDs); distribute to links
+            div_lateralflows_df = pd.DataFrame(
+                data=self._df_data,
+                index=bmi_values["land_surface_water_source__id"],
+            )
+            vseg_ids = set(network._nexus_virtual_seg_ids.values()) if network._nexus_virtual_seg_ids else set()
+            real_links_df = network._links_df.drop(index=list(vseg_ids), errors='ignore')
+            qlats, network._flow_scaling_segment_df, network._upstream_inflow_df = \
+                distribute_catchment_discharge(
+                    div_lateralflows_df,
+                    network._dataframe,
+                    real_links_df,
+                    network._nodes_df,
+                    network._reference_flowpaths,
+                    network._fp_to_dn_nex,
+                    network._nex_to_dn_fp,
+                )
+            # Fill zeros for missing segments
+            all_df = pd.DataFrame(
+                np.zeros((len(network.segment_index), len(qlats.columns))),
+                index=network.segment_index,
+                columns=qlats.columns,
+            )
+            all_df.loc[qlats.index] = qlats
+            qlats = all_df.sort_index()
+        else:
+            # HYFeatures / NHD: nexus→flowpath rename
+            qlats = pd.DataFrame(data=self._df_data, index=bmi_values["land_surface_water_source__id"])
+            qlats = qlats.rename(index=network.downstream_flowpath_dict)
+            missing = network.segment_index[~network.segment_index.isin(qlats.index)]
+            zeros = pd.DataFrame(data=0.0, index=missing, columns=qlats.columns)
+            qlats = pd.concat([qlats, zeros]).sort_index()
+
         self._timings["forcing_time"] += time.time() - forcing_start_time
 
-        if len(bmi_values["upstream_id"]) > 0:
-            flowveldepth_interorder = {bmi_values['upstream_id'][0]: {"results": bmi_values['upstream_fvd']}}
+        # Build param_df and flowveldepth_interorder
+        if self._is_nhf:
+            # NHF: build routing_df from links_df with column renames + dx in meters
+            param_df = network.links_df[[
+                "n", "mainstem_lp", "topwdth", "slope", "ncc",
+                "btmwdth", "length_km", "musx", "chslp", "topwdthcc", "musk",
+            ]].copy()
+            param_df["alt"] = np.zeros_like(param_df["n"].values)
+            param_df = param_df.rename(columns={
+                "mainstem_lp": "mainstem",
+                "topwdth": "tw",
+                "slope": "s0",
+                "btmwdth": "bw",
+                "length_km": "dx",
+                "chslp": "cs",
+                "topwdthcc": "twcc",
+            })
+            param_df["dx"] = param_df["dx"] * 1000  # convert km to meters
+
+            flowveldepth_interorder = network.build_flowveldepth_interorder(nts, qts_subdivisions)
         else:
-            flowveldepth_interorder = {}
+            param_df = network.dataframe
+
+            if len(bmi_values["upstream_id"]) > 0:
+                flowveldepth_interorder = {bmi_values['upstream_id'][0]: {"results": bmi_values['upstream_fvd']}}
+            else:
+                flowveldepth_interorder = {}
 
         LOG.debug("Starting routing function")
         route_start_time = time.time()
         run_results, self._subnetwork = nwm_routing.nwm_route(
-            downstream_connections=self._network.connections,
-            upstream_connections=self._network.reverse_network,
-            waterbodies_in_connections=self._network.waterbody_connections,
-            reaches_bytw=self._network._reaches_by_tw,
+            downstream_connections=network.connections,
+            upstream_connections=network.reverse_network,
+            waterbodies_in_connections=network.waterbody_connections,
+            reaches_bytw=network._reaches_by_tw,
             parallel_compute_method=self.compute_parameters.get("parallel_compute_method", "serial"),
             compute_kernel=self.compute_parameters.get("compute_kernel"),
             subnetwork_target_size=self.compute_parameters.get('subnetwork_target_size'),
@@ -151,44 +222,56 @@ class Model:
             dt=self.dt,
             nts=nts,
             qts_subdivisions=qts_subdivisions,
-            independent_networks=self._network.independent_networks,
-            param_df=self._network.dataframe,
-            q0=self._network.q0,
+            independent_networks=network.independent_networks,
+            param_df=param_df,
+            q0=network.q0,
             qlats=qlats,
+            eloss_df=network._eloss if network._eloss is not None else pd.DataFrame(0.0, index=qlats.index, columns=qlats.columns),
+            ssout=self.forcing_parameters.get("ssout"),
             usgs_df=self._data_assimilation.usgs_df,
             lastobs_df=self._data_assimilation.lastobs_df,
             reservoir_usgs_df=self._data_assimilation.reservoir_usgs_df,
             reservoir_usgs_param_df=self._data_assimilation.reservoir_usgs_param_df,
             reservoir_usace_df=self._data_assimilation.reservoir_usace_df,
             reservoir_usace_param_df=self._data_assimilation.reservoir_usace_param_df,
+            reservoir_usbr_df=self._data_assimilation.reservoir_usbr_df,
+            reservoir_usbr_param_df=self._data_assimilation.reservoir_usbr_param_df,
             reservoir_rfc_df=self._data_assimilation.reservoir_rfc_df,
             reservoir_rfc_param_df=self._data_assimilation.reservoir_rfc_param_df,
             great_lakes_df=self._data_assimilation.great_lakes_df,
-            great_lakes_param_df=self._data_assimilation.great_lakes_df,
-            great_lakes_climatology_df=self._network.great_lakes_climatology_df,
+            great_lakes_param_df=self._data_assimilation.great_lakes_param_df,
+            great_lakes_climatology_df=network.great_lakes_climatology_df,
             da_parameter_dict=self._data_assimilation.assimilation_parameters,
             assume_short_ts=self.compute_parameters.get('assume_short_ts', False),
             return_courant=self.compute_parameters.get('return_courant', False),
-            waterbodies_df=self._network._waterbody_df,
+            waterbodies_df=network._waterbody_df,
             data_assimilation_parameters=self.waterbody_parameters,
-            waterbody_types_df=self._network._waterbody_types_df,
-            waterbody_type_specified=self._network.waterbody_type_specified,
-            diffusive_network_data=self._network.diffusive_network_data,
-            topobathy_df=self._network.topobathy_df,
-            refactored_diffusive_domain=self._network.refactored_diffusive_domain,
-            refactored_reaches=self._network.refactored_reaches,
+            waterbody_types_df=network._waterbody_types_df,
+            waterbody_type_specified=network.waterbody_type_specified,
+            diffusive_network_data=network.diffusive_network_data,
+            topobathy_df=network.topobathy_df,
+            refactored_diffusive_domain=network.refactored_diffusive_domain,
+            refactored_reaches=network.refactored_reaches,
             subnetwork_list=self._subnetwork,
-            coastal_boundary_depth_df=self._network.coastal_boundary_depth_df,
-            unrefactored_topobathy_df=self._network.unrefactored_topobathy_df,
-            from_files=False,
+            coastal_boundary_depth_df=network.coastal_boundary_depth_df,
+            unrefactored_topobathy_df=network.unrefactored_topobathy_df,
             flowveldepth_interorder=flowveldepth_interorder,
         )
         self._timings["route_time"] = time.time() - route_start_time
 
+        # NHF: append non-routing segment flow scaling to run results
+        if self._is_nhf:
+            run_results = append_nonrouting_to_run_results(
+                run_results,
+                network._flow_scaling_segment_df,
+                qts_subdivisions,
+                nts,
+            )
+
         # create initial conditions for next loop iteration
-        self._network.new_q0(run_results)
-        self._network.update_waterbody_water_elevation()
-        
+        network.new_q0(run_results)
+        network.update_waterbody_water_elevation()
+
         # update reservoir parameters and lastobs_df
         self._data_assimilation.update_after_compute(run_results, self.dt * nts)
 
@@ -210,15 +293,17 @@ class Model:
             qts_subdivisions=qts_subdivisions,
             return_courant=self.compute_parameters.get("return_courant", False),
             cpu_pool=self.cpu_pool,
-            waterbodies_df=self._network.waterbody_dataframe,
-            waterbody_types_df=self._network.waterbody_types_dataframe,
-            duplicate_ids_df=getattr(self._network, "_duplicate_ids_df", pd.DataFrame()),
+            waterbodies_df=network.waterbody_dataframe,
+            waterbody_types_df=network.waterbody_types_dataframe,
+            duplicate_ids_df=getattr(network, "_duplicate_ids_df", pd.DataFrame()),
             data_assimilation_parameters=self.data_assimilation_parameters,
             lastobs_df=self._data_assimilation.lastobs_df,
-            link_gage_df=self._network.link_gage_df,
-            link_lake_crosswalk=self._network.link_lake_crosswalk,
-            nexus_dict=self._network.nexus_dict,
-            poi_crosswalk=self._network.poi_nex_dict or {},
+            link_gage_df=network.link_gage_df,
+            link_lake_crosswalk=network.link_lake_crosswalk,
+            nexus_dict=network.nexus_dict,
+            poi_crosswalk=network.poi_nex_dict or {},
+            fp_outlet_crosswalk=network.fp_outlet_crosswalk if self._is_nhf else None,
+            link_ids=network.links_df.index if self._is_nhf else None,
         )
         self._timings["output_time"] = time.time() - output_start_time
 
