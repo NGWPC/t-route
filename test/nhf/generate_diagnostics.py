@@ -1,6 +1,5 @@
 import argparse
 import random
-from collections import defaultdict
 from datetime import datetime
 from functools import cached_property
 from pathlib import Path
@@ -139,7 +138,7 @@ class RunContext:
     @cached_property
     def vfp_length_mapping(self) -> dict[int, float]:
         """Make a mapping from virtual flowpath ID to its length."""
-        return dict(zip(self.virtual_flowpaths_gdf["virtual_fp_id"].to_numpy(), self.virtual_flowpaths_gdf["length_km"].to_numpy()))
+        return dict(zip(self.flowpaths_gdf["fp_id"].to_numpy(), self.flowpaths_gdf["length_km"].to_numpy()))
 
     @cached_property
     def virtual_name_remap(self) -> dict[int, int]:
@@ -153,14 +152,10 @@ class RunContext:
         return dict(zip(up, down))
 
     @cached_property
-    def virtual_us_mapping(self) -> dict[int, list[int]]:
-        """Make a mapping from virtual flowpath ID to the list of upstream virtual flowpath IDs."""
-        mapping = defaultdict(list)
-        for row in self.virtual_flowpaths_gdf.itertuples(index=False):
-            key = self.virtual_name_remap.get(row[1])
-            if key is not None:
-                mapping[key].append(row[0])
-        return dict(mapping)
+    def us_mapping(self) -> dict[int, list[int]]:
+        """Make a mapping from flowpath ID to the list of upstream flowpath IDs."""
+        df = self.flowpaths_gdf
+        return df[df.iloc[:, 1].notna()].groupby(df.columns[1])[df.columns[0]].apply(list).to_dict()
 
     @cached_property
     def vfp_fp_mapping(self) -> dict[int, int]:
@@ -196,28 +191,24 @@ def sample_reaches(run_context: RunContext, n_samples: int = 500, pct_length: fl
     for i in range(1, run_context.max_stream_order + 1):
         stream_order_reaches = run_context.flowpaths_gdf.loc[run_context.flowpaths_gdf["stream_order"] == i, "fp_id"]
         stream_order_sample = random.sample(list(stream_order_reaches), min(samples_per_stream_order, len(stream_order_reaches)))
-        tmp_vfps = run_context.reference_flowpaths_gdf[run_context.reference_flowpaths_gdf["fp_id"].isin(stream_order_sample)].groupby("fp_id").agg("first")["virtual_fp_id"].values
-        working_reach_list.update(tmp_vfps)
+        working_reach_list.update(stream_order_sample)
 
     # Sample from reach lengths
-    routing_reaches = run_context.virtual_flowpaths_gdf[run_context.virtual_flowpaths_gdf["routing_segment"]]
-    short_reaches = routing_reaches.nsmallest(n_length // 2, "length_km")["virtual_fp_id"]
-    long_reaches = routing_reaches.nlargest(n_length - len(short_reaches), "length_km")["virtual_fp_id"]
+    short_reaches = run_context.flowpaths_gdf.nsmallest(n_length // 2, "length_km")["fp_id"]
+    long_reaches = run_context.flowpaths_gdf.nlargest(n_length - len(short_reaches), "length_km")["fp_id"]
     working_reach_list.update(short_reaches)
     working_reach_list.update(long_reaches)
 
     # Sample from reach slopes
     flat_reaches = run_context.flowpaths_gdf.nsmallest(n_slope // 2, "slope")["fp_id"]
-    tmp_vfps = run_context.reference_flowpaths_gdf[run_context.reference_flowpaths_gdf["fp_id"].isin(flat_reaches)].groupby("fp_id").agg("first")["virtual_fp_id"].values
-    working_reach_list.update(tmp_vfps)
+    working_reach_list.update(flat_reaches)
     steep_reaches = run_context.flowpaths_gdf.nlargest(n_slope - len(flat_reaches), "slope")["fp_id"]
-    tmp_vfps = run_context.reference_flowpaths_gdf[run_context.reference_flowpaths_gdf["fp_id"].isin(steep_reaches)].groupby("fp_id").agg("first")["virtual_fp_id"].values
-    working_reach_list.update(tmp_vfps)
+    working_reach_list.update(steep_reaches)
 
     # Pad out list with true randoms
     remaining_reaches = n_samples - len(working_reach_list)
     if remaining_reaches > 0:
-        options = set(routing_reaches["virtual_fp_id"]) - working_reach_list
+        options = set(run_context.flowpaths_gdf["fp_id"]) - working_reach_list
         random_reaches = random.sample(list(options), min(remaining_reaches, len(options)))
         working_reach_list.update(random_reaches)
 
@@ -227,28 +218,17 @@ def attribute_reaches(run_context: RunContext, reach_list: set[int]) -> dict[int
     """Make a dictionary mapping reach ID to its attributes."""
     reach_attributes = {}
     for reach in reach_list:
-        fp = run_context.vfp_fp_mapping[reach]
-        stream_order = run_context.flowpaths_gdf.loc[run_context.flowpaths_gdf["fp_id"] == fp, "stream_order"].values[0]
-        fp_gdf_row = run_context.flowpaths_gdf.loc[run_context.flowpaths_gdf["fp_id"] == fp]
-        vfp_fp_gdf_row = run_context.virtual_flowpaths_gdf.loc[run_context.virtual_flowpaths_gdf["virtual_fp_id"] == reach]
-        So = fp_gdf_row["slope"].values[0] #/ 100  # TODO: Check if this is what happens in NHF code and check what legacy code does.
-        dx = vfp_fp_gdf_row["length_km"].values[0] * 1000
-        n = fp_gdf_row["n"].values[0]
-        Cs = fp_gdf_row["chslp"].values[0]
-        Bw = fp_gdf_row["btmwdth"].values[0]
-        Tw = fp_gdf_row["topwdth"].values[0]
-        TwCC = fp_gdf_row["topwdthcc"].values[0]
-        nCC = fp_gdf_row["ncc"].values[0]
+        fp_gdf_row = run_context.flowpaths_gdf.loc[run_context.flowpaths_gdf["fp_id"] == reach]
         reach_attributes[reach] = {
-            "So": So,
-            "stream_order": stream_order,
-            "dx": dx,
-            "n": n,
-            "Cs": Cs,
-            "Bw": Bw,
-            "Tw": Tw,
-            "TwCC": TwCC,
-            "nCC": nCC
+            "So": fp_gdf_row["slope"].values[0],
+            "stream_order": run_context.flowpaths_gdf.loc[run_context.flowpaths_gdf["fp_id"] == reach, "stream_order"].values[0],
+            "dx": fp_gdf_row["length_km"].values[0] * 1000,
+            "n": fp_gdf_row["n"].values[0],
+            "Cs": fp_gdf_row["chslp"].values[0],
+            "Bw": fp_gdf_row["btmwdth"].values[0],
+            "Tw": fp_gdf_row["topwdth"].values[0],
+            "TwCC": fp_gdf_row["topwdthcc"].values[0],
+            "nCC": fp_gdf_row["ncc"].values[0]
         }
     return reach_attributes
 
@@ -423,28 +403,27 @@ def generate_reach_diagnostics(run_context: RunContext, reach_id: int, reach_att
 
 def virtual_flowpath_mass_conservation_network(reach: int, run_context: RunContext, cur_dist: float = 0, max_walk: float = 10):
     cur_dist += run_context.vfp_length_mapping[reach]
-    fp = run_context.vfp_fp_mapping[reach]
-    out_calc = run_context.forcing_data[fp].values.sum() * run_context.da_pct_mapping[reach]
-    if reach not in run_context.virtual_us_mapping:
+    out_calc = run_context.forcing_data[reach].values.sum()
+    if reach not in run_context.us_mapping:
         return out_calc, cur_dist
     elif cur_dist > max_walk:
-        us = run_context.virtual_us_mapping[reach]
+        us = run_context.us_mapping[reach]
         us_streamflow = run_context.routed_results["flow"].sel(feature_id=us).sum(dim="feature_id").values
         out_calc += us_streamflow.sum()
         return out_calc, cur_dist
     elif cur_dist < max_walk:
-        us = run_context.virtual_us_mapping[reach]
+        us = run_context.us_mapping[reach]
         us_q = [virtual_flowpath_mass_conservation_network(u, run_context, cur_dist, max_walk) for u in us]
         out_calc += sum([q[0] for q in us_q])
         return out_calc, max([q[1] for q in us_q])
 
 def get_inflows(run_context: RunContext, reach_id: int) -> np.ndarray:
     """Get inflows to a reach by summing forcing and upstream flow."""
-    local_qin = run_context.forcing_data[run_context.vfp_fp_mapping[reach_id]].values  * run_context.da_pct_mapping[reach_id]
-    if reach_id not in run_context.virtual_us_mapping:
+    local_qin = run_context.forcing_data[reach_id].values
+    if reach_id not in run_context.us_mapping:
         return local_qin, np.zeros_like(local_qin)
     else:
-        us = run_context.virtual_us_mapping[reach_id]
+        us = run_context.us_mapping[reach_id]
         us_q = run_context.routed_results["flow"].sel(feature_id=us).sum(dim="feature_id").values
         return local_qin, us_q
 
