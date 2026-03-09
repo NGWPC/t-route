@@ -1,5 +1,9 @@
-import numpy as np
+
+from typing import Union
+
+import geopandas as gpd
 import pandas as pd
+from shapely import LineString
 from shapely.geometry import Point
 
 
@@ -11,8 +15,7 @@ def discretize_flowpaths(
     nexus: pd.DataFrame,
     discretization_len_m: float = 300.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Discretize flowpaths into links and nodes for MC routing.
+    """Discretize flowpaths into links and nodes for MC routing.
 
     Terminal virtual nexuses (where VFPs meet the main channel) are
     preserved as special nodes in the link chain. These mark the points
@@ -42,6 +45,7 @@ def discretize_flowpaths(
                  length_km, and all channel params from flowpath
     nodes_df : pd.DataFrame
         Columns: node_id, dn_link_id, fp_id, is_terminal_nexus
+
     """
     target_length_km = discretization_len_m / 1000.0
 
@@ -68,6 +72,184 @@ def discretize_flowpaths(
         terminal_vnex_ids = set(virtual_nexus['virtual_nex_id'])
 
     # Map div_id -> list of terminal virtual nexus IDs via reference_flowpaths + virtual_flowpaths
+    div_to_terminal_vnex = build_terminal_nexus_lookup(reference_flowpaths, virtual_flowpaths, terminal_vnex_ids)
+
+    # Channel parameter columns to inherit from flowpath to links
+    channel_params = [
+        'n', 'slope', 'btmwdth', 'topwdth', 'ncc', 'topwdthcc',
+        'musx', 'chslp', 'musk', 'mainstem_lp',
+    ]
+    # Only include columns that actually exist in flowpaths
+    channel_params = [c for c in channel_params if c in flowpaths.columns]
+
+    # Build geometry lookups for positioning terminal nexuses
+    fp_geom_lookup = build_fp_geometry_lookup(flowpaths)
+    vnex_geom_lookup = build_virtual_nexus_geometry_lookup(virtual_nexus)
+    nexus_geom_lookup = build_nexus_geometry_lookup(nexus)
+
+    # Process all flowpaths
+    link_records = []
+    node_records = []
+    for fp in flowpaths.itertuples(index=False):
+        fp_id = fp.fp_id
+        div_id = fp.div_id
+        length_km = fp.length_km
+        dn_nex_id = fp.dn_nex_id
+
+        # Handle missing/zero length
+        if pd.isna(length_km) or length_km <= 0:
+            length_km = 0.0
+
+        # Get terminal virtual nexus IDs for this divide
+        tnex_ids = div_to_terminal_vnex.get(div_id, [])
+
+        # Build channel param dict for this flowpath
+        fp_params = {col: getattr(fp, col) for col in channel_params}
+
+        # Try geometry-aware placement
+        fp_geom = fp_geom_lookup.get(fp_id)
+
+        # Set fixed points
+        fixed_points = _prep_fixed_points(fp_geom, tnex_ids, vnex_geom_lookup, dn_nex_id, nexus_geom_lookup, length_km)
+
+        # Subdivide
+        _link_records, _node_records, next_id = _process_flowpath(fixed_points, dn_nex_id, target_length_km, next_id, fp_id, div_id, fp_params)
+
+        # Log
+        link_records.extend(_link_records)
+        node_records.extend(_node_records)
+
+    # Build DataFrames
+    if link_records:
+        links_df = pd.DataFrame(link_records).set_index('link_id')
+    else:
+        cols = ['fp_id', 'div_id', 'dn_node_id', 'up_node_id', 'length_km'] + channel_params
+        links_df = pd.DataFrame(columns=cols)
+        links_df.index.name = 'link_id'
+
+    if node_records:
+        nodes_df = pd.DataFrame(node_records)
+        # Compute dn_link_id: for each node, find the link whose up_node_id == node_id
+        mask = links_df['up_node_id'].notna()
+        up_node_to_link = dict(
+            zip(
+                links_df.loc[mask, 'up_node_id'].astype(int),
+                links_df.index[mask],
+            )
+        )
+        nodes_df['dn_link_id'] = nodes_df['node_id'].map(up_node_to_link)
+        nodes_df = nodes_df.drop(columns=['_node_index_in_fp'])
+    else:
+        nodes_df = pd.DataFrame(columns=['node_id', 'dn_link_id', 'fp_id', 'is_terminal_nexus'])
+
+    return links_df, nodes_df
+
+def _prep_fixed_points(fp_geom: Union[LineString, None], tnex_ids: list[int], vnex_geom_lookup: dict[int, Point], dn_nex_id: int, nexus_geom_lookup: dict[int, Point], length_km: float) -> list[tuple[int, float]]:
+    if fp_geom is None or len(tnex_ids) == 0:
+        return [(None, 0.0), (None, length_km)]
+
+    fp_geom_length_m = fp_geom.length
+
+    # Project each terminal vnex onto the flowpath LineString
+    vnex_positions = []
+    for vnex_id in tnex_ids:
+        vnex_point = vnex_geom_lookup.get(vnex_id)
+        if vnex_point is not None:
+            dist_m = fp_geom.project(vnex_point)
+            vnex_positions.append((vnex_id, dist_m))
+
+    # Determine direction: is the downstream nexus near the start or end?
+    dn_nex_point = nexus_geom_lookup.get(dn_nex_id)
+    if dn_nex_point is not None:
+        dist_to_start = dn_nex_point.distance(Point(fp_geom.coords[0]))
+        dist_to_end = dn_nex_point.distance(Point(fp_geom.coords[-1]))
+        downstream_at_start = dist_to_start < dist_to_end
+    else:
+        downstream_at_start = True
+
+    # Normalize projected distances to km
+    for i, (vnex_id, dist_m) in enumerate(vnex_positions):
+        fraction = dist_m / fp_geom_length_m if fp_geom_length_m > 0 else 0
+        if downstream_at_start:
+            pos_km = fraction * length_km
+        else:
+            pos_km = (1.0 - fraction) * length_km
+        vnex_positions[i] = (vnex_id, pos_km)
+
+    # Sort by position (downstream -> upstream)
+    vnex_positions.sort(key=lambda x: x[1])
+
+    # Build fixed-point list: downstream end + vnex positions + upstream end
+    fixed_points = [(None, 0.0)]
+    for vnex_id, pos_km in vnex_positions:
+        pos_km = max(0.0, min(pos_km, length_km))
+        fixed_points.append((vnex_id, pos_km))
+    fixed_points.append((None, length_km))
+
+    return fixed_points
+
+def _process_flowpath(fixed_points: list[tuple[int, float]], dn_nex_id: int, target_length_km: float, next_id: int = 0, fp_id: int = 0, div_id: int = 0, fp_params: dict = {}) -> tuple[list[dict], list[dict]]:
+    """Break up a flowpath into smaller segments with dx close to target length."""
+    # Subdivide each segment into links
+    dn_node_for_next_seg = dn_nex_id
+    node_records = []
+    link_records = []
+    for seg_idx in range(len(fixed_points) - 1):
+        _, seg_start_km = fixed_points[seg_idx]
+        seg_end_id, seg_end_km = fixed_points[seg_idx + 1]
+        segment_length_km = seg_end_km - seg_start_km
+
+        if segment_length_km <= 0:
+            continue
+
+        n_sub = max(1, round(segment_length_km / target_length_km))
+        sub_link_length = segment_length_km / n_sub
+
+        for sub_idx in range(n_sub):
+            link_id = next_id; next_id += 1
+
+            # Determine up_node_id for this sub-link
+            if sub_idx == n_sub - 1:
+                if seg_end_id is not None:
+                    # Terminal vnex node
+                    up_node_id = seg_end_id
+                    node_records.append({
+                        'node_id': seg_end_id,
+                        'fp_id': fp_id,
+                        'is_terminal_nexus': True,
+                        '_node_index_in_fp': len(node_records),
+                    })
+                elif seg_idx == len(fixed_points) - 2:
+                    # Upstream end of flowpath
+                    up_node_id = None
+                else:
+                    # Should not happen, but handle gracefully
+                    up_node_id = None
+            else:
+                # Internal sub-link: create a new internal node
+                up_node_id = next_id; next_id += 1
+                node_records.append({
+                    'node_id': up_node_id,
+                    'fp_id': fp_id,
+                    'is_terminal_nexus': False,
+                    '_node_index_in_fp': len(node_records),
+                })
+
+            link_records.append({
+                'link_id': link_id,
+                'fp_id': fp_id,
+                'div_id': div_id,
+                'dn_node_id': dn_node_for_next_seg,
+                'up_node_id': up_node_id,
+                'length_km': sub_link_length,
+                **fp_params,
+            })
+            dn_node_for_next_seg = up_node_id
+    return link_records, node_records, next_id
+
+def build_terminal_nexus_lookup(reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, terminal_vnex_ids: set[int]) -> dict[int, list[int]]:
+    """Create dictionary mapping div_id to list of terminal nexus IDs within it."""
+    # Map div_id -> list of terminal virtual nexus IDs via reference_flowpaths + virtual_flowpaths
     vfp_refs = reference_flowpaths[reference_flowpaths['virtual_fp_id'].notna()].copy()
     if not vfp_refs.empty:
         vfp_refs['virtual_fp_id'] = vfp_refs['virtual_fp_id'].astype(int)
@@ -89,223 +271,35 @@ def discretize_flowpaths(
     else:
         div_to_terminal_vnex = {}
 
-    # Channel parameter columns to inherit from flowpath to links
-    channel_params = [
-        'n', 'slope', 'btmwdth', 'topwdth', 'ncc', 'topwdthcc',
-        'musx', 'chslp', 'musk', 'mainstem_lp',
-    ]
-    # Only include columns that actually exist in flowpaths
-    channel_params = [c for c in channel_params if c in flowpaths.columns]
+    return div_to_terminal_vnex
 
-    # Build geometry lookups for positioning terminal nexuses
-    fp_geom_lookup = {}
-    if 'geometry' in flowpaths.columns:
-        for _, row in flowpaths.iterrows():
-            geom = row['geometry']
-            if geom is not None:
-                fp_geom_lookup[int(row['fp_id'])] = (
-                    geom.geoms[0] if geom.geom_type == 'MultiLineString' else geom
-                )
+def build_fp_geometry_lookup(flowpaths: gpd.GeoDataFrame) -> dict[int, LineString]:
+    """Create mapping from flowpath ID to geometry."""
+    if 'geometry' not in flowpaths.columns:
+        return {}
+    subset = flowpaths.loc[flowpaths.geometry.notna(), ['fp_id', 'geometry']]
+    fp_geom_lookup = {
+        int(row.fp_id): (
+            row.geometry.geoms[0] if row.geometry.geom_type == "MultiLineString" else row.geometry
+        )
+        for row in subset.itertuples(index=False)
+    }
+    return fp_geom_lookup
 
-    vnex_geom_lookup = {}
-    if 'geometry' in virtual_nexus.columns:
-        for _, row in virtual_nexus.iterrows():
-            geom = row['geometry']
-            if geom is not None:
-                vnex_geom_lookup[int(row['virtual_nex_id'])] = geom
-
-    nexus_geom_lookup = {}
-    if 'geometry' in nexus.columns:
-        for _, row in nexus.iterrows():
-            geom = row['geometry']
-            if geom is not None:
-                nexus_geom_lookup[int(row['nex_id'])] = geom
-
-    link_records = []
-    node_records = []
-
-    for _, fp in flowpaths.iterrows():
-        fp_id = int(fp['fp_id'])
-        div_id = int(fp['div_id'])
-        length_km = fp['length_km']
-        dn_nex_id = int(fp['dn_nex_id'])
-
-        # Handle missing/zero length
-        if pd.isna(length_km) or length_km <= 0:
-            length_km = 0.0
-
-        # Get terminal virtual nexus IDs for this divide
-        tnex_ids = div_to_terminal_vnex.get(div_id, [])
-
-        # Build channel param dict for this flowpath
-        fp_params = {col: fp[col] for col in channel_params if col in fp.index}
-
-        # Try geometry-aware placement
-        fp_geom = fp_geom_lookup.get(fp_id)
-        has_geometry = fp_geom is not None and tnex_ids
-
-        if has_geometry:
-            fp_geom_length_m = fp_geom.length
-
-            # Project each terminal vnex onto the flowpath LineString
-            vnex_positions = []
-            for vnex_id in tnex_ids:
-                vnex_point = vnex_geom_lookup.get(vnex_id)
-                if vnex_point is not None:
-                    dist_m = fp_geom.project(vnex_point)
-                    vnex_positions.append((vnex_id, dist_m))
-
-            # Determine direction: is the downstream nexus near the start or end?
-            dn_nex_point = nexus_geom_lookup.get(dn_nex_id)
-            if dn_nex_point is not None:
-                dist_to_start = dn_nex_point.distance(Point(fp_geom.coords[0]))
-                dist_to_end = dn_nex_point.distance(Point(fp_geom.coords[-1]))
-                downstream_at_start = dist_to_start < dist_to_end
-            else:
-                downstream_at_start = True
-
-            # Normalize projected distances to km
-            for i, (vnex_id, dist_m) in enumerate(vnex_positions):
-                fraction = dist_m / fp_geom_length_m if fp_geom_length_m > 0 else 0
-                if downstream_at_start:
-                    pos_km = fraction * length_km
-                else:
-                    pos_km = (1.0 - fraction) * length_km
-                vnex_positions[i] = (vnex_id, pos_km)
-
-            # Sort by position (downstream -> upstream)
-            vnex_positions.sort(key=lambda x: x[1])
-
-            # Build fixed-point list: downstream end + vnex positions + upstream end
-            fixed_points = [(None, 0.0)]
-            for vnex_id, pos_km in vnex_positions:
-                pos_km = max(0.0, min(pos_km, length_km))
-                fixed_points.append((vnex_id, pos_km))
-            fixed_points.append((None, length_km))
-
-            # Subdivide each segment into links
-            dn_node_for_next_seg = dn_nex_id
-            for seg_idx in range(len(fixed_points) - 1):
-                seg_start_id, seg_start_km = fixed_points[seg_idx]
-                seg_end_id, seg_end_km = fixed_points[seg_idx + 1]
-                segment_length_km = seg_end_km - seg_start_km
-
-                if segment_length_km <= 0:
-                    continue
-
-                n_sub = max(1, round(segment_length_km / target_length_km))
-                sub_link_length = segment_length_km / n_sub
-
-                for sub_idx in range(n_sub):
-                    link_id = next_id; next_id += 1
-
-                    # Determine up_node_id for this sub-link
-                    if sub_idx == n_sub - 1:
-                        if seg_end_id is not None:
-                            # Terminal vnex node
-                            up_node_id = seg_end_id
-                            node_records.append({
-                                'node_id': seg_end_id,
-                                'fp_id': fp_id,
-                                'is_terminal_nexus': True,
-                                '_node_index_in_fp': len(node_records),
-                            })
-                        elif seg_idx == len(fixed_points) - 2:
-                            # Upstream end of flowpath
-                            up_node_id = None
-                        else:
-                            # Should not happen, but handle gracefully
-                            up_node_id = None
-                    else:
-                        # Internal sub-link: create a new internal node
-                        up_node_id = next_id; next_id += 1
-                        node_records.append({
-                            'node_id': up_node_id,
-                            'fp_id': fp_id,
-                            'is_terminal_nexus': False,
-                            '_node_index_in_fp': len(node_records),
-                        })
-
-                    link_records.append({
-                        'link_id': link_id,
-                        'fp_id': fp_id,
-                        'div_id': div_id,
-                        'dn_node_id': dn_node_for_next_seg,
-                        'up_node_id': up_node_id,
-                        'length_km': sub_link_length,
-                        **fp_params,
-                    })
-                    dn_node_for_next_seg = up_node_id
-
-        else:
-            # Fallback: equal-spacing (no geometry or no terminal nexuses)
-            n_terminal_nexuses = len(tnex_ids)
-            if length_km <= 0 or target_length_km <= 0:
-                n_links = 1
-            else:
-                n_by_length = max(1, int(length_km / target_length_km))
-                n_links = max(n_by_length, n_terminal_nexuses + 1) if n_terminal_nexuses > 0 else n_by_length
-
-            link_length_km = length_km / n_links if n_links > 0 else length_km
-
-            # Create internal nodes
-            n_nodes = n_links - 1
-            node_ids = []
-            for i in range(n_nodes):
-                if i < n_terminal_nexuses:
-                    node_ids.append(int(tnex_ids[i]))
-                else:
-                    node_ids.append(next_id)
-                    next_id += 1
-
-            # Create link records (ordered downstream to upstream)
-            for i in range(n_links):
-                link_id = next_id; next_id += 1
-
-                dn_node = dn_nex_id if i == 0 else node_ids[i - 1]
-                up_node = node_ids[i] if i < n_nodes else None
-
-                link_records.append({
-                    'link_id': link_id,
-                    'fp_id': fp_id,
-                    'div_id': div_id,
-                    'dn_node_id': dn_node,
-                    'up_node_id': up_node,
-                    'length_km': link_length_km,
-                    **fp_params,
-                })
-
-            # Create node records
-            for i, nid in enumerate(node_ids):
-                node_records.append({
-                    'node_id': nid,
-                    'fp_id': fp_id,
-                    'is_terminal_nexus': i < n_terminal_nexuses,
-                    '_node_index_in_fp': i,
-                })
-
-    # Build DataFrames
-    if link_records:
-        links_df = pd.DataFrame(link_records).set_index('link_id')
+def build_virtual_nexus_geometry_lookup(virtual_nexus: gpd.GeoDataFrame) -> dict[int, Point]:
+    """Create mapping from virtual nexus ID to geometry."""
+    if 'geometry' not in virtual_nexus.columns:
+        return {}
     else:
-        cols = ['fp_id', 'div_id', 'dn_node_id', 'up_node_id', 'length_km'] + channel_params
-        links_df = pd.DataFrame(columns=cols)
-        links_df.index.name = 'link_id'
+        return virtual_nexus.dropna(subset=['geometry']).set_index('virtual_nex_id')['geometry'].to_dict()
 
-    if node_records:
-        nodes_df = pd.DataFrame(node_records)
-        # Compute dn_link_id: for each node, find the link whose up_node_id == node_id
-        up_node_to_link = links_df.reset_index().dropna(subset=['up_node_id'])
-        up_node_to_link = dict(zip(
-            up_node_to_link['up_node_id'].astype(int),
-            up_node_to_link['link_id'],
-        ))
-        nodes_df['dn_link_id'] = nodes_df['node_id'].map(up_node_to_link)
-        nodes_df = nodes_df.drop(columns=['_node_index_in_fp'])
+def build_nexus_geometry_lookup(nexus: gpd.GeoDataFrame) -> dict[int, Point]:
+    """Create mapping from nexus ID to geometry."""
+    if 'geometry' not in nexus.columns:
+        return {}
     else:
-        nodes_df = pd.DataFrame(columns=['node_id', 'dn_link_id', 'fp_id', 'is_terminal_nexus'])
+        return nexus.dropna(subset=['geometry']).set_index('nex_id')['geometry'].to_dict()
 
-    return links_df, nodes_df
 
 
 def distribute_catchment_discharge(
@@ -317,8 +311,7 @@ def distribute_catchment_discharge(
     fp_to_dn_nex: dict[int, int],
     nex_to_dn_fp: dict[int, int],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Distribute catchment discharge to links for routing and to virtual
+    """Distribute catchment discharge to links for routing and to virtual
     flowpaths for flow-scaling output.
 
     VFP discharge and the un-VFP'd remainder are routed as upstream
@@ -360,6 +353,7 @@ def distribute_catchment_discharge(
     upstream_inflow_df : pd.DataFrame
         Upstream inflow indexed by target link_id, columns are timestamps.
         Contains VFP and remainder discharge to be injected as q_up.
+
     """
     timestamps = div_lateralflows_df.columns
 
