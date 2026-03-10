@@ -243,8 +243,7 @@ def build_link_connections(
     links_df: pd.DataFrame,
     nexus: pd.DataFrame,
 ) -> dict[int, list[int]]:
-    """
-    Build downstream connectivity for links.
+    """Build downstream connectivity for links.
 
     For adjacent links within the same flowpath:
         link_upstream.dn_node_id == link_downstream.up_node_id
@@ -266,50 +265,61 @@ def build_link_connections(
     -------
     connections : dict[int, list[int]]
         Mapping of link_id -> [downstream_link_ids]
+
     """
     if links_df.empty:
         return {}
 
+    # Pre extract arrays because np is faster
+    link_ids = links_df.index.to_numpy()
+    up_nodes = links_df["up_node_id"].to_numpy()
+    dn_nodes = links_df["dn_node_id"].to_numpy()
+    fp_ids = links_df["fp_id"].to_numpy()
+
     # Build lookup: up_node_id -> link_id (for within-flowpath connections)
-    links_with_up = links_df[links_df['up_node_id'].notna()].copy()
-    up_node_to_link = dict(zip(
-        links_with_up['up_node_id'].astype(int),
-        links_with_up.index,
-    ))
+    up_node_to_link = {
+        int(up): int(lid)
+        for up, lid in zip(up_nodes, link_ids)
+        if pd.notna(up)
+    }
 
     # Build lookup: fp_id -> most-upstream link_id (up_node_id is None)
-    upstream_links = links_df[links_df['up_node_id'].isna()]
-    fp_to_upstream_link = dict(zip(
-        upstream_links['fp_id'].astype(int),
-        upstream_links.index,
-    ))
+    fp_to_upstream_link = {
+        int(fp): int(lid)
+        for fp, up, lid in zip(fp_ids, up_nodes, link_ids)
+        if pd.isna(up)
+    }
 
     # Build lookup: nex_id -> dn_fp_id (cross-flowpath via regular nexus)
     nex_to_dn_fp = {}
     if not nexus.empty:
-        valid_nex = nexus[nexus['dn_fp_id'].notna()]
-        nex_to_dn_fp = dict(zip(
-            valid_nex['nex_id'].astype(int),
-            valid_nex['dn_fp_id'].astype(int),
-        ))
+        nex_ids = nexus["nex_id"].to_numpy()
+        dn_fps = nexus["dn_fp_id"].to_numpy()
+
+        nex_to_dn_fp = {
+            int(nex): int(fp)
+            for nex, fp in zip(nex_ids, dn_fps)
+            if pd.notna(fp)
+        }
 
     connections = {}
-    for link_id, row in links_df.iterrows():
-        dn_node = int(row['dn_node_id'])
+    for link_id, dn_node in zip(link_ids, dn_nodes):
+        dn_node = int(dn_node)
 
-        # Check if there's a link within the same flowpath whose up_node_id == dn_node
-        if dn_node in up_node_to_link:
-            connections[link_id] = [up_node_to_link[dn_node]]
-        elif dn_node in nex_to_dn_fp:
-            # Cross-flowpath: dn_node is a regular nexus
-            dn_fp = nex_to_dn_fp[dn_node]
-            if dn_fp in fp_to_upstream_link:
-                connections[link_id] = [fp_to_upstream_link[dn_fp]]
-            else:
-                connections[link_id] = []
-        else:
-            # Terminal link (network outlet)
-            connections[link_id] = []
+        # Same-flowpath connection
+        ds = up_node_to_link.get(dn_node)
+        if ds is not None:
+            connections[int(link_id)] = [ds]
+            continue
+
+        # Cross-flowpath via nexus
+        dn_fp = nex_to_dn_fp.get(dn_node)
+        if dn_fp is not None:
+            connections[int(link_id)] = [fp_to_upstream_link.get(dn_fp)] if dn_fp in fp_to_upstream_link else []
+            continue
+
+        # Terminal
+        connections[int(link_id)] = []
 
     return connections
 
