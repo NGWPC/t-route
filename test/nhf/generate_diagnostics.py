@@ -1,5 +1,6 @@
 import argparse
 import random
+import warnings
 from datetime import datetime
 from functools import cached_property
 from pathlib import Path
@@ -12,6 +13,7 @@ import seaborn as sns
 import xarray as xr
 import yaml
 from matplotlib import pyplot as plt
+from troute.nhf_discretize import discretize_flowpaths
 from troute.routing.fast_reach.reach import compute_reach_kernel
 
 SAMPLE_RANDOM_SEED = 11
@@ -33,6 +35,8 @@ class RunContext:
         # Load yaml
         with open(self.config_path) as f:
             self.config = yaml.safe_load(f)
+
+        # self._links_df, self._nodes_df = None, None
 
     @property
     def result_output_dir(self) -> Path:
@@ -63,6 +67,11 @@ class RunContext:
         """Directory where diagnostic plots are written."""
         p = self.config_root / self.run_id / "diagnostic_tests"
         return p
+
+    @cached_property
+    def nhf_discretization_len(self) -> float:
+        """Target length for routed reaches."""
+        return self.config.get("network_topology_parameters").get("supernetwork_parameters").get("nhf_discretization_len", 300.0)
 
     @cached_property
     def max_stream_order(self) -> int:
@@ -133,7 +142,17 @@ class RunContext:
     @cached_property
     def flowpaths_gdf(self) -> gpd.GeoDataFrame:
         """Load flowpaths layer."""
-        return gpd.read_file(self.hydrofabric_path, layer="flowpaths", ignore_geometry=True,)
+        return gpd.read_file(self.hydrofabric_path, layer="flowpaths", ignore_geometry=True)
+
+    @cached_property
+    def virtual_nexus_gdf(self) -> gpd.GeoDataFrame:
+        """Load virtual nexus layer."""
+        return gpd.read_file(self.hydrofabric_path, layer="virtual_nexus", ignore_geometry=True)
+
+    @cached_property
+    def nexus_gdf(self) -> gpd.GeoDataFrame:
+        """Load nexus layer."""
+        return gpd.read_file(self.hydrofabric_path, layer="nexus", ignore_geometry=True)
 
     @cached_property
     def vfp_length_mapping(self) -> dict[int, float]:
@@ -173,6 +192,23 @@ class RunContext:
         """Make a mapping from flowpath ID to stream order."""
         return dict(zip(self.flowpaths_gdf["fp_id"].to_numpy(), self.flowpaths_gdf["stream_order"].to_numpy()))
 
+    # @property
+    # def links_df(self) -> pd.DataFrame:
+    #     """Links that routing is performed on."""
+    #     if self._links_df is None:
+    #         self._discretize_network()
+    #     return self._links_df
+
+    # @property
+    # def nodes_df(self) -> pd.DataFrame:
+    #     """Nodes that routing is performed between."""
+    #     if self._nodes_df is None:
+    #         self._discretize_network()
+    #     return self._nodes_df
+
+    # def _discretize_network(self):
+    #     self._links_df, self._nodes_df = discretize_flowpaths(self.flowpaths_gdf, self.virtual_flowpaths_gdf, self.virtual_nexus_gdf, self.reference_flowpaths_gdf, self.nexus_gdf, self.nhf_discretization_len)
+    #     self._links_df["up_node_id"] = self._links_df["up_node_id"].fillna(-9999).astype(int)
 
 ### HELPER FUNCTIONS ###
 
@@ -214,27 +250,104 @@ def sample_reaches(run_context: RunContext, n_samples: int = 500, pct_length: fl
 
     return attribute_reaches(run_context, working_reach_list)
 
+def generate_links_and_nodes(fp_id: int, run_context: RunContext) -> tuple[pd.DataFrame, pd.DataFrame]:
+    # Get div_id
+    sql = f"SELECT div_id FROM reference_flowpaths WHERE fp_id = {fp_id} LIMIT 1"
+    div_id = gpd.read_file(run_context.hydrofabric_path, sql=sql)["div_id"].item()
+
+    # Make flowpaths
+    sql = f"SELECT * FROM flowpaths WHERE fp_id = {fp_id}"
+    flowpaths = gpd.read_file(run_context.hydrofabric_path, sql=sql)
+
+    # Make virtual flowpaths
+    sql = f"SELECT vfp.* from virtual_flowpaths vfp LEFT JOIN reference_flowpaths rf1 ON vfp.virtual_fp_id = rf1.virtual_fp_id WHERE div_id = {div_id}"
+    vfps = gpd.read_file(run_context.hydrofabric_path, sql=sql)
+
+    # Make virtual nexuses
+    in_clause = "(" + ", ".join(vfps["dn_virtual_nex_id"].astype(str).values) + ")"
+    sql = f"SELECT * FROM virtual_nexus WHERE virtual_nex_id IN {in_clause}"
+    vnex = gpd.read_file(run_context.hydrofabric_path, sql=sql)
+
+    # Make reference flowpaths
+    sql = f"SELECT * FROM reference_flowpaths WHERE div_id = {div_id}"
+    ref_fp = gpd.read_file(run_context.hydrofabric_path, sql=sql)
+
+    # Make nexus
+    nex_id = flowpaths["dn_nex_id"].item()
+    sql = f"SELECT * FROM nexus WHERE nex_id = {nex_id}"
+    nexus = gpd.read_file(run_context.hydrofabric_path, sql=sql)
+
+    links_df, nodes_df = discretize_flowpaths(flowpaths, vfps, vnex, ref_fp, nexus, run_context.nhf_discretization_len)
+    links_df["up_node_id"] = links_df["up_node_id"].astype("Int64").fillna(-9999)
+    return links_df, nodes_df
+
+
 def attribute_reaches(run_context: RunContext, reach_list: set[int]) -> dict[int, dict[str, Any]]:
     """Make a dictionary mapping reach ID to its attributes."""
     reach_attributes = {}
     for reach in reach_list:
         fp_gdf_row = run_context.flowpaths_gdf.loc[run_context.flowpaths_gdf["fp_id"] == reach]
         reach_attributes[reach] = {
-            "So": fp_gdf_row["slope"].values[0],
-            "stream_order": run_context.flowpaths_gdf.loc[run_context.flowpaths_gdf["fp_id"] == reach, "stream_order"].values[0],
-            "dx": fp_gdf_row["length_km"].values[0] * 1000,
-            "n": fp_gdf_row["n"].values[0],
-            "Cs": fp_gdf_row["chslp"].values[0],
-            "Bw": fp_gdf_row["btmwdth"].values[0],
-            "Tw": fp_gdf_row["topwdth"].values[0],
-            "TwCC": fp_gdf_row["topwdthcc"].values[0],
-            "nCC": fp_gdf_row["ncc"].values[0]
+            "So": fp_gdf_row["slope"].item(),
+            "stream_order": run_context.flowpaths_gdf.loc[run_context.flowpaths_gdf["fp_id"] == reach, "stream_order"].item(),
+            "dx": fp_gdf_row["length_km"].item() * 1000,
+            "n": fp_gdf_row["n"].item(),
+            "Cs": fp_gdf_row["chslp"].item(),
+            "Bw": fp_gdf_row["btmwdth"].item(),
+            "Tw": fp_gdf_row["topwdth"].item(),
+            "TwCC": fp_gdf_row["topwdthcc"].item(),
+            "nCC": fp_gdf_row["ncc"].item()
         }
     return reach_attributes
 
-def reroute(qlat: np.ndarray, qus: np.ndarray, dx: float, Bw: float, Tw: float, TwCC: float, n: float, nCC: float, Cs: float, So: float, dt: float, qts_subdivisions: int):
-    qus = np.repeat(qus, qts_subdivisions)
-    qlat = np.repeat(qlat, qts_subdivisions)
+def reroute(run_context: RunContext, fp_id: int, qlat: np.ndarray, qus: np.ndarray, dt: float, qts_subdivisions: int):
+    route_links, _ = generate_links_and_nodes(fp_id, run_context)
+    # route_links = run_context.links_df[run_context.links_df["fp_id"] == fp_id]
+    div_id = run_context.reference_flowpaths_gdf.loc[run_context.reference_flowpaths_gdf["fp_id"] == fp_id, "div_id"].dropna().values[0]
+    vfp_id = run_context.reference_flowpaths_gdf.loc[run_context.reference_flowpaths_gdf["div_id"] == div_id, "virtual_fp_id"].dropna().values
+    vfps = run_context.virtual_flowpaths_gdf[run_context.virtual_flowpaths_gdf["virtual_fp_id"].isin(vfp_id)]
+    most_us = (set(route_links["up_node_id"]) - set(route_links["dn_node_id"])).pop()
+
+    # Distribute flows
+    non_vfp_pct = 1 - vfps['percentage_area_contribution'].sum()
+    qus_inc = qlat * (non_vfp_pct / len(route_links))
+    us_inflows = {int(i): (qus_inc if i != most_us else qus) for i in route_links["up_node_id"] }
+    for i in vfps.itertuples(index=False):
+        us_inflows[i.dn_virtual_nex_id] += qlat * i.percentage_area_contribution
+
+    # Make null qlat (all flows from top)
+    qlat_zero = np.repeat(np.zeros_like(qlat), qts_subdivisions)
+
+    # Route flood pulse
+    cur_reach = route_links.loc[route_links["up_node_id"] == most_us].index.item()
+    route_results = {}
+    while cur_reach is not None:
+        row = route_links.loc[cur_reach]
+        qus = us_inflows[int(row.up_node_id)]
+        dx = row["length_km"].item() * 1000
+        So = row["slope"].item()
+        n = row["n"].item()
+        Cs = row["chslp"].item()
+        Bw = row["btmwdth"].item()
+        Tw = row["topwdth"].item()
+        TwCC = row["topwdthcc"].item()
+        nCC = row["ncc"].item()
+
+        if not np.all(qus == 0):
+            qus = np.repeat(qus, qts_subdivisions)
+            route_results[cur_reach] = _route(qlat_zero, qus, dx, Bw, Tw, TwCC, n, nCC, Cs, So, dt, qts_subdivisions)
+            qout = route_results[cur_reach]["qout"]
+        else:
+            qout = np.zeros_like(qus)
+        if row["dn_node_id"] in route_links["up_node_id"].values:
+            cur_reach = route_links.loc[route_links["up_node_id"] == row["dn_node_id"]].index.item()
+            us_inflows[row["dn_node_id"]] += qout
+        else:
+            cur_reach = None
+
+    return qout, route_results
+
+def _route(qlat: np.ndarray, qus: np.ndarray, dx: float, Bw: float, Tw: float, TwCC: float, n: float, nCC: float, Cs: float, So: float, dt: float, qts_subdivisions: int):
     qdp = qus[0]
     velp = 0
     depthp = 0
@@ -273,21 +386,40 @@ def reroute(qlat: np.ndarray, qus: np.ndarray, dx: float, Bw: float, Tw: float, 
             courants.append(out["cn"])
             celerities.append(out["ck"])
             xs.append(out["X"])
-    geom = hydraulic_geometry(np.array(depths), Bw, Tw, TwCC, Cs)
-    courant_recalc = (np.array(celerities) * dt) / dx
-    # x_recalc = 0.5 * (1 - ((np.array(qlat) + np.array(qus))[::int(qts_subdivisions)] / (np.array(tws) * np.array(celerities) * dx)))
-    return {
+
+    geom = hydraulic_geometry(np.array(depths), Bw, Tw, TwCC, Cs, n, nCC, So, dx)
+    rerouted_results = {
         "qout": np.array(outflows),
         "depth": np.array(depths),
         "courant": np.array(courants),
         "celerity": np.array(celerities),
         "x": np.array(xs),
         "twl": geom["twl"],
-        "courant_recalc": courant_recalc,
-        # "x_recalc": x_recalc
+        "celerity_recalc": geom["ck_recalc"],
+        "x_recalc": geom["x_recalc"],
     }
 
-def hydraulic_geometry(h: Union[float, np.ndarray], bw: float, tw: float, twcc: float, cs: float):
+    # Get ratio of reach length to courant ideal
+    # Uses method of Ponce and Theurer (1982) Accuracy Criteria in Diffusion Routing
+    qref = (rerouted_results["qout"].max() + rerouted_results["qout"].min()) / 2
+    ref_ind = np.argmin(np.abs(rerouted_results["qout"] - qref))
+    qref_actual = rerouted_results["qout"][ref_ind]
+    cref = rerouted_results["celerity"][ref_ind]
+    twref = rerouted_results["twl"][ref_ind]
+    if cref > 0:
+        dxc = dt * cref
+        dxd = (qref_actual / twref) / (So * cref)
+        dxmax = 0.5 * (dxc + dxd)
+        cmax = rerouted_results["celerity"].max()
+        dxmin = cmax * dt
+        ideal_dx = max([dxmin, dxmax])
+        rerouted_results["dx_ratio"] = dx / ideal_dx
+    else:
+        rerouted_results["dx_ratio"] = None
+
+    return rerouted_results
+
+def hydraulic_geometry(h: Union[float, np.ndarray], bw: float, tw: float, twcc: float, cs: float, n: float, ncc: float, so: float, dx: float):
     # Convert rise over run to run over rise
     if cs == 0:
         z = 1
@@ -319,8 +451,45 @@ def hydraulic_geometry(h: Union[float, np.ndarray], bw: float, tw: float, twcc: 
     AREAC = twcc * h_gt_bf
     WPC = np.where(h_gt_bf > 0, twcc + 2.0 * h_gt_bf, 0.0)
 
+    A = AREA + AREAC
+    P = WP + WPC
+
     # Hydraulic radius
     R = (AREA + AREAC) / (WP + WPC)
+
+    # Roughness
+    n_eff = (WP * n + WPC * ncc) / P
+
+    # Manning discharge
+    Q = (1.0 / n_eff) * A * (R ** (2.0 / 3.0)) * np.sqrt(so)
+
+    # Celerity
+    term = (
+        (5.0 / 3.0) * R ** (2.0 / 3.0)
+        - (2.0 / 3.0)
+        * R ** (5.0 / 3.0)
+        * (2.0 * np.sqrt(1.0 + z**2) / (bw + 2.0 * h_lt_bf * z))
+    )
+
+    ck_channel = (np.sqrt(so) / n) * term
+
+    ck_fp = (np.sqrt(so) / ncc) * (5.0 / 3.0) * (h_gt_bf ** (2.0 / 3.0))
+
+    with warnings.catch_warnings(record=True):
+        ck = np.where(
+            (h > bfd) & (twcc > 0) & (ncc > 0),
+            (ck_channel * AREA + ck_fp * AREAC) / (A),
+            ck_channel,
+        )
+
+        ck = np.maximum(ck, 0.0)
+
+        # Muskingum–Cunge X
+        X = np.where(
+            ck > 0,
+            0.5 * (1.0 - (Q / (2.0 * twl * so * ck * dx))),
+            0.5,
+        )
 
     return {
         "twl": twl,
@@ -330,7 +499,10 @@ def hydraulic_geometry(h: Union[float, np.ndarray], bw: float, tw: float, twcc: 
         "WP": WP,
         "WPC": WPC,
         "h_lt_bf": h_lt_bf,
-        "h_gt_bf": h_gt_bf
+        "h_gt_bf": h_gt_bf,
+        "q_recalc": Q,
+        "ck_recalc": ck,
+        "x_recalc": X
     }
 
 def generate_reach_diagnostics(run_context: RunContext, reach_id: int, reach_attributes: dict[str, float], max_walk: float = 50.0, plot: bool = True) -> dict[str, float]:
@@ -345,7 +517,7 @@ def generate_reach_diagnostics(run_context: RunContext, reach_id: int, reach_att
     outflow = qout_hydrograph.sum()
     qlat, qus = get_inflows(run_context, reach_id)
     qin_hydrograph = qlat + qus
-    rerouted_results = reroute(qlat, qus, reach_attributes["dx"], reach_attributes["Bw"], reach_attributes["Tw"], reach_attributes["TwCC"], reach_attributes["n"], reach_attributes["nCC"], reach_attributes["Cs"], reach_attributes["So"], dt=run_context.dt, qts_subdivisions=run_context.qts_subdivisions)
+    qreroute, rerouted_results = reroute(run_context, reach_id, qlat, qus, run_context.dt, run_context.qts_subdivisions)
 
     # Check mass conservation at-reach
     results["local_mass_conservation_error"] = 100 * abs(local_qin - outflow) / outflow if outflow > 0 else np.nan
@@ -365,38 +537,20 @@ def generate_reach_diagnostics(run_context: RunContext, reach_id: int, reach_att
     results["hydrograph_lag"] = (outflow_centroid - inflow_centroid)
     results["normalized_lag"] = results["hydrograph_lag"] / (reach_attributes["dx"] * 1000)
 
-    # Check courant conditions
-    for i in ["courant", "celerity", "x", "courant_recalc"]:
-        results[f"min_{i}"] = np.min(rerouted_results[i])
-        results[f"max_{i}"] = np.max(rerouted_results[i])
-        results[f"mean_{i}"] = np.mean(rerouted_results[i])
-        results[f"median_{i}"] = np.median(rerouted_results[i])
-        results[f"std_{i}"] = np.std(rerouted_results[i])
-    results["negative_qout"] = np.min(rerouted_results["qout"]) < 0
+    # Check other hydrograph stats
+    results["negative_qout"] = np.min(qout_hydrograph) < 0
     results["pct_attenuation"] = 100 * (1 - (np.max(qout_hydrograph) / np.max(qin_hydrograph))) if np.max(qin_hydrograph) > 0 else np.nan
     results["acceleration"] = np.max(qout_hydrograph) > np.max(qin_hydrograph)
-    results["reroute_mass_error"] = abs(np.sum(rerouted_results["qout"]) - outflow) / outflow if outflow > 0 else np.nan
-    reroute_sum = np.sum(rerouted_results["qout"])
-    rerouted_centroid = np.sum(rerouted_results["qout"] * dt_seconds) / reroute_sum if reroute_sum > 0 else 0
+    results["reroute_mass_error"] = abs(np.sum(qreroute) - outflow) / outflow if outflow > 0 else np.nan
+    reroute_sum = np.sum(qreroute)
+    rerouted_centroid = np.sum(qreroute * dt_seconds) / reroute_sum if reroute_sum > 0 else 0
     results["reroute_time_error"] = (outflow_centroid - rerouted_centroid)
 
-    # Get ratio of reach length to courant ideal
-    # Uses method of Ponce and Theurer (1982) Accuracy Criteria in Diffusion Routing
-    qref = (qin_hydrograph.max() + qin_hydrograph.min()) / 2
-    ref_ind = np.argmin(np.abs(qin_hydrograph - qref))
-    qref_actual = rerouted_results["qout"][ref_ind]
-    cref = rerouted_results["celerity"][ref_ind]
-    twref = rerouted_results["twl"][ref_ind]
-    dxc = run_context.dt * cref
-    dxd = (qref_actual / twref) / (reach_attributes["So"] * cref)
-    dxmax = 0.5 * (dxc + dxd)
-    cmax = rerouted_results["celerity"].max()
-    dxmin = cmax * run_context.dt
-    ideal_dx = max([dxmin, dxmax])
-    results["dx_ratio"] = reach_attributes["dx"] / ideal_dx
+    # Log routing stats
+    results["routing"] = rerouted_results
 
     if plot:
-        plot_hydrograps(qin_hydrograph, qout_hydrograph, rerouted_results["qout"], reach_id, run_context)
+        plot_hydrograps(qin_hydrograph, qout_hydrograph, qreroute, reach_id, run_context)
     return results
 
 
@@ -435,7 +589,7 @@ def plot_hydrograps(qin: np.ndarray, qout: np.ndarray, qreroute: np.ndarray, rea
     timesteps = run_context.routed_results["time"].values
     ax.plot(timesteps, qin, label="qin", color="blue")
     ax.plot(timesteps, qout, label="qout", color="orange")
-    ax.plot(timesteps, qreroute, label="reroute", color="green", linestyle="--")
+    # ax.plot(timesteps, qreroute, label="reroute", color="green", linestyle="--")
     ax.set_xlabel("Time")
     ax.set_ylabel("Discharge (m3/s)")
     ax.set_title(f"Reach {reach_id}")
@@ -591,25 +745,37 @@ def generate_sampled_run_dataset(run_context: RunContext, generate_plots: bool =
     """Build dataset of run diagnostics at the reach and network level."""
     # Sample from reaches
     reaches = sample_reaches(run_context)
+    routing = {}
+    routing_ts = {}
 
     for k, v in reaches.items():
         diagnostics = generate_reach_diagnostics(run_context, k, v, plot=generate_plots)
+        routing_ts_dict = diagnostics.pop("routing")
+        routing_dict = {i: {"dx_ratio": routing_ts_dict[i].pop("dx_ratio")} for i in routing_ts_dict}
+        routing.update(routing_dict)
+        routing_ts.update(routing_ts_dict)
         reaches[k].update(diagnostics)
 
-    df = pd.DataFrame.from_dict(reaches, orient="index")
-    df.to_parquet(run_context.result_output_dir / f"{run_context.run_id}.parquet")
-    return df
+    df_reaches = pd.DataFrame.from_dict(reaches, orient="index")
+    df_reaches.to_parquet(run_context.result_output_dir / f"{run_context.run_id}_reaches.parquet")
+
+    df_routing = pd.DataFrame.from_dict(routing, orient="index")
+    df_routing.to_parquet(run_context.result_output_dir / f"{run_context.run_id}_routing.parquet")
+
+    df_routing_ts = pd.DataFrame.from_dict(routing_ts, orient="index")
+    df_routing_ts.to_parquet(run_context.result_output_dir / f"{run_context.run_id}_routing_ts.parquet")
+    return df_reaches, df_routing, df_routing_ts
 
 def export_test_summary(diag_df: pd.DataFrame, out_path: Path) -> None:
     """Check if diagnostic df is within tolerance thresholds."""
     pass
 
-def create_diagnostics(diag_df: pd.DataFrame, run_context: RunContext):
+def create_diagnostics(df_reaches: pd.DataFrame, df_routing: pd.DataFrame, df_routing_ts: pd.DataFrame, run_context: RunContext):
     """Generate summary file for sampled run dataset on a t-route run."""
-    plot_reach_mass_conservation(diag_df, run_context.diagnostic_plot_dir)
-    plot_reach_mass_conservation_vs_dx(diag_df, run_context.diagnostic_plot_dir)
-    plot_network_mass_conservation(diag_df, run_context.diagnostic_plot_dir)
-    plot_attenuation(diag_df, run_context.diagnostic_plot_dir)
+    plot_reach_mass_conservation(df_reaches, run_context.diagnostic_plot_dir)
+    plot_reach_mass_conservation_vs_dx(df_reaches, run_context.diagnostic_plot_dir)
+    plot_network_mass_conservation(df_reaches, run_context.diagnostic_plot_dir)
+    plot_attenuation(df_reaches, run_context.diagnostic_plot_dir)
     plot_courant(diag_df, run_context.diagnostic_plot_dir)
     plot_celerity_vs_lag(diag_df, run_context.diagnostic_plot_dir)
     plot_optimal_reach_length(diag_df, run_context.diagnostic_plot_dir)
@@ -620,8 +786,8 @@ def process_run(config_key: str):
     """Export diagnostics for a t-route run."""
     run_context = RunContext(config_key)
     generate_reference_gage_plots(run_context)
-    diag_df = generate_sampled_run_dataset(run_context, generate_plots=False)
-    create_diagnostics(diag_df, run_context)
+    df_reaches, df_routing, df_routing_ts = generate_sampled_run_dataset(run_context, generate_plots=True)
+    create_diagnostics(df_reaches, df_routing, df_routing_ts, run_context)
 
 def main():
     """Run diagnostics for sampled reaches across all test cases."""
