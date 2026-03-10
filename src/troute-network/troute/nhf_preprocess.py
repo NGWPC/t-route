@@ -1,17 +1,15 @@
 from pathlib import Path
 
 import geopandas as gpd
-import numpy as np
 import pandas as pd
-import pyogrio
 import pyarrow.parquet as pq
+import pyogrio
 import xarray as xr
 from joblib import Parallel, delayed
 
 
 def read_ngen_waterbody_df(parm_file, lake_index_field="wb-id", lake_id_mask=None):
-    """
-    Reads .gpkg or lake.json file and prepares a dataframe, filtered
+    """Reads .gpkg or lake.json file and prepares a dataframe, filtered
     to the relevant reservoirs, to provide the parameters
     for level-pool reservoir computation.
     """
@@ -98,9 +96,8 @@ def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_paramet
         def read_layer(layer_name):
             if layer_name:
                 try:
-                    _df = gpd.read_file(geo_file_path, layer=layer_name)
-                    if 'geometry' in _df.columns and layer_name not in keep_geometry_layers:
-                        _df = _df.drop(columns=["geometry"])
+                    ignore_geom = layer_name not in keep_geometry_layers
+                    _df = gpd.read_file(geo_file_path, layer=layer_name, ignore_geometry=ignore_geom)
                     return _df
                 except pyogrio.errors.DataSourceError as e:
                     print(f"Error reading file {geo_file_path}: {e}")
