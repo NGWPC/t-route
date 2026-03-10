@@ -142,17 +142,17 @@ class RunContext:
     @cached_property
     def flowpaths_gdf(self) -> gpd.GeoDataFrame:
         """Load flowpaths layer."""
-        return gpd.read_file(self.hydrofabric_path, layer="flowpaths", ignore_geometry=True)
+        return gpd.read_file(self.hydrofabric_path, layer="flowpaths")
 
     @cached_property
     def virtual_nexus_gdf(self) -> gpd.GeoDataFrame:
         """Load virtual nexus layer."""
-        return gpd.read_file(self.hydrofabric_path, layer="virtual_nexus", ignore_geometry=True)
+        return gpd.read_file(self.hydrofabric_path, layer="virtual_nexus")
 
     @cached_property
     def nexus_gdf(self) -> gpd.GeoDataFrame:
         """Load nexus layer."""
-        return gpd.read_file(self.hydrofabric_path, layer="nexus", ignore_geometry=True)
+        return gpd.read_file(self.hydrofabric_path, layer="nexus")
 
     @cached_property
     def vfp_length_mapping(self) -> dict[int, float]:
@@ -738,10 +738,10 @@ def plot_optimal_reach_length(df: pd.DataFrame, out_path: Path) -> None:
 ### MAIN FUNCTIONS ###
 
 
-def generate_sampled_run_dataset(run_context: RunContext, generate_plots: bool = False) -> pd.DataFrame:
+def generate_sampled_run_dataset(run_context: RunContext, n_samples: int = 500, generate_plots: bool = False) -> pd.DataFrame:
     """Build dataset of run diagnostics at the reach and network level."""
     # Sample from reaches
-    reaches = sample_reaches(run_context)
+    reaches = sample_reaches(run_context, n_samples)
     routing = {}
     routing_ts = {}
 
@@ -779,11 +779,11 @@ def create_diagnostics(df_reaches: pd.DataFrame, df_routing: pd.DataFrame, df_ro
 
     export_test_summary(df_reaches, df_routing, df_routing_ts, run_context.diagnostic_test_path)
 
-def process_run(config_key: str):
+def process_run(config_key: str, n_samples: int = 500):
     """Export diagnostics for a t-route run."""
     run_context = RunContext(config_key)
     generate_reference_gage_plots(run_context)
-    df_reaches, df_routing, df_routing_ts = generate_sampled_run_dataset(run_context, generate_plots=False)
+    df_reaches, df_routing, df_routing_ts = generate_sampled_run_dataset(run_context, n_samples, generate_plots=False)
     create_diagnostics(df_reaches, df_routing, df_routing_ts, run_context)
 
 def main():
@@ -798,9 +798,16 @@ def main():
         help="Path to t-route config yaml.",
     )
 
+    parser.add_argument(
+        "-n",
+        "--n-samples",
+        help="Number of flowpaths to randomly sample for analysis.",
+        default=500
+    )
+
     args = parser.parse_args()
 
-    process_run(args.file)
+    process_run(args.file, args.n_samples)
 
 if __name__ == "__main__":
     main()
