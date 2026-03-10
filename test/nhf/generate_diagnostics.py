@@ -36,7 +36,7 @@ class RunContext:
         with open(self.config_path) as f:
             self.config = yaml.safe_load(f)
 
-        # self._links_df, self._nodes_df = None, None
+        self._links_df, self._nodes_df = None, None
 
     @property
     def result_output_dir(self) -> Path:
@@ -192,23 +192,23 @@ class RunContext:
         """Make a mapping from flowpath ID to stream order."""
         return dict(zip(self.flowpaths_gdf["fp_id"].to_numpy(), self.flowpaths_gdf["stream_order"].to_numpy()))
 
-    # @property
-    # def links_df(self) -> pd.DataFrame:
-    #     """Links that routing is performed on."""
-    #     if self._links_df is None:
-    #         self._discretize_network()
-    #     return self._links_df
+    @property
+    def links_df(self) -> pd.DataFrame:
+        """Links that routing is performed on."""
+        if self._links_df is None:
+            self._discretize_network()
+        return self._links_df
 
-    # @property
-    # def nodes_df(self) -> pd.DataFrame:
-    #     """Nodes that routing is performed between."""
-    #     if self._nodes_df is None:
-    #         self._discretize_network()
-    #     return self._nodes_df
+    @property
+    def nodes_df(self) -> pd.DataFrame:
+        """Nodes that routing is performed between."""
+        if self._nodes_df is None:
+            self._discretize_network()
+        return self._nodes_df
 
-    # def _discretize_network(self):
-    #     self._links_df, self._nodes_df = discretize_flowpaths(self.flowpaths_gdf, self.virtual_flowpaths_gdf, self.virtual_nexus_gdf, self.reference_flowpaths_gdf, self.nexus_gdf, self.nhf_discretization_len)
-    #     self._links_df["up_node_id"] = self._links_df["up_node_id"].fillna(-9999).astype(int)
+    def _discretize_network(self):
+        self._links_df, self._nodes_df = discretize_flowpaths(self.flowpaths_gdf, self.virtual_flowpaths_gdf, self.virtual_nexus_gdf, self.reference_flowpaths_gdf, self.nexus_gdf, self.nhf_discretization_len)
+        self._links_df["up_node_id"] = self._links_df["up_node_id"].fillna(-9999).astype(int)
 
 ### HELPER FUNCTIONS ###
 
@@ -301,8 +301,7 @@ def attribute_reaches(run_context: RunContext, reach_list: set[int]) -> dict[int
     return reach_attributes
 
 def reroute(run_context: RunContext, fp_id: int, qlat: np.ndarray, qus: np.ndarray, dt: float, qts_subdivisions: int):
-    route_links, _ = generate_links_and_nodes(fp_id, run_context)
-    # route_links = run_context.links_df[run_context.links_df["fp_id"] == fp_id]
+    route_links = run_context.links_df[run_context.links_df["fp_id"] == fp_id]
     div_id = run_context.reference_flowpaths_gdf.loc[run_context.reference_flowpaths_gdf["fp_id"] == fp_id, "div_id"].dropna().values[0]
     vfp_id = run_context.reference_flowpaths_gdf.loc[run_context.reference_flowpaths_gdf["div_id"] == div_id, "virtual_fp_id"].dropna().values
     vfps = run_context.virtual_flowpaths_gdf[run_context.virtual_flowpaths_gdf["virtual_fp_id"].isin(vfp_id)]
@@ -397,6 +396,7 @@ def _route(qlat: np.ndarray, qus: np.ndarray, dx: float, Bw: float, Tw: float, T
         "twl": geom["twl"],
         "celerity_recalc": geom["ck_recalc"],
         "x_recalc": geom["x_recalc"],
+        "courant_recalc": geom["ck_recalc"] * (dt / dx),
     }
 
     # Get ratio of reach length to courant ideal
@@ -502,7 +502,7 @@ def hydraulic_geometry(h: Union[float, np.ndarray], bw: float, tw: float, twcc: 
         "h_gt_bf": h_gt_bf,
         "q_recalc": Q,
         "ck_recalc": ck,
-        "x_recalc": X
+        "x_recalc": X,
     }
 
 def generate_reach_diagnostics(run_context: RunContext, reach_id: int, reach_attributes: dict[str, float], max_walk: float = 50.0, plot: bool = True) -> dict[str, float]:
@@ -689,16 +689,13 @@ def plot_attenuation(df: pd.DataFrame, out_path: Path) -> None:
 
 def plot_courant(df: pd.DataFrame, out_path: Path) -> None:
     """Plot distribution of Courant number for each reach."""
-    fig, axs = plt.subplots(nrows=2, figsize=(6, 10))
-    sns.kdeplot(df, x="max_courant", hue="stream_order", palette="viridis", fill=True, ax=axs[0], clip=(0, 10))
-    axs[0].set_xlabel("Maximum Courant Number")
-    sns.kdeplot(df, x="min_courant", hue="stream_order", palette="viridis", fill=True, ax=axs[1], clip=(0, 10))
-    axs[1].set_xlabel("Minimum Courant Number")
-    for ax in axs:
-        ax.grid()
-        ax.set_axisbelow(True)
-        ax.set_facecolor("whitesmoke")
-        ax.set_xlim(0, 1)
+    fig, ax = plt.subplots()
+    sns.kdeplot(df, x="courant", fill=True, ax=ax)
+    ax.set_xlabel("Courant Number")
+    ax.grid()
+    ax.set_axisbelow(True)
+    ax.set_facecolor("whitesmoke")
+    # ax.set_xlim(0, 1)
     fig.tight_layout()
     fig.savefig(out_path / "courant_number_distributions.png", dpi=300)
 
@@ -763,10 +760,11 @@ def generate_sampled_run_dataset(run_context: RunContext, generate_plots: bool =
     df_routing.to_parquet(run_context.result_output_dir / f"{run_context.run_id}_routing.parquet")
 
     df_routing_ts = pd.DataFrame.from_dict(routing_ts, orient="index")
+    df_routing_ts = df_routing_ts.explode(column=df_routing_ts.columns.values.tolist())
     df_routing_ts.to_parquet(run_context.result_output_dir / f"{run_context.run_id}_routing_ts.parquet")
     return df_reaches, df_routing, df_routing_ts
 
-def export_test_summary(diag_df: pd.DataFrame, out_path: Path) -> None:
+def export_test_summary(df_reaches: pd.DataFrame, df_routing: pd.DataFrame, df_routing_ts: pd.DataFrame, out_path: Path) -> None:
     """Check if diagnostic df is within tolerance thresholds."""
     pass
 
@@ -776,17 +774,16 @@ def create_diagnostics(df_reaches: pd.DataFrame, df_routing: pd.DataFrame, df_ro
     plot_reach_mass_conservation_vs_dx(df_reaches, run_context.diagnostic_plot_dir)
     plot_network_mass_conservation(df_reaches, run_context.diagnostic_plot_dir)
     plot_attenuation(df_reaches, run_context.diagnostic_plot_dir)
-    plot_courant(diag_df, run_context.diagnostic_plot_dir)
-    plot_celerity_vs_lag(diag_df, run_context.diagnostic_plot_dir)
-    plot_optimal_reach_length(diag_df, run_context.diagnostic_plot_dir)
+    plot_courant(df_routing_ts, run_context.diagnostic_plot_dir)
+    plot_optimal_reach_length(df_routing, run_context.diagnostic_plot_dir)
 
-    export_test_summary(diag_df, run_context.diagnostic_test_path)
+    export_test_summary(df_reaches, df_routing, df_routing_ts, run_context.diagnostic_test_path)
 
 def process_run(config_key: str):
     """Export diagnostics for a t-route run."""
     run_context = RunContext(config_key)
     generate_reference_gage_plots(run_context)
-    df_reaches, df_routing, df_routing_ts = generate_sampled_run_dataset(run_context, generate_plots=True)
+    df_reaches, df_routing, df_routing_ts = generate_sampled_run_dataset(run_context, generate_plots=False)
     create_diagnostics(df_reaches, df_routing, df_routing_ts, run_context)
 
 def main():
