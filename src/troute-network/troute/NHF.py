@@ -493,9 +493,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             else:
                 for f in qlat_files:
                     df = read_file(f)
-                    df["feature_id"] = df["feature_id"].map(
-                        lambda x: int(str(x).removeprefix("nex-")) if str(x).startswith("nex") else int(x)
-                    )
+                    if df["feature_id"].dtype == str:
+                        df["feature_id"] = df["feature_id"].astype(str).str.removeprefix("nex-").astype(int)
                     assert df["feature_id"].is_unique, (
                         f"'feature_id's must be unique. '{f!s}' contains duplicate 'feature_id's: {pformat(df.loc[df['feature_id'].duplicated(), 'feature_id'].to_list())}"
                     )
