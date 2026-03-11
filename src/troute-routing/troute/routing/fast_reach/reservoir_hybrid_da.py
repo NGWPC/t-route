@@ -1,7 +1,7 @@
 import numpy as np
 import logging
-from troute_ewts import MODULE_NAME
-LOG = logging.getLogger(MODULE_NAME)
+import ewts
+LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 def _modify_for_projected_storage(
     inflow, 

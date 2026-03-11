@@ -19,8 +19,8 @@ from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data
 import netCDF4
 from troute.config import Config
 
-from troute_ewts import configure_logging
-LOG = configure_logging()
+import ewts
+LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 class DAforcing_model():
 

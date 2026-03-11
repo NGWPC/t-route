@@ -14,8 +14,8 @@ import pyarrow.parquet as pq
 
 import troute.nhd_io as nhd_io
 
-from troute_ewts import MODULE_NAME
-LOG = logging.getLogger(MODULE_NAME)
+import ewts
+LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 def build_da_sets(da_params, run_sets, t0):
     """

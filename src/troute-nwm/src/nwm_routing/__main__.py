@@ -29,8 +29,8 @@ import troute.nhd_network_utilities_v02 as nnu
 import troute.hyfeature_network_utilities as hnu
 import sys
 
-from troute_ewts import MODULE_NAME
-LOG = logging.getLogger(MODULE_NAME)
+import ewts
+LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 '''
 High level orchestration of ngen t-route simulations for NWM application
