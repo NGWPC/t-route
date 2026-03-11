@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 import os
 import pathlib
 import time
-import logging
 import pyarrow as pa
 import pyarrow.parquet as pq
 import xarray as xr
@@ -18,8 +17,8 @@ from troute.nhd_network_utilities_v02 import organize_independent_networks
 import troute.nhd_io as nhd_io 
 from .AbstractRouting import MCOnly, MCwithDiffusive, MCwithDiffusiveNatlXSectionNonRefactored, MCwithDiffusiveNatlXSectionRefactored
 
-from troute_ewts import MODULE_NAME
-LOG = logging.getLogger(MODULE_NAME)
+import ewts
+LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 class AbstractNetwork(ABC):
     """

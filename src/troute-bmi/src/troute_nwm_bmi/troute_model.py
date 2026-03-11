@@ -1,6 +1,5 @@
 """Basic Model Interface backing model for NGEN t-route."""
 from __future__ import annotations
-import logging
 import time
 import typing
 import yaml
@@ -18,8 +17,8 @@ import troute.hyfeature_network_utilities as hnu
 import nwm_routing.__main__ as nwm_routing
 from nwm_routing.output import nwm_output_generator
 
-from troute_ewts import configure_logging, MODULE_NAME
-LOG = logging.getLogger(MODULE_NAME)
+import ewts
+LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 if typing.TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -35,8 +34,7 @@ class Model:
             data = yaml.load(reader, Loader=yaml.SafeLoader)
         self._config: dict = Config.with_strict_mode(**data).dict()
 
-        configure_logging()
-
+        LOG.bind()
         self.dt = int(self.forcing_parameters["dt"])
 
         LOG.info("Creating network of type " + self.supernetwork_parameters.get("network_type"))
