@@ -357,21 +357,16 @@ def distribute_catchment_discharge(
     """
     timestamps = div_lateralflows_df.columns
 
-    # Initialize routing qlats with zeros for all links
-    routing_qlats = pd.DataFrame(
-        0.0,
-        index=links_df.index,
-        columns=timestamps,
-    )
+    # -------------------------------
+    # Initialize DataFrames
+    routing_qlats = pd.DataFrame(0.0, index=links_df.index, columns=timestamps)
+    upstream_inflow_df = pd.DataFrame(0.0, index=links_df.index, columns=timestamps)
+    upstream_arr = upstream_inflow_df.to_numpy()
+    routing_arr = routing_qlats.to_numpy()
+    link_idx_map = {lid: i for i, lid in enumerate(upstream_inflow_df.index)}
 
-    # Initialize upstream inflow with zeros for all links
-    upstream_inflow_df = pd.DataFrame(
-        0.0,
-        index=links_df.index,
-        columns=timestamps,
-    )
-
-    # Build VFP info: div_id, percentage, and terminal nexus node
+    # -------------------------------
+    # Build VFP info
     vfp_info = vfp_dataframe[['div_id', 'percentage_area_contribution', 'dn_virtual_nex_id']].copy()
     vfp_info['div_id'] = vfp_info['div_id'].astype(int)
 
@@ -400,11 +395,13 @@ def distribute_catchment_discharge(
 
     # Compute flow_scaling_df (VFP-level qlats for non-routing output)
     flow_scaling_records = []
+    vfp_groups = vfp_info.groupby('div_id')
 
-    # Process each divide
     for div_id in div_lateralflows_df.index:
+        if int(div_id) not in vfp_groups.groups:
+            continue
         div_id_int = int(div_id)
-        div_qlat = div_lateralflows_df.loc[div_id]  # Series: timestamps -> values
+        div_qlat = div_lateralflows_df.loc[div_id]
 
         fp_id = div_to_fp.get(div_id_int)
         if fp_id is None:
@@ -415,45 +412,49 @@ def distribute_catchment_discharge(
 
         n_links = len(link_ids)
 
-        # Get VFPs for this divide
-        div_vfps = vfp_info[vfp_info['div_id'] == div_id_int]
+        # VFPs for this divide
+        div_vfps = vfp_groups.get_group(div_id_int)
         sum_pct = div_vfps['percentage_area_contribution'].sum()
 
         # VFP-covered area: upstream inflow at terminal nexus
-        for vfp_id, vfp_row in div_vfps.iterrows():
-            pct = vfp_row['percentage_area_contribution']
+        for vfp_row in div_vfps.itertuples():
+            pct = vfp_row.percentage_area_contribution
             vfp_qlat = div_qlat * pct
 
-            # Store for flow scaling output
-            flow_scaling_records.append(
-                pd.Series(vfp_qlat.values, index=timestamps, name=vfp_id)
-            )
+            # Flow-scaling output
+            flow_scaling_records.append(pd.Series(vfp_qlat.values, index=timestamps, name=vfp_row.Index))
 
             # Route as upstream inflow at terminal nexus node
-            dn_vnex = vfp_row['dn_virtual_nex_id']
+            dn_vnex = vfp_row.dn_virtual_nex_id
             if pd.notna(dn_vnex) and int(dn_vnex) in tnex_to_link:
                 target_link = tnex_to_link[int(dn_vnex)]
-                upstream_inflow_df.loc[target_link] += vfp_qlat.values
+                upstream_arr[link_idx_map[target_link], :] += vfp_qlat.values
             else:
-                # Fallback: no mapped terminal nexus -> distribute as qlat
+                # Fallback: distribute evenly across links
                 for lid in link_ids:
-                    routing_qlats.loc[lid] += vfp_qlat.values / n_links
+                    routing_arr[link_idx_map[lid], :] += vfp_qlat.values / n_links
 
-        # Remainder: upstream inflow at downstream physical nexus
+    # -------------------------------
+    # Remainder discharge
+
         remainder_pct = 1.0 - sum_pct
+
         if remainder_pct > 1e-10:
             remainder_qlat = div_qlat * remainder_pct
             dn_nex = fp_to_dn_nex.get(fp_id)
             dn_fp = nex_to_dn_fp.get(dn_nex) if dn_nex else None
             target_link = fp_to_first_link.get(dn_fp) if dn_fp else None
             if target_link is not None:
-                upstream_inflow_df.loc[target_link] += remainder_qlat.values
+                upstream_arr[link_idx_map[target_link], :] += vfp_qlat.values
             else:
-                # Terminal flowpath (no downstream): fall back to qlat
-                per_link = remainder_qlat.values / n_links
+                per_link = remainder_qlat.values / len(link_ids)
                 for lid in link_ids:
-                    routing_qlats.loc[lid] += per_link
+                    routing_arr[link_idx_map[lid], :] += per_link
 
+    upstream_inflow_df.iloc[:, :] = upstream_arr
+    routing_qlats.iloc[:, :] = routing_arr
+
+    # -------------------------------
     # Build flow_scaling_df
     if flow_scaling_records:
         flow_scaling_df = pd.DataFrame(flow_scaling_records)
