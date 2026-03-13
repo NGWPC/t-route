@@ -7,11 +7,11 @@ REPOROOT=`pwd`
 : "${EWTS_PY_ROOT:=$REPOROOT/../../../nwm-ewts/runtime/python/ewts}"
 
 # Preferred EWTS install prefix and wheel location
-: "${EWTS_INSTALL_PREFIX:=/tmp/ewts_install}"
-: "${EWTS_WHEEL_DIR:=$EWTS_INSTALL_PREFIX/python/dist}"
+: "${EWTS_PREFIX:=/tmp/ewts_install}"
+: "${EWTS_WHEEL_DIR:=$EWTS_PREFIX/python/dist}"
 
 echo "using EWTS_PY_ROOT=${EWTS_PY_ROOT}"
-echo "using EWTS_INSTALL_PREFIX=${EWTS_INSTALL_PREFIX}"
+echo "using EWTS_PREFIX=${EWTS_PREFIX}"
 echo "using EWTS_WHEEL_DIR=${EWTS_WHEEL_DIR}"
 
 #For each build step, you can set these to true to make it build
