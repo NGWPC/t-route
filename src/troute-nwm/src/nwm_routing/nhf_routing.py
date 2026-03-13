@@ -181,34 +181,6 @@ def nhf_routing(argv):
         
         route_start_time = time.time()
 
-        routing_df = network.links_df[[
-            "n",
-            "mainstem_lp",
-            "topwdth",
-            "slope",
-            "ncc",
-            "btmwdth",
-            "length_km",
-            "musx",
-            "chslp",
-            "topwdthcc",
-            "musk"
-        ]].copy()
-        routing_df["alt"] = np.zeros_like(routing_df["n"].values)
-        routing_df = routing_df.rename(columns={
-            "mainstem_lp": "mainstem",
-            "topwdth": "tw",
-            "slope": "s0",
-            "btmwdth": "bw",
-            "length_km": "dx",
-            "chslp": "cs",
-            "topwdthcc": "twcc"
-        })
-        routing_df["dx"] = routing_df["dx"] * 1000  # converted to meters
-
-        # Build flowveldepth_interorder for upstream inflow virtual segments
-        flowveldepth_interorder = network.build_flowveldepth_interorder(nts, qts_subdivisions)
-
         run_results, subnetwork_list = nwm_route(
             network.connections,
             network.reverse_network,
@@ -223,7 +195,7 @@ def nhf_routing(argv):
             nts,
             qts_subdivisions,
             network.independent_networks,
-            routing_df, # only routing where there are routing segments
+            network._dataframe,
             network.q0,
             network._qlateral,
             network._eloss,
@@ -257,20 +229,11 @@ def nhf_routing(argv):
             network.unrefactored_topobathy_df,
             firstRun,
             logFileName,
-            flowveldepth_interorder=flowveldepth_interorder,
+            flowveldepth_interorder=network.flowveldepth_interorder,
         )
         
         route_end_time = time.time()
         task_times['route_time'] += route_end_time - route_start_time
-
-        # Add flow-scaling to run-results
-        LOG.info(f"Running Flow-Scaling for run set: {run_set_iterator}")
-        run_results = append_nonrouting_to_run_results(
-            run_results,
-            network._flow_scaling_segment_df,
-            qts_subdivisions,
-            nts,
-        )
 
         # create initial conditions for next loop itteration
         network.new_q0(run_results)
@@ -335,7 +298,6 @@ def nhf_routing(argv):
             poi_crosswalk,
             logFileName,
             fp_outlet_crosswalk=network.fp_outlet_crosswalk,
-            link_ids=network.links_df.index,
         )
         
 

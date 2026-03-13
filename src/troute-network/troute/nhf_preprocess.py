@@ -8,6 +8,20 @@ import xarray as xr
 from joblib import Parallel, delayed
 
 
+def read_qlat_file(f):
+    df = read_file(f)
+
+    if df["feature_id"].dtype == str:
+        df["feature_id"] = df["feature_id"].str.removeprefix("nex-").astype(int)
+
+    if not df["feature_id"].is_unique:
+        raise ValueError(
+            f"'feature_id's must be unique. '{f!s}' contains duplicate "
+            f"'feature_id's: {df.loc[df['feature_id'].duplicated(), 'feature_id'].to_list()}"
+        )
+
+    return df.set_index("feature_id")
+
 def read_ngen_waterbody_df(parm_file, lake_index_field="wb-id", lake_id_mask=None):
     """Reads .gpkg or lake.json file and prepares a dataframe, filtered
     to the relevant reservoirs, to provide the parameters
