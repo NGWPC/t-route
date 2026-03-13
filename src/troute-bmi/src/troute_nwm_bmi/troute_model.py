@@ -247,7 +247,7 @@ class Model:
         self._timings["output_time"] = time.time() - output_start_time
 
         # update time as (ngen dt in seconds) * (number of steps processed)
-        self._time += self.ngen_dt * qlats.shape[1]
+        self._time += self._ngen_dt(bmi_values) * qlats.shape[1]
 
     def log_times(self):
         if self.show_timing:
@@ -375,12 +375,16 @@ class Model:
     def qts_subdivisions(self) -> int:
         return self.forcing_parameters["qts_subdivisions"]
 
-    @property
-    def ngen_dt(self) -> int:
+    def _ngen_dt(self, bmi_values: dict[str, NDArray]) -> int:
+        if ("ngen_dt" in bmi_values) and (len(bmi_values["ngen_dt"]) == 1):
+            dt = bmi_values["ngen_dt"][0]
+            if dt > 0:
+                return int(dt)
+        # backup if NGEN's delta time was not explicitly set
         return int(self.dt * self.qts_subdivisions)
 
     def _construct_qlats(self, bmi_values: dict[str, NDArray]):
-        dt = self.ngen_dt
+        dt = self._ngen_dt(bmi_values)
         step_time = self._network.t0
         water_source_ids = bmi_values["land_surface_water_source__id"]
         water_source_values = bmi_values["land_surface_water_source__volume_flow_rate"]

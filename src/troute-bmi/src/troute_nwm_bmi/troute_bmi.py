@@ -36,6 +36,7 @@ _INPUT_VAR_NAMES = [
     "land_surface_water_source__id",
     "land_surface_water_source__volume_flow_rate",
     "upstream_id",
+    "ngen_dt",
 ]
 
 
@@ -45,6 +46,7 @@ class BmiTroute(Bmi):
     def __init__(self):
         super().__init__()
         self._values: dict[str, NDArray] = {
+            "ngen_dt": np.array([-1], dtype=np.intc),
             "land_surface_water_source__id": np.zeros(0, dtype=np.intc),
             "land_surface_water_source__volume_flow_rate": np.zeros(0, dtype=np.double),
             "upstream_id": np.zeros(0, dtype=int),
