@@ -59,13 +59,10 @@ class BmiTroute(Bmi):
             "lake_water~outgoing__volume_flow_rate": np.zeros(0, dtype=np.float32),
             "lake_surface__elevation": np.zeros(0, dtype=np.float32),
         }
-        self._var_loc = "node"
-        self._var_grid_id = 0
-        self._time_units = "s"
         self._free_serialized()
 
     def initialize(self, bmi_cfg_file):
-        self._model = Model(bmi_cfg_file)
+        self._model = Model(bmi_cfg_file, self.get_start_time())
 
     def update(self):
         self._model.run(self._values)
@@ -142,16 +139,16 @@ class BmiTroute(Bmi):
 
     def get_end_time(self):
         """End time of model."""
-        return self._model.ngen_dt * (self._model.nts - 1)
+        return float(self._model.ngen_dt(self._values) * (self._model.nts - 1))
 
     def get_current_time(self):
         return self._model.time
 
     def get_time_step(self):
-        return self._model.ngen_dt
+        return self._model.ngen_dt(self._values)
 
     def get_time_units(self):
-        return self._time_units
+        return "s"
 
     def finalize(self):
         """Finalize model."""
@@ -221,10 +218,11 @@ class BmiTroute(Bmi):
         return self.get_value_ptr(var_name).nbytes
 
     def get_var_itemsize(self, name):
+        # needs to go through `get_var_type` for names without stored values
         return np.dtype(self.get_var_type(name)).itemsize
 
     def get_var_location(self, name):
-        return self._var_loc[name]
+        return "node"
 
     def get_var_grid(self, var_name):
         """Grid id for a variable.

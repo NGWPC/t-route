@@ -28,8 +28,8 @@ if typing.TYPE_CHECKING:
 class Model:
     dt: int
 
-    def __init__(self, config_file: str):
-        self._time = 0.0
+    def __init__(self, config_file: str, start_time: float):
+        self._time = start_time
 
         with open(config_file) as reader:
             data = yaml.load(reader, Loader=yaml.SafeLoader)
@@ -247,7 +247,7 @@ class Model:
         self._timings["output_time"] = time.time() - output_start_time
 
         # update time as (ngen dt in seconds) * (number of steps processed)
-        self._time += self._ngen_dt(bmi_values) * qlats.shape[1]
+        self._time += self.ngen_dt(bmi_values) * qlats.shape[1]
 
     def log_times(self):
         if self.show_timing:
@@ -375,8 +375,8 @@ class Model:
     def qts_subdivisions(self) -> int:
         return self.forcing_parameters["qts_subdivisions"]
 
-    def _ngen_dt(self, bmi_values: dict[str, NDArray]) -> int:
-        if ("ngen_dt" in bmi_values) and (len(bmi_values["ngen_dt"]) == 1):
+    def ngen_dt(self, bmi_values: dict[str, NDArray]) -> int:
+        if len(bmi_values.get("ngen_dt", "")) == 1:
             dt = bmi_values["ngen_dt"][0]
             if dt > 0:
                 return int(dt)
@@ -384,7 +384,7 @@ class Model:
         return int(self.dt * self.qts_subdivisions)
 
     def _construct_qlats(self, bmi_values: dict[str, NDArray]):
-        dt = self._ngen_dt(bmi_values)
+        dt = self.ngen_dt(bmi_values)
         step_time = self._network.t0
         water_source_ids = bmi_values["land_surface_water_source__id"]
         water_source_values = bmi_values["land_surface_water_source__volume_flow_rate"]
