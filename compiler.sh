@@ -75,7 +75,7 @@ if  [[ "$build_mc_kernel" == true ]]; then
 fi
 
 if  [[ "$build_diffusive_tulane_kernel" == true ]]; then
-  #building reach and resevoir kernel files .o  
+  #building reach and resevoir kernel files .o
   cd $REPOROOT/src/kernel/diffusive/
   make clean
   make diffusive.o
@@ -117,6 +117,15 @@ else
     pip install --editable "${EWTS_PY_ROOT}" || exit
   else
     pip install "${EWTS_PY_ROOT}" || exit
+  fi
+fi
+
+if [[ "$build_framework" == true ]]; then
+  cd $REPOROOT/src/troute-network
+  if [[ ${WITH_EDITABLE} == true ]]; then
+    pip install --no-build-isolation --editable . || exit
+  else
+    pip install --no-build-isolation . || exit
   fi
 fi
 
