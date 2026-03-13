@@ -1,6 +1,8 @@
+from concurrent.futures import ProcessPoolExecutor
 import time
 from pathlib import Path
 from pprint import pformat
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -11,14 +13,12 @@ from troute.nhf_topology import (
     get_terminal_nexus_ids,
     validate_connections,
 )
-from troute.nhf_discretize import (
-    discretize_flowpaths,
-    distribute_catchment_discharge,
-)
+from troute.nhf_discretize import discretize_flowpaths
+
 from troute.nhf_preprocess import (
     NHFPreprocessMixin,
     read_geo_file,
-    read_file,
+    read_qlat_file,
 )
 
 __verbose__ = False
@@ -178,35 +178,12 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         return np.nan  # pd.NA
 
     @property
-    def segment_index(self):
-        """
-            Segment IDs of all reaches (links) in parameter dataframe
-            and diffusive domain.
-        """
-        # list of all segments in the domain (MC + diffusive)
-        self._segment_index = self._links_df.index
-        if self._routing.diffusive_network_data:
-            for tw in self._routing.diffusive_network_data:
-                self._segment_index = self._segment_index.append(
-                    pd.Index(self._routing.diffusive_network_data[tw]['mainstem_segs'])
-                )
-        return self._segment_index
-
-    @property
     def links_df(self):
         return self._links_df
 
     @property
     def fp_outlet_crosswalk(self):
         """Map outlet link_id -> fp_id for reindexing outputs."""
-        if not hasattr(self, '_fp_outlet_crosswalk') or self._fp_outlet_crosswalk is None:
-            self._fp_outlet_crosswalk = {}
-            for fp_id, dn_nex in self._fp_to_dn_nex.items():
-                # Find the link belonging to this fp whose dn_node_id matches the fp's downstream nexus
-                mask = (self._links_df['fp_id'] == fp_id) & (self._links_df['dn_node_id'] == dn_nex)
-                matches = self._links_df.index[mask]
-                if len(matches) > 0:
-                    self._fp_outlet_crosswalk[matches[0]] = fp_id
         return self._fp_outlet_crosswalk
 
     def new_q0(self, run_results):
@@ -216,61 +193,17 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         flowveldepth_interorder, so they never appear in run_results.
         """
         super().new_q0(run_results)
-        if self._nexus_virtual_seg_ids:
-            vseg_ids = list(self._nexus_virtual_seg_ids.values())
-            vseg_q0 = pd.DataFrame(
-                0.0, index=vseg_ids, columns=self._q0.columns, dtype="float32",
-            )
-            self._q0 = pd.concat([self._q0, vseg_q0])
+        vseg_q0 = pd.DataFrame(
+            0.0, index=self.upstream_connection_ids, columns=self._q0.columns, dtype="float32",
+        )
+        self._q0 = pd.concat([self._q0, vseg_q0])
         return self._q0
 
     def preprocess_network(
         self, flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus,
         nexus=None, discretization_len_m=300.0,
     ):
-        assert not virtual_flowpaths.empty, "No virtual flowpaths read to memory from .gpkg"
-        if nexus is None:
-            nexus = pd.DataFrame(columns=['nex_id', 'dn_fp_id'])
-
-        # Store reference_flowpaths for use in build_qlateral_array
-        self._reference_flowpaths = reference_flowpaths
-
-        vfp_to_fp_map = reference_flowpaths[reference_flowpaths['virtual_fp_id'].notna()][
-            ['virtual_fp_id', 'fp_id', 'div_id']
-        ].copy()
-        # NHF 1.1.2: VFP rows may have NULL fp_id; derive from div_id
-        vfp_to_fp_map['fp_id'] = vfp_to_fp_map['fp_id'].fillna(vfp_to_fp_map['div_id'])
-        _vfp = virtual_flowpaths.merge(
-            vfp_to_fp_map,
-            left_on='virtual_fp_id',
-            right_on='virtual_fp_id',
-            how='left'
-        )
-        result = _vfp.merge(
-            flowpaths,
-            left_on='fp_id',
-            right_on='fp_id',
-            how='left',
-            suffixes=('', '_flowpath')  # Keep vfp columns as-is, suffix flowpath columns
-        )
-        cols_to_drop = [col for col in result.columns if col.endswith('_flowpath')]
-        result = result.drop(columns=cols_to_drop)
-        # Drop geometry columns carried from flowpath merge (not needed for VFP routing)
-        if 'geometry' in result.columns:
-            result = result.drop(columns=['geometry'])
-        self._dataframe = result
-
-        # make the flowpath linkage (kept for VFP qlat distribution compatibility)
-        self._flowpath_dict = dict(zip(
-            result.loc[:, 'dn_virtual_nex_id'],
-            result.loc[:, 'virtual_fp_id']
-        ))
-
-        self._dataframe.set_index("virtual_fp_id", inplace=True)
-        self._dataframe = self.dataframe.sort_index()
-
-        # Discretize flowpaths into links and nodes
-        self._links_df, self._nodes_df = discretize_flowpaths(
+        self._dataframe, self._fp_outlet_crosswalk = discretize_flowpaths(
             flowpaths=flowpaths,
             virtual_flowpaths=virtual_flowpaths,
             virtual_nexus=virtual_nexus,
@@ -278,149 +211,115 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             nexus=nexus,
             discretization_len_m=discretization_len_m,
         )
+        self._connections = None
+        self._terminal_codes = set(self._dataframe["downstream"]).difference(self._dataframe.index)
 
-        # Build link connections
-        self._connections = build_link_connections(
-            links_df=self._links_df,
-            nexus=nexus,
-        )
+        self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, flowpaths)
 
-        # Store mappings for upstream inflow routing (used by distribute_catchment_discharge)
-        self._fp_to_dn_nex = dict(zip(
-            flowpaths['fp_id'].astype(int),
-            flowpaths['dn_nex_id'].astype(int),
-        ))
-        self._nex_to_dn_fp = {}
-        if not nexus.empty:
-            valid_nex = nexus[nexus['dn_fp_id'].notna()]
-            if not valid_nex.empty:
-                self._nex_to_dn_fp = dict(zip(
-                    valid_nex['nex_id'].astype(int),
-                    valid_nex['dn_fp_id'].astype(int),
-                ))
 
-        # Initialize upstream inflow state (populated during forcing assembly)
-        self._upstream_inflow_df = None
-        self._nexus_virtual_seg_ids = {}
+    def _build_div_weighting_matrix(self, virtual_flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, flowpaths: pd.DataFrame):
+        """Create weights that can be used to expand div direct runoff into vfp direct runoff."""
+        # Make a dataframe for every vfp with percentage_area_contribution, div_id, and dn_nex_id
+        ref = reference_flowpaths[["virtual_fp_id", "div_id"]].fillna(value={"virtual_fp_id": -9999}).astype("Int64").drop_duplicates()
+        vfp_map = pd.merge(ref, virtual_flowpaths.reset_index()[["virtual_fp_id", "percentage_area_contribution", "dn_virtual_nex_id"]], on="virtual_fp_id", how="left")
 
-        # Create static virtual segments for all upstream inflow injection
-        # points.  This must happen before validation and before any forcing
-        # assembly so that _connections (and therefore rconn / subnetwork_list)
-        # never change between loops.
-        self._create_static_virtual_segments()
+        # For divs without a vfp, force dn_nex_id using fp_id
+        # TODO: Once new NHF ships, this should be impossible
+        div_ds_nex = pd.merge(flowpaths[["fp_id", "dn_nex_id"]], reference_flowpaths[["div_id", "fp_id"]], how="left", on="fp_id")
+        div_to_ds_nex = div_ds_nex.set_index("fp_id")["dn_nex_id"].to_dict()
+        mask = vfp_map["dn_virtual_nex_id"].isna()
+        vfp_map.loc[mask, "dn_virtual_nex_id"] = vfp_map.loc[mask, "div_id"].map(div_to_ds_nex)
+        # Force terminal vfps to be applied to up node.
+        terminal_dict = {r.downstream: r.Index for r in self._dataframe[self._dataframe["downstream"].isin(self._terminal_codes)].itertuples()}
+        terminal_mask = vfp_map["dn_virtual_nex_id"].isin(self._terminal_codes)
+        vfp_map.loc[terminal_mask, "dn_virtual_nex_id"] = vfp_map.loc[terminal_mask, "div_id"].map(terminal_dict)
 
-        # Validate link connections
-        is_valid, orphaned = validate_connections(self._connections)
-        if not is_valid:
-            raise ValueError(
-                f"Invalid link connections: {len(orphaned)} downstream IDs not found. "
-                f"First 10: {list(orphaned)[:10]}"
-            )
+        vfp_map["dn_virtual_nex_id"] = vfp_map["dn_virtual_nex_id"].astype(int)
 
-        # Build terminal codes from regular nexuses where dn_fp_id IS NULL (network outlets)
-        if not nexus.empty:
-            self._terminal_codes = set(
-                nexus.loc[nexus['dn_fp_id'].isna(), 'nex_id'].astype(int)
-            )
-        else:
-            self._terminal_codes = get_terminal_nexus_ids(virtual_nexus)
+        # In case percent doesn't sum to 100, distribute remainder evenly
+        groups = vfp_map["div_id"].astype("int64").to_numpy()
+        self.weights = np.nan_to_num(vfp_map["percentage_area_contribution"].to_numpy())
 
-        # Build upstream terminal: links whose dn_node_id is in terminal_codes
-        self._upstream_terminal = {}
-        for nex_id in self._terminal_codes:
-            terminal_links = self._links_df[
-                self._links_df['dn_node_id'] == nex_id
-            ].index.tolist()
-            if terminal_links:
-                self._upstream_terminal[nex_id] = set(terminal_links)
+        known_sum = np.bincount(groups, weights=self.weights)
+        vfp_count = np.bincount(groups)
 
-        # Store a dataframe containing info about nexus points. This will be reprojected to lat/lon
-        # and filtered for only diffusive domain tailwaters in AbstractNetwork.py.
-        # Location information will be used to advertise tailwater locations of diffusive domains
-        # to the model engine/coastal models
-        self._nexus_latlon = virtual_nexus
+        share = (1 - known_sum) / vfp_count
+        self.weights += share[groups]
 
-    def _create_static_virtual_segments(self):
-        """
-        Create virtual segments for ALL upstream inflow injection points.
+        self.vfp_nex_ids = vfp_map["dn_virtual_nex_id"].to_numpy()
+        self.vfp_divs = vfp_map["div_id"].to_numpy()
+        self.weights = self.weights[:, np.newaxis]
 
-        Injection points are determined purely from the network topology:
-          1. Terminal virtual nexus targets — the link downstream of each
-             terminal nexus node (where a VFP meets the main channel).
-          2. Remainder-flow targets — the most-upstream link of each
-             downstream flowpath (where the un-VFP'd remainder enters).
+        # Assign new IDs to virtual flowpaths to avoid name collision with _dataframe links
+        start_id = self._dataframe.index.max() + 1
+        self.upstream_connection_ids = np.arange(start_id, start_id + len(vfp_map))
+        # Add to connections
+        self.connections  # Trigger calc
+        for up, dn in zip(self.upstream_connection_ids, self.vfp_nex_ids):
+            self._connections[up] = [dn]
+        # Add to _dataframe TODO: There are so many ways to optimize this to have a lower memory footprint.
+        self._dataframe = pd.concat([self._dataframe, pd.DataFrame({"us_node_id": self.upstream_connection_ids, "downstream": self.vfp_nex_ids}).set_index('us_node_id')])
 
-        Virtual segments are created once during __init__ and never removed,
-        so that _connections (and therefore rconn / subnetwork_list) stay
-        stable across forcing loops.
-        """
-        target_link_ids = set()
+    def assemble_forcings(self, run,):
+        self._fill_run_defaults(run)
+        div_direct_runoff_df = self._load_forcing(run)
+        self.flowveldepth_interorder = self.build_flowveldepth_interorder(div_direct_runoff_df, run)
+        super().assemble_forcings(run)
 
-        # (1) Terminal nexus targets: dn_link_id for each terminal nexus node
-        if not self._nodes_df.empty:
-            tnex = self._nodes_df[self._nodes_df['is_terminal_nexus']]
-            if not tnex.empty:
-                target_link_ids.update(tnex['dn_link_id'].dropna().astype(int))
+    def _fill_run_defaults(self, run):
+        defaults = {
+            "t0": self.t0,
+            "dt": self.forcing_parameters.get("dt"),
+            "qts_subdivisions": self.forcing_parameters.get("qts_subdivisions"),
+            "qlat_input_folder": self.forcing_parameters.get("qlat_input_folder"),
+            "qlat_file_index_col": self.forcing_parameters.get("qlat_file_index_col", "feature_id"),
+            "qlat_file_value_col": self.forcing_parameters.get("qlat_file_value_col", "q_lateral"),
+            "qlat_file_gw_bucket_flux_col": self.forcing_parameters.get(
+                "qlat_file_gw_bucket_flux_col", "qBucket"
+            ),
+            "qlat_file_terrain_runoff_col": self.forcing_parameters.get(
+                "qlat_file_terrain_runoff_col", "qSfcLatRunoff"
+            ),
+            "et_index_name": self.forcing_parameters.get("et_file_index_col", "divide_id"),
+            "et_var_name": self.forcing_parameters.get("et_file_value_col", "ACTUAL_ET"),
+        }
 
-        # (2) Remainder-flow targets: most-upstream link of each downstream fp
-        fp_to_first_link = {}
-        for lid, row in self._links_df[self._links_df['up_node_id'].isna()].iterrows():
-            fp_to_first_link[int(row['fp_id'])] = lid
+        # run values override defaults
+        for k, v in defaults.items():
+            run.setdefault(k, v)
 
-        for fp_id, dn_nex in self._fp_to_dn_nex.items():
-            dn_fp = self._nex_to_dn_fp.get(dn_nex)
-            if dn_fp is not None:
-                first_link = fp_to_first_link.get(dn_fp)
-                if first_link is not None:
-                    target_link_ids.add(int(first_link))
 
-        # Filter to links that actually exist in _links_df
-        target_link_ids = sorted(target_link_ids & set(self._links_df.index))
+    def _load_forcing(self, run: dict[str, Any]):
+        qlat_input_folder = run.get("qlat_input_folder", None)
 
-        if not target_link_ids:
-            return
+        if qlat_input_folder:
+            qlat_input_folder = Path(qlat_input_folder)
+            if "qlat_files" in run:
+                qlat_files = run.get("qlat_files")
+                qlat_files = [qlat_input_folder.joinpath(f) for f in qlat_files]
+            elif "qlat_file_pattern_filter" in run:
+                qlat_file_pattern_filter = run.get("qlat_file_pattern_filter", "*CHRT_OUT*")
+                qlat_files = sorted(qlat_input_folder.glob(qlat_file_pattern_filter))
+                # TODO: Filter for max_col = 1 + nts // qts_subdivisions
 
-        # Generate virtual segment IDs above existing ID space
-        all_ids = list(self._links_df.index) + list(self._connections.keys())
-        next_id = max(all_ids) + 1
+            dfs = []
 
-        virtual_seg_ids = {}
-        virtual_link_records = []
+            # FIXME Temporary solution to allow t-route to use ngen nex-* output files as forcing files
+            # This capability should be here, but we need to think through how to handle all of this
+            # data in memory for large domains and many timesteps... - shorvath, Feb 28, 2024
+            qlat_file_pattern_filter = self.forcing_parameters.get("qlat_file_pattern_filter", None)
+            if qlat_file_pattern_filter == "nex-*":
+                raise NotImplementedError("Nex-output not implemented!")
+            else:
+                with ProcessPoolExecutor(max_workers=self.compute_parameters.get("cpu_pool", 1)) as exe:
+                    dfs = list(exe.map(read_qlat_file, qlat_files))
 
-        for target_link_id in target_link_ids:
-            virtual_seg_id = next_id
-            next_id += 1
-            virtual_seg_ids[int(target_link_id)] = virtual_seg_id
+            # lateral flows [m^3/s] indexed by div_id (divide/catchment)
+            div_direct_runoff = pd.concat(dfs, axis=1)
+            self.run_ts = div_direct_runoff.columns
+            return div_direct_runoff
 
-            # Virtual segment flows into target link — this makes it
-            # appear in rconn as upstream of the target link, which is
-            # how compute.py detects offnetwork_upstreams.
-            self._connections[virtual_seg_id] = [int(target_link_id)]
-
-            # Build row with channel params inherited from target link
-            target_row = self._links_df.loc[target_link_id]
-            record = {
-                'link_id': virtual_seg_id,
-                'fp_id': target_row['fp_id'],
-                'div_id': target_row.get('div_id', 0),
-                'dn_node_id': target_row.get('dn_node_id', 0),
-                'up_node_id': None,
-                'length_km': target_row['length_km'],
-            }
-            # Copy channel params
-            for col in self._links_df.columns:
-                if col not in record:
-                    record[col] = target_row[col]
-            virtual_link_records.append(record)
-
-        # Add virtual segment rows to links_df
-        if virtual_link_records:
-            virtual_df = pd.DataFrame(virtual_link_records).set_index('link_id')
-            self._links_df = pd.concat([self._links_df, virtual_df])
-
-        self._nexus_virtual_seg_ids = virtual_seg_ids
-
-    def build_flowveldepth_interorder(self, nts, qts_subdivisions):
+    def build_flowveldepth_interorder(self, div_direct_runoff_df: pd.DataFrame, run: dict[str, Any]):
         """
         Build flowveldepth_interorder dict for upstream inflow virtual segments.
 
@@ -439,109 +338,47 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         dict
             {virtual_seg_id: {"results": [q0, 0.0, 0.0, q1, 0.0, 0.0, ...]}}
         """
-        fvd_interorder = {}
-        if self._upstream_inflow_df is None or not self._nexus_virtual_seg_ids:
-            return fvd_interorder
+        # Expand runoff into virtual flowpaths (d x t) -> (vfp x t)
+        div_ids = div_direct_runoff_df.index.to_numpy()
+        div_order = np.argsort(div_ids)
+        div_sorted = div_ids[div_order]
+        vfp_div_ind = div_order[np.searchsorted(div_sorted, self.vfp_divs)]
+        vfp_flows = div_direct_runoff_df.values[vfp_div_ind, :] * self.weights
 
-        # Precompute qlat indices for all routing timesteps
-        qlat_idx = np.arange(nts) // qts_subdivisions
+        # Aggregate by nexus (vfp x t) -> (n x t)
+        # unique_ids, inv = np.unique(self.vfp_nex_ids, return_inverse=True)
+        unique_ids, inv = np.unique(self.upstream_connection_ids, return_inverse=True)
+        out = np.zeros((len(unique_ids), vfp_flows.shape[1]))
+        np.add.at(out, inv, vfp_flows)
 
-        for target_link_id, virtual_seg_id in self._nexus_virtual_seg_ids.items():
-            row = self._upstream_inflow_df.loc[target_link_id].to_numpy(dtype=float)
+        # Resample for qts_subdivision
+        qts_subdivisions = run.get("qts_subdivisions", 1)
+        out = np.repeat(out, qts_subdivisions, axis=1)
+        rows, cols = out.shape
+        expanded = np.zeros((rows, cols * 3), dtype=out.dtype)
+        expanded[:, ::3] = out
 
-            # Clamp indices to last qlat step
-            idx = np.minimum(qlat_idx, len(row) - 1)
+        # Convert to a dictionary
+        d = {uid: {"results": row} for uid, row in zip(unique_ids, out)}
 
-            q_series = row[idx]
-
-            # Velocity and depth are set to 0 because the MC kernel
-            # only sums flow (index 0) from upstream segments when
-            # computing q_up; velocity and depth are never propagated
-            # across segment boundaries.
-            results = np.zeros(nts * 3, dtype=float)
-            results[0::3] = q_series
-
-            fvd_interorder[virtual_seg_id] = {"results": results.tolist()}
-        return fvd_interorder
+        # # Add in spots for links
+        # zero_row = np.zeros(cols)
+        # d2 = {i: {"results": zero_row} for i in self._dataframe.index}
+        # d.update(d2)
+        return d
 
     def build_qlateral_array(
         self,
         run,
     ):
-        # TODO: set default/optional arguments
-        qts_subdivisions = run.get("qts_subdivisions", 1)
-        nts = run.get("nts", 1)
-        qlat_input_folder = run.get("qlat_input_folder", None)
-
-        if qlat_input_folder:
-            qlat_input_folder = Path(qlat_input_folder)
-            if "qlat_files" in run:
-                qlat_files = run.get("qlat_files")
-                qlat_files = [qlat_input_folder.joinpath(f) for f in qlat_files]
-            elif "qlat_file_pattern_filter" in run:
-                qlat_file_pattern_filter = run.get("qlat_file_pattern_filter", "*CHRT_OUT*")
-                qlat_files = sorted(qlat_input_folder.glob(qlat_file_pattern_filter))
-
-            dfs = []
-
-            # FIXME Temporary solution to allow t-route to use ngen nex-* output files as forcing files
-            # This capability should be here, but we need to think through how to handle all of this
-            # data in memory for large domains and many timesteps... - shorvath, Feb 28, 2024
-            qlat_file_pattern_filter = self.forcing_parameters.get("qlat_file_pattern_filter", None)
-            if qlat_file_pattern_filter == "nex-*":
-                raise NotImplementedError("Nex-output not implemented!")
-            else:
-                for f in qlat_files:
-                    df = read_file(f)
-                    if df["feature_id"].dtype == str:
-                        df["feature_id"] = df["feature_id"].astype(str).str.removeprefix("nex-").astype(int)
-                    assert df["feature_id"].is_unique, (
-                        f"'feature_id's must be unique. '{f!s}' contains duplicate 'feature_id's: {pformat(df.loc[df['feature_id'].duplicated(), 'feature_id'].to_list())}"
-                    )
-                    df = df.set_index("feature_id")
-                    dfs.append(df)
-
-                # lateral flows [m^3/s] indexed by div_id (divide/catchment)
-                div_lateralflows_df = pd.concat(dfs, axis=1)
-
-                # Distribute catchment discharge to links and upstream inflow.
-                # Exclude virtual segments so fp_to_first_link resolves to
-                # real links (virtual segs share fp_id and up_node_id=None,
-                # which would shadow real first-links and misdirect remainder flow).
-                vseg_ids = set(self._nexus_virtual_seg_ids.values()) if self._nexus_virtual_seg_ids else set()
-                real_links_df = self._links_df.drop(index=list(vseg_ids), errors='ignore')
-                qlats_df, self._flow_scaling_segment_df, self._upstream_inflow_df = \
-                    distribute_catchment_discharge(
-                        div_lateralflows_df,
-                        self._dataframe,
-                        real_links_df,
-                        self._nodes_df,
-                        self._reference_flowpaths,
-                        self._fp_to_dn_nex,
-                        self._nex_to_dn_fp,
-                    )
-        else:
-            raise ValueError("qlat_input_folder does not exist")
-        all_df = pd.DataFrame(
-            np.zeros((len(self.segment_index), len(qlats_df.columns))),
+        # In NHF, qlats are added at the top of the next d/s reach
+        self._qlateral = pd.DataFrame(
+            np.zeros((len(self.segment_index), len(self.run_ts))),
                 index=self.segment_index,
-                columns=qlats_df.columns,
+                columns=self.run_ts,
         )
-        all_df.loc[qlats_df.index] = qlats_df
-        qlats_df = all_df.sort_index()
-
-        # column filtering
-        max_col = 1 + nts // qts_subdivisions
-        if len(qlats_df.columns) > max_col:
-            qlats_df.drop(qlats_df.columns[max_col:], axis=1, inplace=True)
-
-        # final filter to segment_index
-        if not self.segment_index.empty:
-            qlats_df = qlats_df[qlats_df.index.isin(self.segment_index)]
-
-        self._qlateral = qlats_df
-
-
+        return
+ 
 
     def build_et_array(
         self,

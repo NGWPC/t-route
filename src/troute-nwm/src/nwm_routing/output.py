@@ -259,12 +259,8 @@ def nwm_output_generator(
 
         # reindex from link_id to fp_id, keeping outlet links + non-link rows (VFPs)
         if fp_outlet_crosswalk:
-            outlet_link_ids = set(fp_outlet_crosswalk.keys())
-            all_link_ids = set(link_ids) if link_ids is not None else outlet_link_ids
-            # Keep outlet links and any non-link rows (e.g. VFP flow-scaled)
-            flowveldepth = flowveldepth.loc[
-                flowveldepth.index.isin(outlet_link_ids) | ~flowveldepth.index.isin(all_link_ids)
-            ]
+            og_fp_mask = flowveldepth.index.isin(set(fp_outlet_crosswalk.keys()))
+            flowveldepth = flowveldepth.loc[og_fp_mask]
             flowveldepth = flowveldepth.rename(index=fp_outlet_crosswalk)
 
         # todo: create a unit test by saving FVD array to disk and then checking that
@@ -290,11 +286,7 @@ def nwm_output_generator(
 
             # reindex courant from link_id to fp_id
             if fp_outlet_crosswalk:
-                outlet_link_ids_c = set(fp_outlet_crosswalk.keys())
-                all_link_ids_c = set(link_ids) if link_ids is not None else outlet_link_ids_c
-                courant = courant.loc[
-                    courant.index.isin(outlet_link_ids_c) | ~courant.index.isin(all_link_ids_c)
-                ]
+                courant = courant.loc[og_fp_mask]
                 courant = courant.rename(index=fp_outlet_crosswalk)
 
         LOG.debug("Constructing the FVD DataFrame took %s seconds." % (time.time() - start))
