@@ -1,6 +1,7 @@
 from collections import defaultdict
 from itertools import chain
 from functools import partial
+from typing import Literal
 from joblib import delayed, Parallel
 from datetime import datetime, timedelta
 import time
@@ -10,7 +11,7 @@ import copy
 import os.path
 
 import troute.nhd_network as nhd_network
-from troute.routing.fast_reach.mc_reach import compute_network_structured
+from troute.routing.fast_reach.mc_reach import compute_network_structured, QlatLocation
 import troute.routing.diffusive_utils_v02 as diff_utils
 from troute.routing.fast_reach import diffusive
 
@@ -588,6 +589,7 @@ def compute_nhd_routing_v02(
     subnetwork_list,
     flowveldepth_interorder = {},
     from_files = True,
+    qlat_add_loc: Literal["top", "middle", "bottom"] = "middle",
 ):
 
     da_decay_coefficient = da_parameter_dict.get("da_decay_coefficient", 0)
@@ -596,6 +598,14 @@ def compute_nhd_routing_v02(
     
     start_time = time.time()
     compute_func = _compute_func_map[compute_func_name]
+    if qlat_add_loc == "top":
+        qlat_add_loc_c = QlatLocation.TOP
+    elif qlat_add_loc == "middle":
+        qlat_add_loc_c = QlatLocation.MIDDLE
+    elif qlat_add_loc == "bottom":
+        qlat_add_loc_c = QlatLocation.BOTTOM
+    else:
+        raise ValueError(f"qlat_add_loc was {qlat_add_loc}, but must be one of 'top', 'middle', or 'bottom'")
     if parallel_compute_method == "by-subnetwork-jit-clustered":
         
         # Create subnetwork objects if they have not already been created
@@ -1304,6 +1314,7 @@ def compute_nhd_routing_v02(
                             assume_short_ts,
                             return_courant,
                             from_files=from_files,
+                            qlat_add_loc=qlat_add_loc_c
                         )
                     )
 

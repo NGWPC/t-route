@@ -186,19 +186,6 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         """Map outlet link_id -> fp_id for reindexing outputs."""
         return self._fp_outlet_crosswalk
 
-    def new_q0(self, run_results):
-        """Override to add zero-valued q0 rows for virtual segments.
-
-        Virtual segments are offnetwork_upstreams whose flow comes from
-        flowveldepth_interorder, so they never appear in run_results.
-        """
-        super().new_q0(run_results)
-        vseg_q0 = pd.DataFrame(
-            0.0, index=self.upstream_connection_ids, columns=self._q0.columns, dtype="float32",
-        )
-        self._q0 = pd.concat([self._q0, vseg_q0])
-        return self._q0
-
     def preprocess_network(
         self, flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus,
         nexus=None, discretization_len_m=300.0,
@@ -249,22 +236,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         self.vfp_nex_ids = vfp_map["dn_virtual_nex_id"].to_numpy()
         self.vfp_divs = vfp_map["div_id"].to_numpy()
         self.weights = self.weights[:, np.newaxis]
+        self.zero_nodes = list(set(self._dataframe.index).difference(self.vfp_nex_ids))
 
-        # Assign new IDs to virtual flowpaths to avoid name collision with _dataframe links
-        start_id = self._dataframe.index.max() + 1
-        self.upstream_connection_ids = np.arange(start_id, start_id + len(vfp_map))
-        # Add to connections
-        self.connections  # Trigger calc
-        for up, dn in zip(self.upstream_connection_ids, self.vfp_nex_ids):
-            self._connections[up] = [dn]
-        # Add to _dataframe TODO: There are so many ways to optimize this to have a lower memory footprint.
-        self._dataframe = pd.concat([self._dataframe, pd.DataFrame({"us_node_id": self.upstream_connection_ids, "downstream": self.vfp_nex_ids}).set_index('us_node_id')])
-
-    def assemble_forcings(self, run,):
-        self._fill_run_defaults(run)
-        div_direct_runoff_df = self._load_forcing(run)
-        self.flowveldepth_interorder = self.build_flowveldepth_interorder(div_direct_runoff_df, run)
-        super().assemble_forcings(run)
 
     def _fill_run_defaults(self, run):
         defaults = {
@@ -371,13 +344,26 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         self,
         run,
     ):
-        # In NHF, qlats are added at the top of the next d/s reach
-        self._qlateral = pd.DataFrame(
-            np.zeros((len(self.segment_index), len(self.run_ts))),
-                index=self.segment_index,
-                columns=self.run_ts,
-        )
-        return
+        # Load qlats
+        div_direct_runoff_df = self._load_forcing(run)
+        # Expand runoff into virtual flowpaths (d x t) -> (vfp x t)
+        div_ids = div_direct_runoff_df.index.to_numpy()
+        div_order = np.argsort(div_ids)
+        div_sorted = div_ids[div_order]
+        vfp_div_ind = div_order[np.searchsorted(div_sorted, self.vfp_divs)]
+        vfp_flows = div_direct_runoff_df.values[vfp_div_ind, :] * self.weights
+
+        # Aggregate by nexus (vfp x t) -> (n x t)
+        unique_ids, inv = np.unique(self.vfp_nex_ids, return_inverse=True)
+        # unique_ids, inv = np.unique(self.upstream_connection_ids, return_inverse=True)
+        out = np.zeros((len(unique_ids), vfp_flows.shape[1]))
+        np.add.at(out, inv, vfp_flows)
+
+        qlat_valid = pd.DataFrame(out, index=unique_ids, columns=self.run_ts)
+
+        # Add empty records for other links
+        qlat_zero = pd.DataFrame(0.0, index=self.zero_nodes, columns=self.run_ts)
+        self._qlateral = pd.concat([qlat_valid, qlat_zero])
  
 
     def build_et_array(

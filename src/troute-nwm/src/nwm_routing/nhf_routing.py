@@ -229,7 +229,8 @@ def nhf_routing(argv):
             network.unrefactored_topobathy_df,
             firstRun,
             logFileName,
-            flowveldepth_interorder=network.flowveldepth_interorder,
+            # flowveldepth_interorder=network.flowveldepth_interorder,
+            qlat_add_loc = "top"  # All NHF lats go in top
         )
         
         route_end_time = time.time()

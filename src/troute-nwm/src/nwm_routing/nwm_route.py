@@ -1,6 +1,7 @@
 """A file to hold the nwm routing function"""
 import logging
 import time
+from typing import Literal
 
 from troute.routing.compute import compute_nhd_routing_v02, compute_diffusive_routing, compute_log_mc, compute_log_diff
 
@@ -57,6 +58,7 @@ def nwm_route(
     logFileName='troute_run_log.txt',  
     flowveldepth_interorder={},
     from_files=False,
+    qlat_add_loc: Literal["top", "middle", "bottom"] = "middle",
 ):
 
     ################### Main Execution Loop across ordered networks      
@@ -148,6 +150,7 @@ def nwm_route(
         subnetwork_list,
         flowveldepth_interorder,
         from_files = from_files,
+        qlat_add_loc=qlat_add_loc,
     )
     LOG.debug("MC computation complete in %s seconds." % (time.time() - start_time_mc))
     # returns list, first item is run result, second item is subnetwork items

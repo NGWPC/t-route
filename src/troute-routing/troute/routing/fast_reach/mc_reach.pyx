@@ -1,5 +1,6 @@
 # cython: language_level=3, boundscheck=True, wraparound=False, profile=True
 
+from enum import IntEnum
 import numpy as np
 from itertools import chain
 from operator import itemgetter
@@ -31,6 +32,11 @@ from cython.parallel import prange
 #from reach cimport muskingcunge, QVD
 cimport troute.routing.fast_reach.reach as reach
 from troute.routing.fast_reach.simple_da cimport obs_persist_shift, simple_da_with_decay, simple_da
+
+class QlatLocation(IntEnum):
+    TOP = 0
+    MIDDLE = 1
+    BOTTOM = 2
 
 @cython.boundscheck(False)
 cpdef object binary_find(object arr, object els):
@@ -230,6 +236,7 @@ cpdef object compute_network_structured(
     bint return_courant=False,
     int da_check_gage = -1,
     bint from_files=True,
+    int qlat_add_loc = QlatLocation.MIDDLE
     ):
     
     """
@@ -753,9 +760,19 @@ cpdef object compute_network_structured(
             
             else:
                 #Create compute reach kernel input buffer
+                cdef float reach_qlat = 0.0
+                cdef int qlat_ts = <int>((timestep-1)/qts_subdivisions)
+
                 for _i in range(r.reach.mc_reach.num_segments):
-                    segment = get_mc_segment(r, _i)#r._segments[_i]
-                    buf_view[_i, 0] = qlat_array[ segment.id, <int>((timestep-1)/qts_subdivisions)]
+                    segment = get_mc_segment(r, _i)
+                    seg_qlat = qlat_array[segment.id, qlat_ts]
+
+                    if qlat_add_loc == QlatLocation.TOP:
+                        reach_qlat += seg_qlat
+                        buf_view[_i, 0] = 0.0
+                    else:
+                        buf_view[_i, 0] = seg_qlat
+
                     buf_view[_i, 1] = segment.dt
                     buf_view[_i, 2] = segment.dx
                     buf_view[_i, 3] = segment.bw
@@ -769,6 +786,10 @@ cpdef object compute_network_structured(
                     buf_view[_i, 11] = 0.0 #flowveldepth[segment.id, timestep-1, 1]
                     buf_view[_i, 12] = flowveldepth[segment.id, timestep-1, 2]
 
+                if qlat_add_loc == QlatLocation.TOP:
+                    upstream_flows += reach_qlat
+                    previous_upstream_flows += reach_qlat
+
                 compute_reach_kernel(previous_upstream_flows, upstream_flows,
                                      r.reach.mc_reach.num_segments, buf_view,
                                      out_buf,
@@ -778,8 +799,11 @@ cpdef object compute_network_structured(
                 for _i in range(r.reach.mc_reach.num_segments):
                     segment = get_mc_segment(r, _i)
 
+                    if qlat_add_loc == QlatLocation.BOTTOM:
+                        out_buf[_i, 0] += qlat_array[segment.id, qlat_ts]
+
                     # Setting flow based on the output of MC - SSOUT - ELOSS
-                    flowveldepth[segment.id, timestep, 0] = out_buf[_i, 0] - ssout - eloss_array[segment.id, <int>((timestep-1)/qts_subdivisions)]
+                    flowveldepth[segment.id, timestep, 0] = out_buf[_i, 0] - ssout - eloss_array[segment.id, qlat_ts]
 
                     if reach_has_gage[i] == da_check_gage:
                         printf("segment.id: %ld\t", segment.id)
