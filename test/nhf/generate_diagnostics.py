@@ -617,8 +617,7 @@ def generate_reference_gage_plots(run_context: RunContext) -> None:
         last_t = sub_ds["time"].values[-1]
 
         # Load t-route data
-        vfp_id = run_context.reference_flowpaths_gdf.loc[run_context.reference_flowpaths_gdf["fp_id"] == fp_id, "virtual_fp_id"].values.min()
-        trdf = run_context.routed_results.sel(feature_id=vfp_id).to_dataframe().reset_index()
+        trdf = run_context.routed_results.sel(feature_id=fp_id).to_dataframe().reset_index()
         trdf = trdf[trdf["time"] <= last_t]  # Remove runout period
 
         # Plot
