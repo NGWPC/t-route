@@ -216,12 +216,18 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         div_to_ds_nex = div_ds_nex.set_index("fp_id")["dn_nex_id"].to_dict()
         mask = vfp_map["dn_virtual_nex_id"].isna()
         vfp_map.loc[mask, "dn_virtual_nex_id"] = vfp_map.loc[mask, "div_id"].map(div_to_ds_nex)
+
         # Force terminal vfps to be applied to up node.
         terminal_dict = {r.downstream: r.Index for r in self._dataframe[self._dataframe["downstream"].isin(self._terminal_codes)].itertuples()}
         terminal_mask = vfp_map["dn_virtual_nex_id"].isin(self._terminal_codes)
         vfp_map.loc[terminal_mask, "dn_virtual_nex_id"] = vfp_map.loc[terminal_mask, "div_id"].map(terminal_dict)
 
-        vfp_map["dn_virtual_nex_id"] = vfp_map["dn_virtual_nex_id"].astype(int)
+        # Remap those down nexuses to their on-network tributary
+        vfp_map = pd.merge(vfp_map, self._dataframe.reset_index()[["us_node_id", "downstream"]], how="left", left_on="dn_virtual_nex_id", right_on="downstream")
+        vfp_map = vfp_map[["virtual_fp_id", "percentage_area_contribution", "div_id", "us_node_id"]]
+
+        # Enforce int
+        vfp_map["us_node_id"] = vfp_map["us_node_id"].astype(int)
 
         # In case percent doesn't sum to 100, distribute remainder evenly
         groups = vfp_map["div_id"].astype("int64").to_numpy()
@@ -233,7 +239,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         share = (1 - known_sum) / vfp_count
         self.weights += share[groups]
 
-        self.vfp_nex_ids = vfp_map["dn_virtual_nex_id"].to_numpy()
+        # self.vfp_nex_ids = vfp_map["dn_virtual_nex_id"].to_numpy()
+        self.vfp_nex_ids = vfp_map["us_node_id"].to_numpy()
         self.vfp_divs = vfp_map["div_id"].to_numpy()
         self.weights = self.weights[:, np.newaxis]
         self.zero_nodes = list(set(self._dataframe.index).difference(self.vfp_nex_ids))

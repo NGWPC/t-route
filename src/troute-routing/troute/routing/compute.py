@@ -11,7 +11,7 @@ import copy
 import os.path
 
 import troute.nhd_network as nhd_network
-from troute.routing.fast_reach.mc_reach import compute_network_structured, QlatLocation
+from troute.routing.fast_reach.mc_reach import compute_network_structured
 import troute.routing.diffusive_utils_v02 as diff_utils
 from troute.routing.fast_reach import diffusive
 
@@ -599,11 +599,11 @@ def compute_nhd_routing_v02(
     start_time = time.time()
     compute_func = _compute_func_map[compute_func_name]
     if qlat_add_loc == "top":
-        qlat_add_loc_c = QlatLocation.TOP
+        qlat_add_loc_c = 0
     elif qlat_add_loc == "middle":
-        qlat_add_loc_c = QlatLocation.MIDDLE
+        qlat_add_loc_c = 1
     elif qlat_add_loc == "bottom":
-        qlat_add_loc_c = QlatLocation.BOTTOM
+        qlat_add_loc_c = 2
     else:
         raise ValueError(f"qlat_add_loc was {qlat_add_loc}, but must be one of 'top', 'middle', or 'bottom'")
     if parallel_compute_method == "by-subnetwork-jit-clustered":
@@ -974,6 +974,7 @@ def compute_nhd_routing_v02(
                             assume_short_ts,
                             return_courant,
                             from_files = from_files,
+                            qlat_add_loc = qlat_add_loc_c
                         )
                     )
                 results_subn[order] = parallel(jobs)

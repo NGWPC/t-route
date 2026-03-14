@@ -73,7 +73,7 @@ cpdef object binary_find(object arr, object els):
 
 
 @cython.boundscheck(False)
-cdef void compute_reach_kernel(float qup, float quc, int nreach, const float[:,:] input_buf, float[:, :] output_buf, bint assume_short_ts, bint return_courant=False) nogil:
+cdef void compute_reach_kernel(float qup, float quc, int nreach, const float[:,:] input_buf, float[:, :] output_buf, bint assume_short_ts, bint return_courant=False, int qlat_add_loc=1) nogil:
     """
     Kernel to compute reach.
     Input buffer is array matching following description:
@@ -94,7 +94,17 @@ cdef void compute_reach_kernel(float qup, float quc, int nreach, const float[:,:
         int i
 
     for i in range(nreach):
-        qlat = input_buf[i, 0] # n x 1
+        if qlat_add_loc == 0:
+            qlat = 0
+            qup += input_buf[i, 0]
+            quc += input_buf[i, 0]
+            qdpp = 0
+        elif qlat_add_loc == 1:
+            qlat = input_buf[i, 0] # n x 1
+            qdpp = 0
+        elif qlat_add_loc == 2:
+            qlat = 0
+            qdpp = input_buf[i, 13]
         dt = input_buf[i, 1] # n x 1
         dx = input_buf[i, 2] # n x 1
         bw = input_buf[i, 3]
@@ -104,7 +114,7 @@ cdef void compute_reach_kernel(float qup, float quc, int nreach, const float[:,:
         ncc = input_buf[i, 7]
         cs = input_buf[i, 8]
         s0 = input_buf[i, 9]
-        qdp = input_buf[i, 10]
+        qdp = input_buf[i, 10] - qdpp
         velp = input_buf[i, 11]
         depthp = input_buf[i, 12]
 
@@ -126,6 +136,8 @@ cdef void compute_reach_kernel(float qup, float quc, int nreach, const float[:,:
                     depthp,
                     out)
 
+        if qlat_add_loc == 2:
+            out.qdc += input_buf[i, 0] # n x 1 
 #        output_buf[i, 0] = quc = out.qdc # this will ignore short TS assumption at seg-to-set scale?
         output_buf[i, 0] = out.qdc
         output_buf[i, 1] = out.velc
@@ -136,7 +148,7 @@ cdef void compute_reach_kernel(float qup, float quc, int nreach, const float[:,:
             output_buf[i, 4] = out.ck
             output_buf[i, 5] = out.X
 
-        qup = qdp
+        qup = qdp + qdpp
 
         if assume_short_ts:
             quc = qup
@@ -292,6 +304,9 @@ cpdef object compute_network_structured(
     cdef float[:,:] buf_view
     cdef float[:,:] out_buf
     cdef float[:] lateral_flows
+    # accumulators and indices for qlat addition location
+    cdef int qlat_ts_previous
+    cdef int qlat_ts_previous_previous
     # list of reach objects to operate on
     cdef list reach_objects = []
     cdef list segment_objects
@@ -493,7 +508,7 @@ cpdef object compute_network_structured(
 
     #Init buffers
     lateral_flows = np.zeros( max_buff_size, dtype='float32' )
-    buf_view = np.zeros( (max_buff_size, 13), dtype='float32')
+    buf_view = np.zeros( (max_buff_size, 14), dtype='float32')
     out_buf = np.full( (max_buff_size, 3), -1, dtype='float32')
 
     cdef int num_reaches = len(reach_objects)
@@ -511,8 +526,12 @@ cpdef object compute_network_structured(
     cdef float reservoir_outflow, reservoir_water_elevation
     cdef int id = 0
     
+    cdef float qlat
     
     while timestep < nsteps+1:
+        qlat_ts_previous = (timestep-1) // qts_subdivisions
+        qlat_ts_previous_previous = (timestep-2) // qts_subdivisions
+
         for i in range(num_reaches):
             r = &reach_structs[i]
             #Need to get quc and qup
@@ -760,19 +779,17 @@ cpdef object compute_network_structured(
             
             else:
                 #Create compute reach kernel input buffer
-                cdef float reach_qlat = 0.0
-                cdef int qlat_ts = <int>((timestep-1)/qts_subdivisions)
 
                 for _i in range(r.reach.mc_reach.num_segments):
                     segment = get_mc_segment(r, _i)
-                    seg_qlat = qlat_array[segment.id, qlat_ts]
-
-                    if qlat_add_loc == QlatLocation.TOP:
-                        reach_qlat += seg_qlat
-                        buf_view[_i, 0] = 0.0
+                    qlat = qlat_array[segment.id, qlat_ts_previous]
+                    if qlat_ts_previous_previous < 0:
+                        qlat_previous_previous= 0
                     else:
-                        buf_view[_i, 0] = seg_qlat
+                        qlat_previous_previous = qlat_array[segment.id, qlat_ts_previous_previous]
 
+                    # Add qlat to middle
+                    buf_view[_i, 0] = qlat
                     buf_view[_i, 1] = segment.dt
                     buf_view[_i, 2] = segment.dx
                     buf_view[_i, 3] = segment.bw
@@ -785,25 +802,21 @@ cpdef object compute_network_structured(
                     buf_view[_i, 10] = flowveldepth[segment.id, timestep-1, 0]
                     buf_view[_i, 11] = 0.0 #flowveldepth[segment.id, timestep-1, 1]
                     buf_view[_i, 12] = flowveldepth[segment.id, timestep-1, 2]
-
-                if qlat_add_loc == QlatLocation.TOP:
-                    upstream_flows += reach_qlat
-                    previous_upstream_flows += reach_qlat
+                    buf_view[_i, 13] = qlat_previous_previous
 
                 compute_reach_kernel(previous_upstream_flows, upstream_flows,
                                      r.reach.mc_reach.num_segments, buf_view,
                                      out_buf,
-                                     assume_short_ts)
+                                     assume_short_ts,
+                                     return_courant=return_courant,
+                                     qlat_add_loc=qlat_add_loc)
 
                 #Copy the output out
                 for _i in range(r.reach.mc_reach.num_segments):
                     segment = get_mc_segment(r, _i)
 
-                    if qlat_add_loc == QlatLocation.BOTTOM:
-                        out_buf[_i, 0] += qlat_array[segment.id, qlat_ts]
-
                     # Setting flow based on the output of MC - SSOUT - ELOSS
-                    flowveldepth[segment.id, timestep, 0] = out_buf[_i, 0] - ssout - eloss_array[segment.id, qlat_ts]
+                    flowveldepth[segment.id, timestep, 0] = out_buf[_i, 0] - ssout - eloss_array[segment.id, qlat_ts_previous]
 
                     if reach_has_gage[i] == da_check_gage:
                         printf("segment.id: %ld\t", segment.id)
