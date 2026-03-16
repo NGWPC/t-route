@@ -28,13 +28,16 @@ class Model:
     dt: int
 
     def __init__(self, config_file: str, start_time: float):
+
+        # This is required prior to the first log message is issued by t-route.
+        LOG.bind()
+        
         self._time = start_time
 
         with open(config_file) as reader:
             data = yaml.load(reader, Loader=yaml.SafeLoader)
         self._config: dict = Config.with_strict_mode(**data).dict()
 
-        LOG.bind()
         self.dt = int(self.forcing_parameters["dt"])
 
         LOG.info("Creating network of type " + self.supernetwork_parameters.get("network_type"))
