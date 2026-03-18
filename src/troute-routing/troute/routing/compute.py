@@ -719,10 +719,6 @@ def compute_nhd_routing_v02(
         # if 1 == 1:
         with Parallel(n_jobs=cpu_pool, backend="loky") as parallel:
             results_subn = defaultdict(list)
-            # Preserve any pre-populated entries (e.g., upstream inflow
-            # virtual segments from NHF catchment discharge routing).
-            _prepopulated_fvd = dict(flowveldepth_interorder)
-            flowveldepth_interorder = dict(_prepopulated_fvd)
 
             for order in range(max(subnetworks_only_ordered_jit.keys()), -1, -1):
                 jobs = []
@@ -731,16 +727,6 @@ def compute_nhd_routing_v02(
                 ].items():
                     segs = clustered_subns["segs"]
 
-                    # Identify virtual segments (those with pre-filled FVD
-                    # data) that were absorbed into this cluster. They must
-                    # be treated as offnetwork_upstreams so the kernel
-                    # injects their flow via flowveldepth_interorder instead
-                    # of routing through them as regular segments.
-                    fvd_keys = set(flowveldepth_interorder.keys())
-                    cluster_virtual_segs = fvd_keys & set(segs)
-                    if cluster_virtual_segs:
-                        segs = [s for s in segs if s not in cluster_virtual_segs]
-
                     offnetwork_upstreams = set()
                     segs_set = set(segs)
                     for seg in segs:
@@ -748,7 +734,6 @@ def compute_nhd_routing_v02(
                             if us not in segs_set:
                                 offnetwork_upstreams.add(us)
 
-                    offnetwork_upstreams |= cluster_virtual_segs
                     segs.extend(offnetwork_upstreams)
 
                     common_segs = list(param_df.index.intersection(segs))
@@ -808,14 +793,7 @@ def compute_nhd_routing_v02(
                             ] = subn_tw_sortposition
 
                     subn_reach_list = clustered_subns["subn_reach_list"]
-                    # Remove virtual segments from reach lists so the kernel
-                    # doesn't route through them (they get flow from FVD)
-                    if cluster_virtual_segs:
-                        subn_reach_list = [
-                            [s for s in reach if s not in cluster_virtual_segs]
-                            for reach in subn_reach_list
-                        ]
-                        subn_reach_list = [r for r in subn_reach_list if r]
+
                     upstreams = clustered_subns["upstreams"]
 
                     subn_reach_list_with_type = _build_reach_type_list(subn_reach_list, wbodies_segs)
@@ -980,8 +958,6 @@ def compute_nhd_routing_v02(
                 results_subn[order] = parallel(jobs)
    
                 if order > 0:  # This is not needed for the last rank of subnetworks
-                    # Start with pre-populated entries (e.g., catchment inflow virtual segments)
-                    flowveldepth_interorder = dict(_prepopulated_fvd)
                     for ci, (cluster, clustered_subns) in enumerate(
                         reaches_ordered_bysubntw_clustered[order].items()
                     ):
