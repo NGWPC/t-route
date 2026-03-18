@@ -7,6 +7,63 @@ import pyogrio
 import xarray as xr
 from joblib import Parallel, delayed
 
+# Only read relevant areas of NHF to cut down on processing time and memory footprint.
+LAYERS_TO_READ = [
+    {
+        "name": "flowpaths",
+        "columns": [
+            "fp_id",
+            "length_km",
+            "n",
+            "mainstem_lp",
+            "topwdth",
+            "slope",
+            "ncc",
+            "btmwdth",
+            "musx",
+            "chslp",
+            "topwdthcc",
+            "musk",
+        ],
+        "ignore_geometry": True
+    },
+    {
+        "name": "reference_flowpaths",
+        "columns": None,  # Loads all
+        "ignore_geometry": True
+    },
+    {
+        "name": "virtual_flowpaths",
+        "columns": [
+            "length_km", 
+            "virtual_fp_id", 
+            "dn_virtual_nex_id", 
+            "up_virtual_nex_id",
+            "percentage_area_contribution"
+            ],
+        "ignore_geometry": False
+    },
+    {
+        "name": "virtual_nexus",
+        "columns": None,
+        "ignore_geometry": True
+    },
+    {
+        "name": "waterbodies",
+        "columns": None,
+        "ignore_geometry": True
+    },
+    {
+        "name": "gages",
+        "columns": None,
+        "ignore_geometry": True
+    },
+    {
+        "name": "hydrolocations",
+        "columns": None,
+        "ignore_geometry": True
+    }
+]
 
 def read_qlat_file(f):
     df = read_file(f)
@@ -77,17 +134,6 @@ def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_paramet
     file_type = Path(geo_file_path).suffix
     if file_type == ".gpkg":
 
-        layers_to_read = [
-            "flowpaths",
-            "reference_flowpaths",
-            "virtual_flowpaths",
-            "virtual_nexus",
-            "nexus",
-            "waterbodies",
-            "gages",
-            "hydrolocations"
-        ]
-
         # TODO enable lakes to be read into the routing solution here
         # if waterbody_parameters.get("break_network_at_waterbodies", False):
         #     layers_to_read.extend(["lakes", "nexus"])
@@ -105,28 +151,25 @@ def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_paramet
         #     layers_to_read.append("network")
 
         # Layers whose geometry we need to preserve for discretization
-        keep_geometry_layers = {'virtual_flowpaths', 'flowpaths', 'virtual_nexus', 'nexus'}
 
-        def read_layer(layer_name):
-            if layer_name:
-                try:
-                    ignore_geom = layer_name not in keep_geometry_layers
-                    _df = gpd.read_file(geo_file_path, layer=layer_name, ignore_geometry=ignore_geom)
-                    return _df
-                except pyogrio.errors.DataSourceError as e:
-                    print(f"Error reading file {geo_file_path}: {e}")
-                    raise pyogrio.errors.DataSourceError from e
-                except pyogrio.errors.DataLayerError:
-                    return pd.DataFrame()  # Missing layer -> empty DF
+        def read_layer(lyr):
+            try:
+                _df = gpd.read_file(geo_file_path, layer=lyr["name"], columns=lyr["columns"], ignore_geometry=lyr["ignore_geometry"])
+                return _df
+            except pyogrio.errors.DataSourceError as e:
+                print(f"Error reading file {geo_file_path}: {e}")
+                raise pyogrio.errors.DataSourceError from e
+            except pyogrio.errors.DataLayerError:
+                return pd.DataFrame()  # Missing layer -> empty DF
 
         # Retrieve geopackage information using matched layer names
         if cpu_pool > 1:
-            with Parallel(n_jobs=min(cpu_pool, len(layers_to_read))) as parallel:
-                gpkg_list = parallel(delayed(read_layer)(layer) for layer in layers_to_read)
+            with Parallel(n_jobs=min(cpu_pool, len(LAYERS_TO_READ))) as parallel:
+                gpkg_list = parallel(delayed(read_layer)(layer) for layer in LAYERS_TO_READ)
 
-            table_dict = {layers_to_read[i]: gpkg_list[i] for i in range(len(layers_to_read))}
+            table_dict = {LAYERS_TO_READ[i]: gpkg_list[i] for i in range(len(LAYERS_TO_READ))}
         else:
-            table_dict = {layer: read_layer(layer) for layer in layers_to_read}
+            table_dict = {layer["name"]: read_layer(layer) for layer in LAYERS_TO_READ}
 
     else:
         raise RuntimeError("Unsupported file type: {}".format(file_type))
