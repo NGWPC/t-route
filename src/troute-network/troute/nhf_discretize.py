@@ -111,18 +111,16 @@ def discretize_flowpaths(
         Must contain:
         - FIELD_FP_ID
         - CHANNEL_PARAMS columns
-        - geometry
     virtual_flowpaths : gpd.GeoDataFrame
         Must contain:
         - FIELD_VIRTUAL_FP_ID
         - FIELD_UP_VIRTUAL_NEX_ID
         - FIELD_DN_VIRTUAL_NEX_ID
-        - geometry
+        - (optional) geometry
     reference_flowpaths : pd.DataFrame
         Must contain:
         - FIELD_FP_ID
         - FIELD_VIRTUAL_FP_ID
-        - div_id
     discretization_len_m : float, default 300.0
         Target link length in meters.
     aggregate_short_reaches : bool, default True
@@ -140,18 +138,8 @@ def discretize_flowpaths(
         )
 
     """
-    virtual_flowpaths = _tmp_find_routing_vfps(
-        virtual_flowpaths, flowpaths, reference_flowpaths
-    )
     cur_node_id = virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID].max() + 1
-
-    links = LinkArrays.from_df(
-        pd.merge(
-            virtual_flowpaths,
-            reference_flowpaths[[FIELD_FP_ID, FIELD_VIRTUAL_FP_ID]].drop_duplicates(),
-            on=FIELD_VIRTUAL_FP_ID,
-        )
-    )
+    links = _load_initial_links(virtual_flowpaths, reference_flowpaths)
     if aggregate_short_reaches:
         links, merged_node_crosswalk = _aggregate_links(links, discretization_len_m)
     else:
@@ -172,6 +160,7 @@ def export_links_and_nodes(
     export_links_nodes_gpkg_path: str,
 ) -> None:
     """Export discretized links and nodes as GeoPackage layers (for debugging)."""
+    _validate_geometry(virtual_flowpaths)
     # Initialize data stores
     up_node_ids = []
     dn_node_ids = []
@@ -236,59 +225,30 @@ def export_links_and_nodes(
         {"node_id": up_node_ids}, geometry=node_geometries, crs=virtual_flowpaths.crs
     ).to_file(export_links_nodes_gpkg_path, layer="nodes")
 
+def _validate_geometry(virtual_flowpaths: gpd.GeoDataFrame) -> None:
+    if not hasattr(virtual_flowpaths, "geometry"):
+        raise ValueError("GeoDataFrame has no active geometry column.")
+    if virtual_flowpaths.geometry is None or virtual_flowpaths.geometry.name not in virtual_flowpaths.columns:
+        raise ValueError("GeoDataFrame has no active geometry column.")
+    if virtual_flowpaths.geometry.isna().any():
+        raise ValueError("Geometry column contains null geometries.")
+    if not virtual_flowpaths.geometry.is_valid.all():
+        raise ValueError("Geometry column contains invalid geometries.")
 
-def _tmp_find_routing_vfps(
+def _load_initial_links(
     virtual_flowpaths: gpd.GeoDataFrame,
-    flowpaths: gpd.GeoDataFrame,
     reference_flowpaths: pd.DataFrame,
-) -> gpd.GeoDataFrame:
-    ### TODO: REMOVE THIS AFTER NHF UPDATE
-    vfp = virtual_flowpaths.rename(columns={"geometry": "vfp_geom"})
-    fp = flowpaths.rename(columns={"geometry": "fp_geom"})
+):
+    tmp_vfp = virtual_flowpaths.dropna(subset=FIELD_UP_VIRTUAL_NEX_ID).copy()
+    tmp_vfp[FIELD_UP_VIRTUAL_NEX_ID] = tmp_vfp[FIELD_UP_VIRTUAL_NEX_ID].astype(int)
 
-    vfp_to_fp = pd.merge(
-        vfp,
-        reference_flowpaths[[FIELD_VIRTUAL_FP_ID, "div_id"]].drop_duplicates(),
-        how="left",
-        on=FIELD_VIRTUAL_FP_ID,
-    )[[FIELD_VIRTUAL_FP_ID, "vfp_geom", "div_id"]]
-
-    vfp_to_fp = pd.merge(
-        vfp_to_fp,
-        reference_flowpaths[["div_id", FIELD_FP_ID]].dropna().drop_duplicates(),
-        how="left",
-        on="div_id",
-    )[[FIELD_VIRTUAL_FP_ID, "vfp_geom", FIELD_FP_ID]]
-
-    vfp_to_fp = pd.merge(
-        vfp_to_fp,
-        fp[[FIELD_FP_ID, "fp_geom"]],
-        how="left",
-        on=FIELD_FP_ID,
+    return LinkArrays.from_df(
+        pd.merge(
+            tmp_vfp,
+            reference_flowpaths[[FIELD_FP_ID, FIELD_VIRTUAL_FP_ID]].drop_duplicates(),
+            on=FIELD_VIRTUAL_FP_ID,
+        )
     )
-
-    # Check if first point of vfp matches first point of fp
-    vfp_to_fp["vfp_geom"] = shapely.get_point(
-        shapely.get_geometry(vfp_to_fp["vfp_geom"], 0).values, 0
-    )
-    vfp_to_fp["fp_geom"] = shapely.get_point(
-        shapely.get_geometry(vfp_to_fp["fp_geom"], 0).values, 0
-    )
-
-    matches = shapely.equals(vfp_to_fp["vfp_geom"], vfp_to_fp["fp_geom"])
-
-    # Force new virtual nexus at top
-    matches = matches & virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID].isna()
-    start_id = virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID].max() + 1
-    new_ids = np.arange(start_id, start_id + matches.sum())
-    virtual_flowpaths.loc[matches, FIELD_UP_VIRTUAL_NEX_ID] = new_ids
-
-    virtual_flowpaths = virtual_flowpaths.dropna(subset=FIELD_UP_VIRTUAL_NEX_ID)
-    virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID] = virtual_flowpaths[
-        FIELD_UP_VIRTUAL_NEX_ID
-    ].astype(int)
-    return virtual_flowpaths
-
 
 def _aggregate_links(
     links: LinkArrays, discretization_len_m: float
