@@ -9,11 +9,16 @@ End-to-end tests are more open-ended. The `make_forcing.py` script may be used t
 ```consol
 cd test/nhf/conecuh_case/
 
-python ../make_forcing.py --start-time "2009-12-12 00:00" --end-time "2009-12-29 00:00" --case-id conecuh_case --hf-file 02374250.gpkg --run-id retro
+python ../make_forcing.py --start-time "2009-12-12 00:00" --end-time "2009-12-29 00:00" --case-id conecuh_case --hf-file 437343.gpkg --run-id retro
 
 python -m nwm_routing -V5 -f retro.yaml
 
 python ../generate_diagnostics.py conecuh_case/retro.yaml
+```
+
+**Note** If you need to subset the hydrofabric from a larger area to a specific watershed, you can use subset_nhf.py.  Example below for Conecuh
+```consol
+python ../subset_nhf.py --source-gpkg /path/to/big_nhf.gpkg" --out-gpkg domain/437343.gpkg --outlet-fp-id 437343
 ```
 
 ## `make_forcing.py` Details
