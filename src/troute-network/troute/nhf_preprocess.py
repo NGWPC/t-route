@@ -105,7 +105,7 @@ def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_paramet
         #     layers_to_read.append("network")
 
         # Layers whose geometry we need to preserve for discretization
-        keep_geometry_layers = {'flowpaths', 'virtual_nexus', 'nexus'}
+        keep_geometry_layers = {'virtual_flowpaths', 'flowpaths', 'virtual_nexus', 'nexus'}
 
         def read_layer(layer_name):
             if layer_name:

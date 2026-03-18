@@ -190,7 +190,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         self, flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus,
         nexus=None, discretization_len_m=300.0,
     ):
-        self._dataframe, self._fp_outlet_crosswalk = discretize_flowpaths(
+        self._dataframe, self._fp_outlet_crosswalk, nexus_remapping = discretize_flowpaths(
             flowpaths=flowpaths,
             virtual_flowpaths=virtual_flowpaths,
             virtual_nexus=virtual_nexus,
@@ -201,32 +201,26 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         self._connections = None
         self._terminal_codes = set(self._dataframe["downstream"]).difference(self._dataframe.index)
 
-        self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, flowpaths)
+        self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, flowpaths, nexus_remapping)
 
 
-    def _build_div_weighting_matrix(self, virtual_flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, flowpaths: pd.DataFrame):
+    def _build_div_weighting_matrix(self, virtual_flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]):
         """Create weights that can be used to expand div direct runoff into vfp direct runoff."""
         # Make a dataframe for every vfp with percentage_area_contribution, div_id, and dn_nex_id
-        ref = reference_flowpaths[["virtual_fp_id", "div_id"]].fillna(value={"virtual_fp_id": -9999}).astype("Int64").drop_duplicates()
-        vfp_map = pd.merge(ref, virtual_flowpaths.reset_index()[["virtual_fp_id", "percentage_area_contribution", "dn_virtual_nex_id"]], on="virtual_fp_id", how="left")
+        vfp_map = pd.merge(reference_flowpaths[["virtual_fp_id", "div_id"]].copy().drop_duplicates().astype("Int64"), virtual_flowpaths[["virtual_fp_id", "percentage_area_contribution", "dn_virtual_nex_id"]], on="virtual_fp_id", how="left")
 
-        # For divs without a vfp, force dn_nex_id using fp_id
-        # TODO: Once new NHF ships, this should be impossible
-        div_ds_nex = pd.merge(flowpaths[["fp_id", "dn_nex_id"]], reference_flowpaths[["div_id", "fp_id"]], how="left", on="fp_id")
-        div_to_ds_nex = div_ds_nex.set_index("fp_id")["dn_nex_id"].to_dict()
-        mask = vfp_map["dn_virtual_nex_id"].isna()
-        vfp_map.loc[mask, "dn_virtual_nex_id"] = vfp_map.loc[mask, "div_id"].map(div_to_ds_nex)
+        # Remap down nexuses that changed in discretization
+        remap_mask = vfp_map["dn_virtual_nex_id"].isin(nexus_remapping)
+        vfp_map.loc[remap_mask, "dn_virtual_nex_id"] = vfp_map.loc[remap_mask, "dn_virtual_nex_id"].map(nexus_remapping)
 
-        # Force terminal vfps to be applied to up node.
-        terminal_dict = {r.downstream: r.Index for r in self._dataframe[self._dataframe["downstream"].isin(self._terminal_codes)].itertuples()}
-        terminal_mask = vfp_map["dn_virtual_nex_id"].isin(self._terminal_codes)
-        vfp_map.loc[terminal_mask, "dn_virtual_nex_id"] = vfp_map.loc[terminal_mask, "div_id"].map(terminal_dict)
-
-        # Remap those down nexuses to their on-network tributary
+        # Remap all down nexuses to their on-network link
         vfp_map = pd.merge(vfp_map, self._dataframe.reset_index()[["us_node_id", "downstream"]], how="left", left_on="dn_virtual_nex_id", right_on="downstream")
-        vfp_map = vfp_map[["virtual_fp_id", "percentage_area_contribution", "div_id", "us_node_id"]]
 
-        # Enforce int
+        # Fallback for vfps that hit a headwater
+        vfp_map.loc[vfp_map["us_node_id"].isna(), "us_node_id"] = vfp_map.loc[vfp_map["us_node_id"].isna(), "dn_virtual_nex_id"]
+
+        # Cleanup
+        vfp_map = vfp_map[["virtual_fp_id", "percentage_area_contribution", "div_id", "us_node_id"]]
         vfp_map["us_node_id"] = vfp_map["us_node_id"].astype(int)
 
         # In case percent doesn't sum to 100, distribute remainder evenly
