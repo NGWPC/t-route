@@ -195,15 +195,20 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
     def _build_div_weighting_matrix(self, virtual_flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]) -> pd.DataFrame:
         """Create weights that can be used to expand div direct runoff into vfp direct runoff.
         
-        Channel forcings are supplied at the div/fp level, but because a discretized network is used for routing, those forcings need to be
-        reindexed to their corresponding routing network links.  This could be done with a join or lookup table, but using vectors is more 
-        performant at scale. The reindexing vectors are created once per NHF network and are reused for each run set in build_qlateral_array.
+        Channel forcings are supplied at the div/fp level, but because a discretized network is used for routing, those 
+        forcings need to be reindexed to their corresponding routing network links.  This could be done with a join or 
+        lookup table, but using vectors is more performant at scale. The reindexing vectors are created once per NHF 
+        network and are reused for each run set in build_qlateral_array.
         
         This function sets the following class variables
-         - self.vfp_divs, which is used with search_sorted to make a vector of div lateral flows matching the order of virtual_flowpaths
-         - self.weights, which can then be multiplied by the reindexed div lateral flows to get virtual flowpath specific lateral flows
-         - self.vfp_nex_ids, which shows the index of _dataframe for each virtual flowpath and allows us to aggregate multiple lateral flows to a single routing link when necessary
-         - self.zero_nodes, which allows us to make a zero dataframe for all routing links that never have any lateral flows. 
+         - self.vfp_divs, which is used with search_sorted to make a vector of div lateral flows matching the order of 
+           virtual_flowpaths
+         - self.weights, which can then be multiplied by the reindexed div lateral flows to get virtual flowpath 
+           specific lateral flows
+         - self.vfp_nex_ids, which shows the index of _dataframe for each virtual flowpath and allows us to aggregate 
+           multiple lateral flows to a single routing link when necessary
+         - self.zero_nodes, which allows us to make a zero dataframe for all routing links that never have any lateral 
+           flows. 
         """
         # Make a dataframe for every vfp with percentage_area_contribution, div_id, dn_nex_id, and virtual_fp_id
         vfp_map = pd.merge(reference_flowpaths[["virtual_fp_id", "div_id"]].copy().drop_duplicates().astype("Int64"), virtual_flowpaths[["virtual_fp_id", "percentage_area_contribution", "dn_virtual_nex_id"]], on="virtual_fp_id", how="left")
@@ -213,14 +218,14 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         vfp_map.loc[remap_mask, "dn_virtual_nex_id"] = vfp_map.loc[remap_mask, "dn_virtual_nex_id"].map(nexus_remapping)
 
         # Remap all down nexuses to their on-network link
-        # (explanation) In NHF, flows are added at the downstream end of a virtual_flowpath. To achieve this, we apply discharges
-        # at the link just upstream of the downstream end of the virtual flowpath and use the "bottom" option for lateral
-        # Addition location
+        # (explanation) In NHF, flows are added at the downstream end of a virtual_flowpath. To achieve this, we apply 
+        # discharges at the link just upstream of the downstream end of the virtual flowpath and use the "bottom" option 
+        # for lateral addition location
         vfp_map = pd.merge(vfp_map, self._dataframe.reset_index()[["up_node_id", "downstream"]], how="left", left_on="dn_virtual_nex_id", right_on="downstream")
 
         # Fallback for vfps that hit a headwater
-        # (explanation) When a virtual flowpath is the div headwater, there's no link for it to add it's flows to. Instead,
-        # we add them to the next downstream link.
+        # (explanation) When a virtual flowpath is the div headwater, there's no link for it to add it's flows to. 
+        # Instead, we add them to the next downstream link.
         vfp_map.loc[vfp_map["up_node_id"].isna(), "up_node_id"] = vfp_map.loc[vfp_map["up_node_id"].isna(), "dn_virtual_nex_id"]
 
         # Cleanup
