@@ -102,15 +102,11 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             reference_flowpaths = nhf["reference_flowpaths"]
             virtual_flowpaths = nhf["virtual_flowpaths"]
             virtual_nexus = nhf["virtual_nexus"]
-            nexus = nhf["nexus"]
             hydrolocations = nhf["hydrolocations"]
 
             # Preprocess network objects
             discretization_len = self.supernetwork_parameters.get("nhf_discretization_len", 300.0)
-            self.preprocess_network(
-                flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus,
-                nexus, discretization_len,
-            )
+            self.preprocess_network(flowpaths, reference_flowpaths, virtual_flowpaths, discretization_len)
 
             self.crosswalk_nex_flowpath_poi(
                 virtual_flowpaths,
@@ -178,35 +174,38 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         return np.nan  # pd.NA
 
     @property
-    def links_df(self):
-        return self._links_df
-
-    @property
     def fp_outlet_crosswalk(self):
         """Map outlet link_id -> fp_id for reindexing outputs."""
         return self._fp_outlet_crosswalk
 
-    def preprocess_network(
-        self, flowpaths, reference_flowpaths, virtual_flowpaths, virtual_nexus,
-        nexus=None, discretization_len_m=300.0,
-    ):
+    def preprocess_network(self, flowpaths, reference_flowpaths, virtual_flowpaths, discretization_len_m=300.0):
+        """Create routing links (self._dataframe) and weighting data to assign fp flows to links."""
         self._dataframe, self._fp_outlet_crosswalk, nexus_remapping = discretize_flowpaths(
             flowpaths=flowpaths,
             virtual_flowpaths=virtual_flowpaths,
-            virtual_nexus=virtual_nexus,
             reference_flowpaths=reference_flowpaths,
-            nexus=nexus,
             discretization_len_m=discretization_len_m,
         )
-        self._connections = None
-        self._terminal_codes = set(self._dataframe["downstream"]).difference(self._dataframe.index)
+        self._connections = None  # Forces recomputation on first call to self.connections
+        self._terminal_codes = set(self._dataframe["downstream"]).difference(self._dataframe.index)  # Outlets
 
-        self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, flowpaths, nexus_remapping)
+        self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, nexus_remapping)
 
 
-    def _build_div_weighting_matrix(self, virtual_flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]):
-        """Create weights that can be used to expand div direct runoff into vfp direct runoff."""
-        # Make a dataframe for every vfp with percentage_area_contribution, div_id, and dn_nex_id
+    def _build_div_weighting_matrix(self, virtual_flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]) -> pd.DataFrame:
+        """Create weights that can be used to expand div direct runoff into vfp direct runoff.
+        
+        Channel forcings are supplied at the div/fp level, but because a discretized network is used for routing, those forcings need to be
+        reindexed to their corresponding routing network links.  This could be done with a join or lookup table, but using vectors is more 
+        performant at scale. The reindexing vectors are created once per NHF network and are reused for each run set in build_qlateral_array.
+        
+        This function sets the following class variables
+         - self.vfp_divs, which is used with search_sorted to make a vector of div lateral flows matching the order of virtual_flowpaths
+         - self.weights, which can then be multiplied by the reindexed div lateral flows to get virtual flowpath specific lateral flows
+         - self.vfp_nex_ids, which shows the index of _dataframe for each virtual flowpath and allows us to aggregate multiple lateral flows to a single routing link when necessary
+         - self.zero_nodes, which allows us to make a zero dataframe for all routing links that never have any lateral flows. 
+        """
+        # Make a dataframe for every vfp with percentage_area_contribution, div_id, dn_nex_id, and virtual_fp_id
         vfp_map = pd.merge(reference_flowpaths[["virtual_fp_id", "div_id"]].copy().drop_duplicates().astype("Int64"), virtual_flowpaths[["virtual_fp_id", "percentage_area_contribution", "dn_virtual_nex_id"]], on="virtual_fp_id", how="left")
 
         # Remap down nexuses that changed in discretization
@@ -214,56 +213,38 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         vfp_map.loc[remap_mask, "dn_virtual_nex_id"] = vfp_map.loc[remap_mask, "dn_virtual_nex_id"].map(nexus_remapping)
 
         # Remap all down nexuses to their on-network link
-        vfp_map = pd.merge(vfp_map, self._dataframe.reset_index()[["us_node_id", "downstream"]], how="left", left_on="dn_virtual_nex_id", right_on="downstream")
+        # (explanation) In NHF, flows are added at the downstream end of a virtual_flowpath. To achieve this, we apply discharges
+        # at the link just upstream of the downstream end of the virtual flowpath and use the "bottom" option for lateral
+        # Addition location
+        vfp_map = pd.merge(vfp_map, self._dataframe.reset_index()[["up_node_id", "downstream"]], how="left", left_on="dn_virtual_nex_id", right_on="downstream")
 
         # Fallback for vfps that hit a headwater
-        vfp_map.loc[vfp_map["us_node_id"].isna(), "us_node_id"] = vfp_map.loc[vfp_map["us_node_id"].isna(), "dn_virtual_nex_id"]
+        # (explanation) When a virtual flowpath is the div headwater, there's no link for it to add it's flows to. Instead,
+        # we add them to the next downstream link.
+        vfp_map.loc[vfp_map["up_node_id"].isna(), "up_node_id"] = vfp_map.loc[vfp_map["up_node_id"].isna(), "dn_virtual_nex_id"]
 
         # Cleanup
-        vfp_map = vfp_map[["virtual_fp_id", "percentage_area_contribution", "div_id", "us_node_id"]]
-        vfp_map["us_node_id"] = vfp_map["us_node_id"].astype(int)
+        vfp_map = vfp_map[["virtual_fp_id", "percentage_area_contribution", "div_id", "up_node_id"]]
+        vfp_map["up_node_id"] = vfp_map["up_node_id"].astype(int)
 
-        # In case percent doesn't sum to 100, distribute remainder evenly
-        groups = vfp_map["div_id"].astype("int64").to_numpy()
+        # Make weights
         self.weights = np.nan_to_num(vfp_map["percentage_area_contribution"].to_numpy())
 
+        # In case NHF percents per div don't sum to 100, distribute remainder evenly
+        groups = vfp_map["div_id"].astype("int64").to_numpy()
         known_sum = np.bincount(groups, weights=self.weights)
         vfp_count = np.bincount(groups)
-
-        share = (1 - known_sum) / vfp_count
+        share = np.divide(1 - known_sum, vfp_count, out=np.zeros_like(vfp_count, dtype=float), where=vfp_count!=0)
         self.weights += share[groups]
 
-        # self.vfp_nex_ids = vfp_map["dn_virtual_nex_id"].to_numpy()
-        self.vfp_nex_ids = vfp_map["us_node_id"].to_numpy()
+        # Set class variables
+        self.vfp_nex_ids = vfp_map["up_node_id"].to_numpy()
         self.vfp_divs = vfp_map["div_id"].to_numpy()
         self.weights = self.weights[:, np.newaxis]
         self.zero_nodes = list(set(self._dataframe.index).difference(self.vfp_nex_ids))
 
-
-    def _fill_run_defaults(self, run):
-        defaults = {
-            "t0": self.t0,
-            "dt": self.forcing_parameters.get("dt"),
-            "qts_subdivisions": self.forcing_parameters.get("qts_subdivisions"),
-            "qlat_input_folder": self.forcing_parameters.get("qlat_input_folder"),
-            "qlat_file_index_col": self.forcing_parameters.get("qlat_file_index_col", "feature_id"),
-            "qlat_file_value_col": self.forcing_parameters.get("qlat_file_value_col", "q_lateral"),
-            "qlat_file_gw_bucket_flux_col": self.forcing_parameters.get(
-                "qlat_file_gw_bucket_flux_col", "qBucket"
-            ),
-            "qlat_file_terrain_runoff_col": self.forcing_parameters.get(
-                "qlat_file_terrain_runoff_col", "qSfcLatRunoff"
-            ),
-            "et_index_name": self.forcing_parameters.get("et_file_index_col", "divide_id"),
-            "et_var_name": self.forcing_parameters.get("et_file_value_col", "ACTUAL_ET"),
-        }
-
-        # run values override defaults
-        for k, v in defaults.items():
-            run.setdefault(k, v)
-
-
-    def _load_forcing(self, run: dict[str, Any]):
+    def _load_forcing(self, run: dict[str, Any]) -> pd.DataFrame:
+        """Load channel forcing data for a run set."""
         qlat_input_folder = run.get("qlat_input_folder", None)
 
         if qlat_input_folder:
@@ -293,77 +274,29 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             self.run_ts = div_direct_runoff.columns
             return div_direct_runoff
 
-    def build_flowveldepth_interorder(self, div_direct_runoff_df: pd.DataFrame, run: dict[str, Any]):
-        """
-        Build flowveldepth_interorder dict for upstream inflow virtual segments.
-
-        Each virtual segment gets a pre-filled flow-velocity-depth timeseries
-        that the kernel injects as upstream boundary conditions (q_up).
-
-        Parameters
-        ----------
-        nts : int
-            Number of routing timesteps.
-        qts_subdivisions : int
-            Number of routing timesteps per qlat timestep.
-
-        Returns
-        -------
-        dict
-            {virtual_seg_id: {"results": [q0, 0.0, 0.0, q1, 0.0, 0.0, ...]}}
-        """
-        # Expand runoff into virtual flowpaths (d x t) -> (vfp x t)
-        div_ids = div_direct_runoff_df.index.to_numpy()
-        div_order = np.argsort(div_ids)
-        div_sorted = div_ids[div_order]
-        vfp_div_ind = div_order[np.searchsorted(div_sorted, self.vfp_divs)]
-        vfp_flows = div_direct_runoff_df.values[vfp_div_ind, :] * self.weights
-
-        # Aggregate by nexus (vfp x t) -> (n x t)
-        # unique_ids, inv = np.unique(self.vfp_nex_ids, return_inverse=True)
-        unique_ids, inv = np.unique(self.upstream_connection_ids, return_inverse=True)
-        out = np.zeros((len(unique_ids), vfp_flows.shape[1]))
-        np.add.at(out, inv, vfp_flows)
-
-        # Resample for qts_subdivision
-        qts_subdivisions = run.get("qts_subdivisions", 1)
-        out = np.repeat(out, qts_subdivisions, axis=1)
-        rows, cols = out.shape
-        expanded = np.zeros((rows, cols * 3), dtype=out.dtype)
-        expanded[:, ::3] = out
-
-        # Convert to a dictionary
-        d = {uid: {"results": row} for uid, row in zip(unique_ids, out)}
-
-        # # Add in spots for links
-        # zero_row = np.zeros(cols)
-        # d2 = {i: {"results": zero_row} for i in self._dataframe.index}
-        # d.update(d2)
-        return d
-
-    def build_qlateral_array(
-        self,
-        run,
-    ):
+    def build_qlateral_array(self, run: dict[str, Any]) -> None:
+        """Expand channel forcings provided at the div/fp level to a dataframe of link qlaterals."""
         # Load qlats
         div_direct_runoff_df = self._load_forcing(run)
-        # Expand runoff into virtual flowpaths (d x t) -> (vfp x t)
+
+        # Apply flow scaling to expand runoff into virtual flowpaths
         div_ids = div_direct_runoff_df.index.to_numpy()
         div_order = np.argsort(div_ids)
         div_sorted = div_ids[div_order]
         vfp_div_ind = div_order[np.searchsorted(div_sorted, self.vfp_divs)]
         vfp_flows = div_direct_runoff_df.values[vfp_div_ind, :] * self.weights
 
-        # Aggregate by nexus (vfp x t) -> (n x t)
+        # Aggregate by routing link
         unique_ids, inv = np.unique(self.vfp_nex_ids, return_inverse=True)
-        # unique_ids, inv = np.unique(self.upstream_connection_ids, return_inverse=True)
         out = np.zeros((len(unique_ids), vfp_flows.shape[1]))
         np.add.at(out, inv, vfp_flows)
 
+        # Make qlat dataframe
         qlat_valid = pd.DataFrame(out, index=unique_ids, columns=self.run_ts)
 
         # Add empty records for other links
         qlat_zero = pd.DataFrame(0.0, index=self.zero_nodes, columns=self.run_ts)
+
         self._qlateral = pd.concat([qlat_valid, qlat_zero])
  
 
