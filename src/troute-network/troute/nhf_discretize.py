@@ -1,483 +1,428 @@
+"""Discretize flowpath network into uniform link segments.
+
+This module
+    1. Identifies on-flowpath virtual flowpaths (to serve as basis for routing links)
+    2. (optionally) Aggregates short links into upstream neighbors
+    3. Subdivides long links into near-uniform lengths
+
+Notable Assumptions
+---------------
+- Node IDs increase in the downstream direction
+- Flowpaths form a directed acyclic graph (no loops)
+
+"""
 
 from dataclasses import dataclass, fields
-from functools import cached_property
 from typing import Union
 
 import geopandas as gpd
 import pandas as pd
-from shapely import LineString, MultiLineString, line_interpolate_point
-from shapely.geometry import Point
+from shapely import MultiLineString, line_interpolate_point
 import numpy as np
 import shapely
-from pathlib import Path
-from shapely.geometry.base import BaseGeometry
 from shapely.ops import substring
-from zmq import has
 
+### NHF SCHEMA ###
+# Pulling this to the top for easy updates later
+FIELD_FP_ID = "fp_id"
+FIELD_VIRTUAL_FP_ID = "virtual_fp_id"
+FIELD_DN_VIRTUAL_NEX_ID = "dn_virtual_nex_id"
+FIELD_UP_VIRTUAL_NEX_ID = "up_virtual_nex_id"
+FIELD_LENGTH = "length_km"
+FIELD_LENGTH_CONVERSION = 1000
+CHANNEL_PARAMS = [
+    "n",
+    "mainstem_lp",
+    "topwdth",
+    "slope",
+    "ncc",
+    "btmwdth",
+    "musx",
+    "chslp",
+    "topwdthcc",
+    "musk",
+]
 
 ### DATA CLASSES ###
 
-@dataclass
-class FlowpathData:
-    geoms: np.ndarray
-    lengths: np.ndarray
-    ids: np.ndarray
-    dn_nex_ids: np.ndarray
-
-@dataclass
-class VirtualNexusData:
-    geoms: np.ndarray
-    ids: np.ndarray
-    fp_ids: np.ndarray
-
-    def filter(self, mask: np.ndarray) -> None:
-        self.geoms = self.geoms[mask]
-        self.ids = self.ids[mask]
-        self.fp_ids = self.fp_ids[mask]
-
-@dataclass
-class FlowpathNode:
-    ids: np.ndarray
-    distances: np.ndarray
-    fp_inds: np.ndarray
 
 @dataclass
 class LinkArrays:
+    """Routing link data structure.
+
+    Notes
+    -----
+     - Arrays are used because they are more performant than Pandas dfs and scale better.
+
+    """
+
     fp_id: np.ndarray
-    ds_node_id: np.ndarray
-    us_node_id: np.ndarray
-    start_frac: np.ndarray
-    end_frac: np.ndarray
-    lengths: np.ndarray
+    dn_node_id: np.ndarray
+    up_node_id: np.ndarray
+    length: np.ndarray
 
     @classmethod
     def from_df(cls, df: pd.DataFrame):
-        n = len(df)
+        """Load LinksArrays from a virtual flowpaths layer."""
         return cls(
-            df["fp_id"].to_numpy().astype(int),
-            df["dn_virtual_nex_id"].to_numpy().astype(int),
-            df["up_virtual_nex_id"].to_numpy().astype(int),
-            np.zeros(n),
-            np.zeros(n),
-            df["length_km"].to_numpy() * 1000
+            df[FIELD_FP_ID].to_numpy().astype(int),
+            df[FIELD_DN_VIRTUAL_NEX_ID].to_numpy().astype(int),
+            df[FIELD_UP_VIRTUAL_NEX_ID].to_numpy().astype(int),
+            df[FIELD_LENGTH].to_numpy() * FIELD_LENGTH_CONVERSION,
         )
-    
+
+    def get_short_mask(self, discretization_len_m: float) -> np.ndarray:
+        """Identify links shorter than discretization threshold and eligible for merging."""
+        short_mask = self.length < discretization_len_m
+
+        # Don't apply to headwaters, because they cannot be merged with upstream
+        has_us = np.isin(self.up_node_id, self.dn_node_id)
+
+        return short_mask & has_us
+
     def to_df(self) -> pd.DataFrame:
+        """Convert LinkArrays to a Pandas DataFrame."""
         return pd.DataFrame({f.name: getattr(self, f.name) for f in fields(self)})
 
     def filter(self, mask: np.ndarray) -> None:
+        """Keep masked links."""
         self.fp_id = self.fp_id[mask]
-        self.ds_node_id = self.ds_node_id[mask]
-        self.us_node_id = self.us_node_id[mask]
-        self.start_frac = self.start_frac[mask]
-        self.end_frac = self.end_frac[mask]
-        self.lengths = self.lengths[mask]
+        self.dn_node_id = self.dn_node_id[mask]
+        self.up_node_id = self.up_node_id[mask]
+        self.length = self.length[mask]
+
 
 ### MAIN FUNCTION ###
 
+
 def discretize_flowpaths(
     flowpaths: gpd.GeoDataFrame,
-    virtual_flowpaths: pd.DataFrame,
-    virtual_nexus: gpd.GeoDataFrame,
+    virtual_flowpaths: gpd.GeoDataFrame,
     reference_flowpaths: pd.DataFrame,
-    nexus: gpd.GeoDataFrame,
     discretization_len_m: float = 300.0,
     aggregate_short_reaches: bool = True,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    export_links_nodes_gpkg_path: Union[None, str] = None,
+) -> tuple[pd.DataFrame, dict[int, int], dict[int, int]]:
+    """Discretize flowpaths into uniform-length links and resolve short reaches.
 
-    virtual_flowpaths = _tmp_find_routing_vfps(virtual_flowpaths, flowpaths, reference_flowpaths)
-    max_node_ind = virtual_flowpaths["up_virtual_nex_id"].max() + 1
-    
-    links = LinkArrays.from_df(
-        pd.merge(virtual_flowpaths, reference_flowpaths[["fp_id", "virtual_fp_id"]].drop_duplicates(), on="virtual_fp_id")
+    Parameters
+    ----------
+    flowpaths : gpd.GeoDataFrame
+        Must contain:
+        - FIELD_FP_ID
+        - CHANNEL_PARAMS columns
+        - geometry
+    virtual_flowpaths : gpd.GeoDataFrame
+        Must contain:
+        - FIELD_VIRTUAL_FP_ID
+        - FIELD_UP_VIRTUAL_NEX_ID
+        - FIELD_DN_VIRTUAL_NEX_ID
+        - geometry
+    reference_flowpaths : pd.DataFrame
+        Must contain:
+        - FIELD_FP_ID
+        - FIELD_VIRTUAL_FP_ID
+        - div_id
+    discretization_len_m : float, default 300.0
+        Target link length in meters.
+    aggregate_short_reaches : bool, default True
+        Whether to merge short links upstream before discretization.
+    export_links_nodes_gpkg_path : str or None
+        If provided, exports links and nodes to GeoPackage.
+
+    Returns
+    -------
+    tuple
+        (
+            pd.DataFrame,  # formatted link table that matches _dataframe format from AbstractNetwork
+            dict[int, int] # mapping from link id (up_node_id) back to fp_id used to remap flowpath outflows to original fp_id
+            dict[int, int] # mapping of virtual_nexus_id to a new node when the original node was merged
+        )
+
+    """
+    virtual_flowpaths = _tmp_find_routing_vfps(
+        virtual_flowpaths, flowpaths, reference_flowpaths
     )
-    links, node_remapping = _aggregate_links(links, discretization_len_m)
-    links = _discretize_links(links, discretization_len_m, max_node_ind)
+    cur_node_id = virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID].max() + 1
 
-    # export_segments_and_nodes(links, virtual_flowpaths, "links_nodes_discretization.gpkg")
-    return *_format_link_df(links, flowpaths), node_remapping
+    links = LinkArrays.from_df(
+        pd.merge(
+            virtual_flowpaths,
+            reference_flowpaths[[FIELD_FP_ID, FIELD_VIRTUAL_FP_ID]].drop_duplicates(),
+            on=FIELD_VIRTUAL_FP_ID,
+        )
+    )
+    if aggregate_short_reaches:
+        links, merged_node_crosswalk = _aggregate_links(links, discretization_len_m)
+    else:
+        merged_node_crosswalk = {}
+    links = _discretize_links(links, discretization_len_m, cur_node_id)
 
+    if export_links_nodes_gpkg_path is not None:
+        export_links_and_nodes(links, virtual_flowpaths, export_links_nodes_gpkg_path)
+    return *_format_link_df(links, flowpaths), merged_node_crosswalk
 
-    # # Extract necessary data, pulling out into arrays for efficiency/performance
-    # fp_dict = _get_fp_dict(flowpaths, nexus)
-
-    # vnex_dict = _get_vnex_dict(reference_flowpaths, virtual_flowpaths, virtual_nexus) 
-
-    # fp_ds_vnex_dict = _get_fp_ds_vnex_dict(reference_flowpaths, virtual_flowpaths)
-
-    # # Create links
-    # links_dict = _create_links(fp_dict, vnex_dict, fp_ds_vnex_dict)
-    # if aggregate_short_reaches:
-    #     links_dict = _aggregate_links(links_dict, discretization_len_m)
-    # links_dict = _discretize_links(links_dict, discretization_len_m, max_node_ind)
-
-    # # Format and return
-    # export_segments_and_nodes(links_dict, virtual_flowpaths, "links_nodes_discretization.gpkg")
-    # return _format_link_df(links_dict)
 
 ### HELPER FUNCTIONS ###
 
-def export_segments_and_nodes(
-    segments: LinkArrays,
-    src_vfp: gpd.GeoDataFrame,
-    output_gpkg: str,
-):
+
+def export_links_and_nodes(
+    links: LinkArrays,
+    virtual_flowpaths: gpd.GeoDataFrame,
+    export_links_nodes_gpkg_path: str,
+) -> None:
+    """Export discretized links and nodes as GeoPackage layers (for debugging)."""
     # Initialize data stores
-    us_node_ids = []
-    ds_node_ids = []
+    up_node_ids = []
+    dn_node_ids = []
     link_geometries = []
     node_geometries = []
 
     # Make network graphs
-    ds_network = dict(zip(segments.us_node_id, segments.ds_node_id))
-    ds_network[set(segments.ds_node_id).difference(segments.us_node_id).pop()] = -9999
+    dn_network = dict(zip(links.up_node_id, links.dn_node_id))
+    dn_network[set(links.dn_node_id).difference(links.up_node_id).pop()] = -9999
 
-    len_lookup = dict(zip(segments.us_node_id, segments.lengths))
+    len_lookup = dict(zip(links.up_node_id, links.length))
 
     # Processing loop
-    src_vfp = src_vfp.set_index("up_virtual_nex_id")
-    non_eclipsed = src_vfp[src_vfp.index.isin(segments.us_node_id)]
+    virtual_flowpaths = virtual_flowpaths.set_index(FIELD_UP_VIRTUAL_NEX_ID)
+    non_eclipsed = virtual_flowpaths[virtual_flowpaths.index.isin(links.up_node_id)]
     for i in non_eclipsed.itertuples():
-        us_nex = int(i.Index)
-        dn_nex = i.dn_virtual_nex_id
+        up_node = int(i.Index)
+        dn_node = i.dn_virtual_nex_id
 
-        # Merge eclipsed
+        # Walk downstream through missing (eclipsed) nodes, merging geometries until a retained node is found
         geoms = [i.geometry]
-        while dn_nex not in segments.ds_node_id:
-            tmp = src_vfp.loc[dn_nex]
+        while dn_node not in links.dn_node_id:
+            tmp = virtual_flowpaths.loc[dn_node]
             geoms.append(tmp.geometry)
-            dn_nex = tmp.dn_virtual_nex_id
+            dn_node = tmp.dn_virtual_nex_id
         geom = shapely.line_merge(MultiLineString([j.geoms[0] for j in geoms[::-1]]))
 
-        # Get segments
-        seg_us = us_nex
-        seg_ds = ds_network[seg_us]
-        segs = [us_nex]
-        lengths = [len_lookup[seg_us]]
-        while seg_ds != dn_nex:
-            segs.append(seg_ds)
-            lengths.append(len_lookup[seg_us])
-            seg_ds = ds_network[seg_ds]
-        
-        # Subdivide geometry
-        cumdist = np.cumsum([0.0] + lengths)
+        # Reconstruct link chain between retained nodes using dn_network lookup
+        link_up = up_node
+        link_dn = dn_network[link_up]
+        tmp_links = [up_node]
+        length = [len_lookup[link_up]]
+        while link_dn != dn_node:
+            tmp_links.append(link_dn)
+            length.append(len_lookup[link_up])
+            link_dn = dn_network[link_dn]
+
+        # Build cumulative distances along merged geometry to segment into individual links
+        cumdist = np.cumsum([0.0] + length)
         cumdist[-1] = geom.length  # just in case
-        seg_geoms = [
+        link_geoms = [
             substring(geom, start_dist, end_dist)
             for start_dist, end_dist in zip(cumdist[:-1], cumdist[1:])
         ]
-        node_geoms = [line_interpolate_point(geom, start_dist) for start_dist in cumdist[:-1]]
+        node_geoms = [
+            line_interpolate_point(geom, start_dist) for start_dist in cumdist[:-1]
+        ]
 
         # Log
-        us_node_ids.extend(segs)
-        ds_node_ids.extend(segs[1:] + [dn_nex])
-        link_geometries.extend(seg_geoms)
+        up_node_ids.extend(tmp_links)
+        dn_node_ids.extend(tmp_links[1:] + [dn_node])
+        link_geometries.extend(link_geoms)
         node_geometries.extend(node_geoms)
 
     # Export geopackage
-    gpd.GeoDataFrame({"us_virtual_nex_id": us_node_ids, "ds_virtual_nex_id": ds_node_ids}, geometry=link_geometries, crs=src_vfp.crs).to_file(output_gpkg, layer="links")
-    gpd.GeoDataFrame({"virtual_nex_id": us_node_ids}, geometry=node_geometries, crs=src_vfp.crs).to_file(output_gpkg, layer="nodes")
+    gpd.GeoDataFrame(
+        {"up_node_id": up_node_ids, "dn_node_id": dn_node_ids},
+        geometry=link_geometries,
+        crs=virtual_flowpaths.crs,
+    ).to_file(export_links_nodes_gpkg_path, layer="links")
+    gpd.GeoDataFrame(
+        {"node_id": up_node_ids}, geometry=node_geometries, crs=virtual_flowpaths.crs
+    ).to_file(export_links_nodes_gpkg_path, layer="nodes")
 
-def _tmp_find_routing_vfps(virtual_flowpaths: gpd.GeoDataFrame, flowpaths: gpd.GeoDataFrame, reference_flowpaths: pd.DataFrame) -> gpd.GeoDataFrame:
+
+def _tmp_find_routing_vfps(
+    virtual_flowpaths: gpd.GeoDataFrame,
+    flowpaths: gpd.GeoDataFrame,
+    reference_flowpaths: pd.DataFrame,
+) -> gpd.GeoDataFrame:
     ### TODO: REMOVE THIS AFTER NHF UPDATE
     vfp = virtual_flowpaths.rename(columns={"geometry": "vfp_geom"})
     fp = flowpaths.rename(columns={"geometry": "fp_geom"})
 
     vfp_to_fp = pd.merge(
         vfp,
-        reference_flowpaths[["virtual_fp_id", "div_id"]].drop_duplicates(),
+        reference_flowpaths[[FIELD_VIRTUAL_FP_ID, "div_id"]].drop_duplicates(),
         how="left",
-        on="virtual_fp_id",
-    )[["virtual_fp_id", "vfp_geom", "div_id"]]
+        on=FIELD_VIRTUAL_FP_ID,
+    )[[FIELD_VIRTUAL_FP_ID, "vfp_geom", "div_id"]]
 
     vfp_to_fp = pd.merge(
         vfp_to_fp,
-        reference_flowpaths[["div_id", "fp_id"]].dropna().drop_duplicates(),
+        reference_flowpaths[["div_id", FIELD_FP_ID]].dropna().drop_duplicates(),
         how="left",
         on="div_id",
-    )[["virtual_fp_id", "vfp_geom", "fp_id"]]
+    )[[FIELD_VIRTUAL_FP_ID, "vfp_geom", FIELD_FP_ID]]
 
     vfp_to_fp = pd.merge(
         vfp_to_fp,
-        fp[["fp_id", "fp_geom"]],
+        fp[[FIELD_FP_ID, "fp_geom"]],
         how="left",
-        on="fp_id",
+        on=FIELD_FP_ID,
     )
 
     # Check if first point of vfp matches first point of fp
-    vfp_to_fp["vfp_geom"] = shapely.get_point(shapely.get_geometry(vfp_to_fp["vfp_geom"], 0).values, 0)
-    vfp_to_fp["fp_geom"]  = shapely.get_point(shapely.get_geometry(vfp_to_fp["fp_geom"], 0).values, 0)
+    vfp_to_fp["vfp_geom"] = shapely.get_point(
+        shapely.get_geometry(vfp_to_fp["vfp_geom"], 0).values, 0
+    )
+    vfp_to_fp["fp_geom"] = shapely.get_point(
+        shapely.get_geometry(vfp_to_fp["fp_geom"], 0).values, 0
+    )
 
     matches = shapely.equals(vfp_to_fp["vfp_geom"], vfp_to_fp["fp_geom"])
 
     # Force new virtual nexus at top
-    matches = matches & virtual_flowpaths["up_virtual_nex_id"].isna()
-    start_id = virtual_flowpaths["up_virtual_nex_id"].max() + 1
+    matches = matches & virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID].isna()
+    start_id = virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID].max() + 1
     new_ids = np.arange(start_id, start_id + matches.sum())
-    virtual_flowpaths.loc[matches, "up_virtual_nex_id"] = new_ids
+    virtual_flowpaths.loc[matches, FIELD_UP_VIRTUAL_NEX_ID] = new_ids
 
-    # gpd.GeoDataFrame(vfp_to_fp, geometry="vfp_geom", crs=flowpaths.crs).to_file("ends.gpkg", layer="vfp")
-    # gpd.GeoDataFrame(vfp_to_fp, geometry="fp_geom", crs=flowpaths.crs).to_file("ends.gpkg", layer="fp")
-
-    virtual_flowpaths = virtual_flowpaths.dropna(subset="up_virtual_nex_id")
-    virtual_flowpaths["up_virtual_nex_id"] = virtual_flowpaths["up_virtual_nex_id"].astype(int)
+    virtual_flowpaths = virtual_flowpaths.dropna(subset=FIELD_UP_VIRTUAL_NEX_ID)
+    virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID] = virtual_flowpaths[
+        FIELD_UP_VIRTUAL_NEX_ID
+    ].astype(int)
     return virtual_flowpaths
 
-def _get_fp_dict(flowpaths: gpd.GeoDataFrame, nexus: gpd.GeoDataFrame) -> FlowpathData:
-    # Correct flowpath orientations
-    nex_lookup = nexus.set_index("nex_id").geometry
-    dn_nex_geom = nex_lookup.loc[flowpaths["dn_nex_id"].to_numpy()].values
-    corrected_geoms = _correct_fp_orientations(flowpaths.geometry.values, dn_nex_geom)
 
-    return FlowpathData(
-        corrected_geoms,
-        flowpaths["length_km"].to_numpy() * 1000,
-        flowpaths["fp_id"].to_numpy(),
-        flowpaths["dn_nex_id"].to_numpy()
-    )
+def _aggregate_links(
+    links: LinkArrays, discretization_len_m: float
+) -> tuple[LinkArrays, dict[int, int]]:
+    """Merge links shorter than threshold into upstream neighbors.
 
-def _get_vnex_dict(reference_flowpaths: pd.DataFrame, virtual_flowpaths: gpd.GeoDataFrame, virtual_nexus: gpd.GeoDataFrame) -> VirtualNexusData:
-    vnex_to_fp = pd.merge(virtual_nexus[["geometry", "virtual_nex_id"]], virtual_flowpaths[["up_virtual_nex_id", "virtual_fp_id"]], how="left", left_on="virtual_nex_id", right_on="up_virtual_nex_id")
-    vnex_to_fp = pd.merge(vnex_to_fp, reference_flowpaths[["virtual_fp_id", "div_id"]].drop_duplicates(), how="left", on="virtual_fp_id")[["geometry", "virtual_nex_id", "div_id"]]
-    vnex_to_fp = pd.merge(vnex_to_fp, reference_flowpaths[["div_id", "fp_id"]].dropna().drop_duplicates(), how="left", on="div_id")[["geometry", "virtual_nex_id", "fp_id"]]
+    Notes
+    -----
+    - Iteratively merges short links until all satisfy threshold or are headwaters.
+    - Node remapping provides lookup for removed nodes to their new terminal node.
 
-    # TODO: Remove when NHF patched
-    vnex_to_fp = vnex_to_fp.dropna()
-
-    return VirtualNexusData(
-        vnex_to_fp["geometry"].to_numpy(),
-        vnex_to_fp["virtual_nex_id"].to_numpy(),
-        vnex_to_fp["fp_id"].to_numpy().astype(int)
-    )
-
-def _get_fp_ds_vnex_dict(reference_flowpaths: pd.DataFrame, virtual_flowpaths: gpd.GeoDataFrame) -> dict[int, int]:
-    tmp_ref = pd.merge(reference_flowpaths[["fp_id", "virtual_fp_id"]], virtual_flowpaths[["virtual_fp_id", "dn_virtual_nex_id"]], how="left", on="virtual_fp_id")
-    # Assumes that virtual flowpath id increases in d/s direction
-    return tmp_ref[["fp_id", "dn_virtual_nex_id"]].dropna().astype(int).groupby("fp_id")["dn_virtual_nex_id"].max().to_dict()
-
-def _correct_fp_orientations(flow_geom: np.ndarray[BaseGeometry], dn_nex_geom: np.ndarray[BaseGeometry]) -> np.ndarray[BaseGeometry]:
-    # Correct any backwards flowpaths
-    start_pts = shapely.get_point(flow_geom, 0)
-    end_pts = shapely.get_point(flow_geom, -1)
-
-    dist_start = shapely.distance(start_pts, dn_nex_geom)
-    dist_end = shapely.distance(end_pts, dn_nex_geom)
-
-    reverse_mask = dist_start < dist_end
-    flow_geom = np.where(reverse_mask, shapely.reverse(flow_geom), flow_geom)
-
-    return flow_geom
-
-def _create_links(fp: FlowpathData, vnex: VirtualNexusData, fp_ds_vnex_dict: dict[int, int]) -> LinkArrays:
-    vnex_sorted = _attribute_and_sort_vnex(fp, vnex)
-
-    ## Construct segment lengths array
-
-    # Count number of virtual nexus per flowpath
-    counts = np.bincount(vnex_sorted.fp_inds, minlength=len(fp.geoms))
-    seg_counts = counts + 1  # N+2 breakpoints (including ends); N+1 segments
-
-    # Offsets for flattened arrays
-    offsets = np.zeros_like(seg_counts)
-    offsets[1:] = np.cumsum(seg_counts[:-1])
-    total_segments = offsets[-1] + seg_counts[-1]
-
-    # Prepare arrays
-    start_frac = np.zeros(total_segments, dtype=np.float64)
-    end_frac = np.zeros(total_segments, dtype=np.float64)
-    seg_fp_idx = np.zeros(total_segments, dtype=np.int64)
-    ds_node_id = np.empty(total_segments, dtype=np.int64)
-    us_node_id = np.empty(total_segments, dtype=np.int64)
-
-    # Initialize dict to store link to flowpath outlet mapping
-    fp_outlet_crosswalk = {}
-
-    # Attribute links
-    cur = 0
-
-    for i in range(len(fp.geoms)):
-        tmp_fp_id = fp.ids[i]
-
-        # get fractions for this flowpath
-        mask = vnex_sorted.fp_inds == i
-        tmp_vnex = np.append(vnex_sorted.ids[mask], fp_ds_vnex_dict[tmp_fp_id])
-        dists_full = np.append(vnex_sorted.distances[mask], 1)
-
-        n = len(dists_full) - 1
-        ds_node_id[cur:cur + n] = tmp_vnex[1:]  # TODO: validate
-        us_node_id[cur:cur + n] = tmp_vnex[:-1]
-        start_frac[cur:cur + n] = dists_full[:-1]
-        end_frac[cur:cur + n] = dists_full[1:]
-        seg_fp_idx[cur:cur + n] = i
-
-        # Store last seg
-        fp_outlet_crosswalk[us_node_id[cur + n - 1]] = tmp_fp_id
-
-        cur += n
-
-    return LinkArrays(
-        seg_fp_idx,
-        ds_node_id,
-        us_node_id,
-        start_frac,
-        end_frac,
-        (end_frac - start_frac) * fp.lengths[seg_fp_idx]
-    )
-
-def _attribute_and_sort_vnex(fp: FlowpathData, vnex: VirtualNexusData) -> FlowpathNode:
-    fp_index_map = {fp: i for i, fp in enumerate(fp.ids)}  # map fp_id to index in flowpath layers
-    vnex_flow_ind = np.array([fp_index_map[x] for x in vnex.fp_ids])  # fp_id indices corresponding to each virtual nexus
-
-    # TODO: Need to filter out non-intersecting before vnex_flow_ind
-    intersecting_mask = shapely.intersects(vnex.geoms, fp.geoms[vnex_flow_ind])
-    vnex.filter(intersecting_mask)
-    vnex_flow_ind = vnex_flow_ind[intersecting_mask]
-
-    ## Get distance along each flowpath of each line
-
-    # Indexing to get flowpath line for each virtual nexus
-    
-    # Compute fraction along flowpath for each virtual nexus
-    frac = shapely.line_locate_point(fp.geoms[vnex_flow_ind], vnex.geoms, normalized=True)
-    # frac = dist / fp.lengths[vnex_flow_ind]
-
-    # Sort fractions per flowpath. frac is potentially unsorted
-    vnex_sorted_idx = np.argsort(vnex_flow_ind + frac * 1e-9)  # tiny factor to break ties
-    return FlowpathNode(
-        vnex.ids[vnex_sorted_idx],
-        frac[vnex_sorted_idx],  # virtual nexus fractions ordered by ocurrence along flowpath
-        vnex_flow_ind[vnex_sorted_idx]  # flowpath index for each virtual nexus
-    )
-
-def _aggregate_links(links_dict: LinkArrays, discretization_len_m: float) -> LinkArrays:
+    """
     ## Combine links that are below discretization length with the next upstream reach
-    short_mask = links_dict.lengths < discretization_len_m
+    short_mask = links.get_short_mask(discretization_len_m)
 
-    # Don't apply to headwaters
-    has_us = np.isin(links_dict.us_node_id, links_dict.ds_node_id)
-    short_mask = short_mask & has_us
-
-    # Make a store for rename mapping
-    node_remapping = {}
+    # Make a store for rename mapping.  This is used so Qlats can bew mapped to the new dn node
+    merged_node_crosswalk: dict[int, int] = {}
 
     while short_mask.sum() > 0:
         short_idx = np.where(short_mask)[0]
 
         for idx in short_idx:
-            us_node = links_dict.us_node_id[idx]
-            ds_node = links_dict.ds_node_id[idx]
-            length = links_dict.lengths[idx]
+            up_node = links.up_node_id[idx]
+            dn_node = links.dn_node_id[idx]
+            length = links.length[idx]
 
-            us_filter = links_dict.ds_node_id == us_node
+            # Merge short links into immediate upstream link if upstream exists
+            us_filter = links.dn_node_id == up_node
             if us_filter.sum() > 0:  # Merge with upstream
-                links_dict.ds_node_id[us_filter] = ds_node
-                links_dict.lengths[us_filter] += length
+                links.dn_node_id[us_filter] = dn_node
+                links.length[us_filter] += length
 
-                node_remapping[us_node] = ds_node
+                merged_node_crosswalk[up_node] = dn_node
             else:  # Retain
                 short_mask[idx]
 
-        links_dict.filter(~short_mask)
-        short_mask = links_dict.lengths < discretization_len_m
-        has_us = np.isin(links_dict.us_node_id, links_dict.ds_node_id)
-        short_mask = short_mask & has_us
-    
-    # Clean remapping
-    for k in list(node_remapping.keys()):
-        v = node_remapping[k]
-        if node_remapping[k] not in node_remapping:
+        links.filter(~short_mask)
+        short_mask = links.get_short_mask(discretization_len_m)
+
+    # Clean remapping so each node maps directly to its final downstream node
+    for k in list(merged_node_crosswalk.keys()):
+        v = merged_node_crosswalk[k]
+        if merged_node_crosswalk[k] not in merged_node_crosswalk:
             continue
-        while v in node_remapping:
-            v = node_remapping[v]
-        node_remapping[k] = v
+        while v in merged_node_crosswalk:
+            v = merged_node_crosswalk[v]
+        merged_node_crosswalk[k] = v
 
-    return links_dict, node_remapping
+    return links, merged_node_crosswalk
 
-def _discretize_links(links_dict: LinkArrays, discretization_len_m: float, cur_node_id: int = 0) -> LinkArrays:
 
+def _discretize_links(
+    links: LinkArrays, discretization_len_m: float, cur_node_id: int = 0
+) -> LinkArrays:
+    """Subdivide links longer than threshold into uniform segments (uses ceil such that lengths will undershoot target)."""
     ## Subdivide to target length
-    long_mask = links_dict.lengths > discretization_len_m
+    long_mask = links.length > discretization_len_m
 
     if not np.any(long_mask):
-        return
+        return links
 
-    # indices of long segments
+    # indices of long links
     long_idx = np.where(long_mask)[0]
 
     subdiv_fp_id = []
-    subdiv_start = []
-    subdiv_end = []
-    subdiv_ds_node = []
-    subdiv_us_node = []
-    subdiv_lengths = []
-    # subdiv_id = []
+    subdiv_dn_node = []
+    subdiv_up_node = []
+    subdiv_length = []
 
-
+    # Split long links into equal-length segments and insert new intermediate node IDs
     for idx in long_idx:
-        n = int(np.ceil(links_dict.lengths[idx] / discretization_len_m))
-        new_len = links_dict.lengths[idx] / n
-        fracs = np.linspace(links_dict.start_frac[idx], links_dict.end_frac[idx], n + 1)
+        n = int(np.ceil(links.length[idx] / discretization_len_m))
+        new_len = links.length[idx] / n
         new_node_ids = np.arange(cur_node_id, cur_node_id + n - 1, dtype=int)
-        node_ids = np.concatenate(([links_dict.us_node_id[idx]], new_node_ids, [links_dict.ds_node_id[idx]]))
+        node_ids = np.concatenate(
+            ([links.up_node_id[idx]], new_node_ids, [links.dn_node_id[idx]])
+        )
 
         cur_node_id += n - 1
 
-        subdiv_us_node.append(node_ids[:-1])
-        subdiv_ds_node.append(node_ids[1:])
-        subdiv_fp_id.append(np.full(n, links_dict.fp_id[idx]))
-        subdiv_start.append(fracs[:-1])
-        subdiv_end.append(fracs[1:])
-        subdiv_lengths.append(np.repeat(new_len, n))
+        subdiv_up_node.append(node_ids[:-1])
+        subdiv_dn_node.append(node_ids[1:])
+        subdiv_fp_id.append(np.full(n, links.fp_id[idx]))
+        subdiv_length.append(np.full(n, new_len))
 
     subdiv_fp_id = np.concatenate(subdiv_fp_id)
-    subdiv_start = np.concatenate(subdiv_start)
-    subdiv_end = np.concatenate(subdiv_end)
-    # subdiv_id = np.concatenate(subdiv_id)
-    subdiv_ds_node = np.concatenate(subdiv_ds_node)
-    subdiv_us_node = np.concatenate(subdiv_us_node)
-    subdiv_lengths = np.concatenate(subdiv_lengths)
+    subdiv_dn_node = np.concatenate(subdiv_dn_node)
+    subdiv_up_node = np.concatenate(subdiv_up_node)
+    subdiv_length = np.concatenate(subdiv_length)
 
-    # mask out original long segments
+    # mask out original long links
     keep_mask = ~long_mask
-    start_frac = np.concatenate([links_dict.start_frac[keep_mask], subdiv_start])
-    end_frac = np.concatenate([links_dict.end_frac[keep_mask], subdiv_end])
-    seg_fp_idx = np.concatenate([links_dict.fp_id[keep_mask], subdiv_fp_id])
-    lengths = np.concatenate([links_dict.lengths[keep_mask], subdiv_lengths])
-    # link_id = np.concatenate([link_id[keep_mask], subdiv_id])
-    us_node_id = np.concatenate([links_dict.us_node_id[keep_mask], subdiv_us_node])
-    ds_node_id = np.concatenate([links_dict.ds_node_id[keep_mask], subdiv_ds_node])
+    link_fp_id = np.concatenate([links.fp_id[keep_mask], subdiv_fp_id])
+    length = np.concatenate([links.length[keep_mask], subdiv_length])
+    up_node_id = np.concatenate([links.up_node_id[keep_mask], subdiv_up_node])
+    dn_node_id = np.concatenate([links.dn_node_id[keep_mask], subdiv_dn_node])
 
-    return LinkArrays(
-        seg_fp_idx,
-        ds_node_id,
-        us_node_id,
-        start_frac,
-        end_frac,
-        lengths
+    return LinkArrays(link_fp_id, dn_node_id, up_node_id, length)
+
+
+def _format_link_df(
+    links: LinkArrays, flowpaths: pd.DataFrame
+) -> tuple[pd.DataFrame, dict[int, int]]:
+    """Conform to AbstractNetwork format and build mapping from link id to fp_id."""
+    _dataframe = pd.merge(
+        links.to_df(),
+        flowpaths[CHANNEL_PARAMS + [FIELD_FP_ID]],
+        on=FIELD_FP_ID,
+        how="left",
     )
 
-
-def _format_link_df(links: LinkArrays, flowpaths: pd.DataFrame) -> pd.DataFrame:
-    channel_params = ["n", "mainstem_lp", "topwdth", "slope", "ncc", "btmwdth", "musx", "chslp", "topwdthcc", "musk"]
-    segments = pd.merge(links.to_df(), flowpaths[channel_params + ["fp_id"]], on="fp_id", how="left")
-    segments["alt"] = 0
+    # Summarize outlets for remapping t-route results to input flowpaths
+    # Assumes that nexus and node IDs increase in downstream direction
+    fp_outlet_crosswalk = (
+        _dataframe.groupby(FIELD_FP_ID)["up_node_id"]
+        .max()
+        .rename_axis(FIELD_FP_ID)
+        .reset_index()
+        .set_index("up_node_id")[FIELD_FP_ID]
+        .to_dict()
+    )
 
     # Conform to abstractnetwork _dataframe
+    _dataframe["alt"] = 0
     renames = {
-        "ds_node_id": "downstream",
+        "dn_node_id": "downstream",
         "length": "dx",
         "mainstem_lp": "mainstem",
         "topwdth": "tw",
         "slope": "s0",
         "btmwdth": "bw",
-        "lengths": "dx",
         "chslp": "cs",
-        "topwdthcc": "twcc"
+        "topwdthcc": "twcc",
     }
-    # Summarize outlets for remapping t-route results to input flowpaths
-    fp_outlet_crosswalk = segments.groupby("fp_id")["us_node_id"].max().rename_axis("fp_id").reset_index().set_index("us_node_id")["fp_id"].to_dict()
+    _dataframe = _dataframe.set_index("up_node_id").rename(columns=renames)
 
-
-    segments = segments.set_index("us_node_id").rename(columns=renames)
-    
-    return segments, fp_outlet_crosswalk
+    return _dataframe, fp_outlet_crosswalk
