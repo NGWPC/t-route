@@ -269,7 +269,7 @@ class RunContext:
         return self._node_remapping
 
     def _discretize_network(self):
-        self._links_df, _, self._node_remapping = discretize_flowpaths(
+        self._links_df, self._node_remapping = discretize_flowpaths(
             self.flowpaths_gdf,
             self.virtual_flowpaths_gdf,
             self.reference_flowpaths_gdf,
