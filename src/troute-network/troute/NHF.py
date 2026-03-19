@@ -194,22 +194,54 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, nexus_remapping)
 
     def _build_fp_outlet_crosswalk(self, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]):
-        """Build a mapping from routing link ID to fp_id to be used when writing results."""
-        # There are a few strategies one could use to assign an outflow timeseries for the removed-flowpath
-        # A) Use the timeseries from a randomly selected upstream link (will underestimate flow)
-        # B) Use the timeseries from the next downstream link (will overestimate flow)
-        # We choose option B.
-        tmp_vfp = pd.merge(virtual_flowpaths[["virtual_fp_id", "dn_virtual_nex_id", "up_virtual_nex_id"]], reference_flowpaths[["virtual_fp_id", "fp_id"]].drop_duplicates(), how="left", on="virtual_fp_id")
+        """Build a mapping from routing link ID to fp_id to be used when writing results.
+        
+        N.B. There are a few strategies one could use to assign an outflow timeseries for a merged flowpath
+        A) Use the timeseries from a randomly selected upstream link (will underestimate flow)
+        B) Use the timeseries from the next downstream link (will overestimate flow)
+        We choose option B.
+        """
+        # Get fp_id and source of data
+        ids = reference_flowpaths["fp_id"].dropna().astype(int).unique()
+        ids_merged = set(ids).difference(self._dataframe["fp_id"])
+
+        # Aggregate links in _dataframe.  Assumes node IDs increase in downstream direction.
+        link_mapping = (
+            self._dataframe.reset_index().groupby("fp_id", sort=False)["up_node_id"]
+            .max()  # Strong assumption.  Currently true.
+            .reset_index()
+            .groupby("up_node_id")["fp_id"]
+            .agg(list)
+            .to_dict()
+        )
+
+        # Aggregate virtual flowpaths.  Handles merged links
+        sub_ref = reference_flowpaths[reference_flowpaths["fp_id"].isin(ids_merged)][["virtual_fp_id", "fp_id"]].drop_duplicates()
+        tmp_vfp = pd.merge(sub_ref, virtual_flowpaths[["virtual_fp_id", "dn_virtual_nex_id", "up_virtual_nex_id"]], how="left", on="virtual_fp_id")
+
+        # Optional remap when successive merging occured
+        merged_mask = tmp_vfp["dn_virtual_nex_id"].isin(nexus_remapping)
+        tmp_vfp.loc[merged_mask, "dn_virtual_nex_id"] = tmp_vfp.loc[merged_mask, "dn_virtual_nex_id"].map(nexus_remapping)
+
+        merged_mapping = (
+            tmp_vfp
+            .groupby("fp_id", sort=False)["dn_virtual_nex_id"]
+            .max()
+            .reset_index()
+            .astype(int)
+            .groupby("dn_virtual_nex_id")["fp_id"]
+            .agg(list)
+            .to_dict()
+        )
+
+        # Put all results into the mapping dict
         self._fp_outlet_crosswalk = defaultdict(list)
-        for i in reference_flowpaths["fp_id"].dropna().astype(int).unique():
-            if i in self._dataframe["fp_id"].values:
-                sub_df = self._dataframe[self._dataframe["fp_id"] == i]
-                outlet_link = sub_df[~sub_df["downstream"].isin(sub_df.index.values)].index.item()
-            else:
-                sub_df = tmp_vfp[tmp_vfp["fp_id"] == i]
-                outlet_link = sub_df[~sub_df["dn_virtual_nex_id"].isin(sub_df["up_virtual_nex_id"])]["dn_virtual_nex_id"].item()
-                outlet_link = nexus_remapping.get(outlet_link, outlet_link)
-            self._fp_outlet_crosswalk[outlet_link].append(i)
+        # Add link mapping
+        for k, v in link_mapping.items():
+            self._fp_outlet_crosswalk[k].extend(v)
+        # Append virtual mapping
+        for k, v in merged_mapping.items():
+            self._fp_outlet_crosswalk[k].extend(v)
 
 
     def _build_div_weighting_matrix(self, virtual_flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]) -> pd.DataFrame:

@@ -13,6 +13,7 @@ Notable Assumptions
 """
 
 from dataclasses import dataclass, fields
+from collections import defaultdict
 from typing import Union
 
 import geopandas as gpd
@@ -282,33 +283,70 @@ def _aggregate_links(
     - Node remapping provides lookup for removed nodes to their new terminal node.
 
     """
-    ## Combine links that are below discretization length with the next upstream reach
-    short_mask = links.get_short_mask(discretization_len_m)
-
-    # Make a store for rename mapping.  This is used so Qlats can bew mapped to the new dn node
+    # Make a store for rename mapping.  This is used so Qlats can be mapped to the new dn node
     merged_node_crosswalk: dict[int, int] = {}
 
-    while short_mask.sum() > 0:
-        # Process one short reach at a time
-        idx = np.argmax(short_mask)  # First occurence
+    # Make lookup for u/s nodes
+    dn_index = defaultdict(list)
+    for i, dn in enumerate(links.dn_node_id):
+        dn_index[dn].append(i)
 
+    ## Combine links that are below discretization length with the next upstream reach
+    short_mask = links.length < discretization_len_m
+    has_us = np.array([u in dn_index for u in links.up_node_id], dtype=bool)
+    short_mask &= has_us
+    
+    # Mark merged so we can remove them later (currently non removed)
+    active = np.ones(len(links.length), dtype=bool)
+
+    # Initialize queue
+    queue = list(np.flatnonzero(short_mask))
+
+    while queue:
+        idx = queue.pop()
+
+        # Skip if already removed or other merging led to acceptable length
+        if not active[idx]:
+            continue
+        length = links.length[idx]
+        if length >= discretization_len_m:
+            continue
+        
+        # Get link info
         up_node = links.up_node_id[idx]
         dn_node = links.dn_node_id[idx]
-        length = links.length[idx]
 
-        # Merge short links into immediate upstream link if upstream exists
-        us_filter = links.dn_node_id == up_node
-        if us_filter.sum() > 0:  # Merge with upstream
-            links.dn_node_id[us_filter] = dn_node
-            links.length[us_filter] += length
+        # Get u/s link indices
+        us_indices = dn_index.get(up_node)
+        if not us_indices:
+            raise RuntimeError(
+                f"Attempted to merge link {up_node} (dx={int(length)}), but no upstream links were present."
+            )
 
-            # Update ancilliary records
-            merged_node_crosswalk[up_node] = dn_node
-        else:  # Retain
-            raise RuntimeError(f"Attempted to merge link {up_node} (dx={int(length)}), but no upstream links were present.")
+        # Merge into upstream links
+        for us_idx in us_indices:
+            if not active[us_idx]:
+                # Don't merge with a merged link
+                continue
 
-        links.remove(idx)
-        short_mask = links.get_short_mask(discretization_len_m)
+            links.dn_node_id[us_idx] = dn_node
+            links.length[us_idx] += length
+
+            # Update adjacency: move this index under new dn_node
+            dn_index[dn_node].append(us_idx)
+
+            # Re-check upstream link
+            if links.length[us_idx] < discretization_len_m and has_us[us_idx]:
+                queue.append(us_idx)
+
+        # Record remapping
+        merged_node_crosswalk[up_node] = dn_node
+
+        # Deactivate this link
+        active[idx] = False
+
+    # Remove short links
+    links.filter(active)
 
     # Clean remapping so each node maps directly to its final downstream node
     for k in list(merged_node_crosswalk.keys()):
@@ -320,7 +358,6 @@ def _aggregate_links(
         merged_node_crosswalk[k] = v
 
     return links, merged_node_crosswalk
-
 
 def _discretize_links(
     links: LinkArrays, discretization_len_m: float, cur_node_id: int = 0
