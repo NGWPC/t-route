@@ -1,3 +1,4 @@
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 import time
 from pathlib import Path
@@ -178,9 +179,9 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         """Map outlet link_id -> fp_id for reindexing outputs."""
         return self._fp_outlet_crosswalk
 
-    def preprocess_network(self, flowpaths, reference_flowpaths, virtual_flowpaths, discretization_len_m=300.0):
+    def preprocess_network(self, flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, discretization_len_m=300.0):
         """Create routing links (self._dataframe) and weighting data to assign fp flows to links."""
-        self._dataframe, self._fp_outlet_crosswalk, nexus_remapping = discretize_flowpaths(
+        self._dataframe, nexus_remapping = discretize_flowpaths(
             flowpaths=flowpaths,
             virtual_flowpaths=virtual_flowpaths,
             reference_flowpaths=reference_flowpaths,
@@ -188,8 +189,27 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         )
         self._connections = None  # Forces recomputation on first call to self.connections
         self._terminal_codes = set(self._dataframe["downstream"]).difference(self._dataframe.index)  # Outlets
+        self._build_fp_outlet_crosswalk(reference_flowpaths, virtual_flowpaths, nexus_remapping)
 
         self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, nexus_remapping)
+
+    def _build_fp_outlet_crosswalk(self, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]):
+        """Build a mapping from routing link ID to fp_id to be used when writing results."""
+        # There are a few strategies one could use to assign an outflow timeseries for the removed-flowpath
+        # A) Use the timeseries from a randomly selected upstream link (will underestimate flow)
+        # B) Use the timeseries from the next downstream link (will overestimate flow)
+        # We choose option B.
+        tmp_vfp = pd.merge(virtual_flowpaths[["virtual_fp_id", "dn_virtual_nex_id", "up_virtual_nex_id"]], reference_flowpaths[["virtual_fp_id", "fp_id"]].drop_duplicates(), how="left", on="virtual_fp_id")
+        self._fp_outlet_crosswalk = defaultdict(list)
+        for i in reference_flowpaths["fp_id"].dropna().astype(int).unique():
+            if i in self._dataframe["fp_id"].values:
+                sub_df = self._dataframe[self._dataframe["fp_id"] == i]
+                outlet_link = sub_df[~sub_df["downstream"].isin(sub_df.index.values)].index.item()
+            else:
+                sub_df = tmp_vfp[tmp_vfp["fp_id"] == i]
+                outlet_link = sub_df[~sub_df["dn_virtual_nex_id"].isin(sub_df["up_virtual_nex_id"])]["dn_virtual_nex_id"].item()
+                outlet_link = nexus_remapping.get(outlet_link, outlet_link)
+            self._fp_outlet_crosswalk[outlet_link].append(i)
 
 
     def _build_div_weighting_matrix(self, virtual_flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]) -> pd.DataFrame:

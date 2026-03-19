@@ -139,7 +139,6 @@ def discretize_flowpaths(
     tuple
         (
             pd.DataFrame,  # formatted link table that matches _dataframe format from AbstractNetwork
-            dict[int, int] # mapping from link id (up_node_id) back to fp_id used to remap flowpath outflows to original fp_id
             dict[int, int] # mapping of virtual_nexus_id to a new node when the original node was merged
         )
 
@@ -150,11 +149,11 @@ def discretize_flowpaths(
         links, merged_node_crosswalk = _aggregate_links(links, discretization_len_m)
     else:
         merged_node_crosswalk = {}
-    links = _discretize_links(links, discretization_len_m, cur_node_id)
+    links = _discretize_links(links, discretization_len_m, cur_node_id)  
 
     if export_links_nodes_gpkg_path is not None:
         export_links_and_nodes(links, virtual_flowpaths, export_links_nodes_gpkg_path)
-    return *_format_link_df(links, flowpaths), merged_node_crosswalk
+    return _format_link_df(links, flowpaths), merged_node_crosswalk
 
 
 ### HELPER FUNCTIONS ###
@@ -355,27 +354,13 @@ def _discretize_links(
 
     return LinkArrays(link_fp_id, dn_node_id, up_node_id, length)
 
-
-def _format_link_df(
-    links: LinkArrays, flowpaths: pd.DataFrame
-) -> tuple[pd.DataFrame, dict[int, int]]:
+def _format_link_df(links: LinkArrays, flowpaths: pd.DataFrame) -> pd.DataFrame:
     """Conform to AbstractNetwork format and build mapping from link id to fp_id."""
     _dataframe = pd.merge(
         links.to_df(),
         flowpaths[CHANNEL_PARAMS + [FIELD_FP_ID]],
         on=FIELD_FP_ID,
         how="left",
-    )
-
-    # Summarize outlets for remapping t-route results to input flowpaths
-    # Assumes that nexus and node IDs increase in downstream direction
-    fp_outlet_crosswalk = (
-        _dataframe.groupby(FIELD_FP_ID)["up_node_id"]
-        .max()
-        .rename_axis(FIELD_FP_ID)
-        .reset_index()
-        .set_index("up_node_id")[FIELD_FP_ID]
-        .to_dict()
     )
 
     # Conform to abstractnetwork _dataframe
@@ -392,4 +377,4 @@ def _format_link_df(
     }
     _dataframe = _dataframe.set_index("up_node_id").rename(columns=renames)
 
-    return _dataframe, fp_outlet_crosswalk
+    return _dataframe
