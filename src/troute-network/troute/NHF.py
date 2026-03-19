@@ -335,7 +335,11 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         """Expand channel forcings provided at the div/fp level to a dataframe of link qlaterals."""
         # Load qlats
         div_direct_runoff_df = self._load_forcing(run)
+        # Expand from divs to link qlats
+        self._build_qlateral_array_direct(div_direct_runoff_df)
 
+    def _build_qlateral_array_direct(self, div_direct_runoff_df: pd.DataFrame) -> None:
+        """Expand channel forcings provided at the div/fp level to a dataframe of link qlaterals."""
         # Apply flow scaling to expand runoff into virtual flowpaths
         div_ids = div_direct_runoff_df.index.to_numpy()
         div_order = np.argsort(div_ids)
