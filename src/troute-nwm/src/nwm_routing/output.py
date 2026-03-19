@@ -258,9 +258,17 @@ def nwm_output_generator(
 
         # reindex from link_id to fp_id, keeping outlet links + non-link rows (VFPs)
         if fp_outlet_crosswalk:
-            og_fp_mask = flowveldepth.index.isin(set(fp_outlet_crosswalk.keys()))
-            flowveldepth = flowveldepth.loc[og_fp_mask]
-            flowveldepth = flowveldepth.rename(index=fp_outlet_crosswalk)
+            og_fp_mask = flowveldepth.index.isin(fp_outlet_crosswalk)
+            df = flowveldepth.loc[og_fp_mask]
+
+            # Build expanded index + row mapping
+            repeats = df.index.map(lambda x: len(fp_outlet_crosswalk[x]))
+            expanded_df = df.loc[df.index.repeat(repeats)]
+
+            # Assign new index
+            expanded_df.index = np.concatenate(df.index.map(fp_outlet_crosswalk).to_numpy())
+
+            flowveldepth = expanded_df
 
         # todo: create a unit test by saving FVD array to disk and then checking that
         # it matches FVD array from parent branch or other configurations.
@@ -285,8 +293,16 @@ def nwm_output_generator(
 
             # reindex courant from link_id to fp_id
             if fp_outlet_crosswalk:
-                courant = courant.loc[og_fp_mask]
-                courant = courant.rename(index=fp_outlet_crosswalk)
+                courant_df = courant.loc[og_fp_mask]
+
+                # Build expanded index + row mapping
+                repeats = courant_df.index.map(lambda x: len(fp_outlet_crosswalk[x]))
+                expanded_courant_df = courant_df.loc[courant_df.index.repeat(repeats)]
+
+                # Assign new index
+                expanded_courant_df.index = np.concatenate(courant_df.index.map(fp_outlet_crosswalk).to_numpy())
+
+                courant = expanded_courant_df
 
         LOG.debug("Constructing the FVD DataFrame took %s seconds." % (time.time() - start))
     
