@@ -46,8 +46,8 @@ def create_forcing_dataset(t_start: str, t_end: str, forcing_dir: str, hydrofabr
         print(f"Processing runout time step {i}...")
         t_str = (iterator[-1] + pd.Timedelta(hours=i)).strftime("%Y%m%d%H%M")
         df = pd.DataFrame({
-            "feature_id": feature_ids_retro,
-            t_str: [0.0] * len(feature_ids_retro),
+            "feature_id": fps["fp_id"],
+            t_str: [0.0] * len(fps),
         })
         df.to_csv(forcing_dir / f"{t_str}.{forcing_file_pattern}.csv", index=False)
 
