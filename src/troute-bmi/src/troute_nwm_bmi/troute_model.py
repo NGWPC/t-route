@@ -145,31 +145,9 @@ class Model:
         forcing_start_time = time.time()
 
         if self._is_nhf:
-            # NHF: BMI IDs are div_ids (catchment IDs); distribute to links
-            div_lateralflows_df = pd.DataFrame(
-                data=self._df_data,
-                index=bmi_values["land_surface_water_source__id"],
-            )
-            vseg_ids = set(network._nexus_virtual_seg_ids.values()) if network._nexus_virtual_seg_ids else set()
-            real_links_df = network._links_df.drop(index=list(vseg_ids), errors='ignore')
-            qlats, network._flow_scaling_segment_df, network._upstream_inflow_df = \
-                distribute_catchment_discharge(
-                    div_lateralflows_df,
-                    network._dataframe,
-                    real_links_df,
-                    network._nodes_df,
-                    network._reference_flowpaths,
-                    network._fp_to_dn_nex,
-                    network._nex_to_dn_fp,
-                )
-            # Fill zeros for missing segments
-            all_df = pd.DataFrame(
-                np.zeros((len(network.segment_index), len(qlats.columns))),
-                index=network.segment_index,
-                columns=qlats.columns,
-            )
-            all_df.loc[qlats.index] = qlats
-            qlats = all_df.sort_index()
+            qlats = pd.DataFrame(data=self._df_data, index=bmi_values["land_surface_water_source__id"])
+            network._build_qlateral_array_direct(qlats)
+            qlats = network._qlateral
         else:
             # HYFeatures / NHD: nexus→flowpath rename
             qlats = pd.DataFrame(data=self._df_data, index=bmi_values["land_surface_water_source__id"])
@@ -180,33 +158,12 @@ class Model:
 
         self._timings["forcing_time"] += time.time() - forcing_start_time
 
-        # Build param_df and flowveldepth_interorder
+        # Build param_df 
+        param_df = network.dataframe
         if self._is_nhf:
-            # NHF: build routing_df from links_df with column renames + dx in meters
-            param_df = network.links_df[[
-                "n", "mainstem_lp", "topwdth", "slope", "ncc",
-                "btmwdth", "length_km", "musx", "chslp", "topwdthcc", "musk",
-            ]].copy()
-            param_df["alt"] = np.zeros_like(param_df["n"].values)
-            param_df = param_df.rename(columns={
-                "mainstem_lp": "mainstem",
-                "topwdth": "tw",
-                "slope": "s0",
-                "btmwdth": "bw",
-                "length_km": "dx",
-                "chslp": "cs",
-                "topwdthcc": "twcc",
-            })
-            param_df["dx"] = param_df["dx"] * 1000  # convert km to meters
-
-            flowveldepth_interorder = network.build_flowveldepth_interorder(nts, qts_subdivisions)
+            qlat_add_loc = "bottom"
         else:
-            param_df = network.dataframe
-
-            if len(bmi_values["upstream_id"]) > 0:
-                flowveldepth_interorder = {bmi_values['upstream_id'][0]: {"results": bmi_values['upstream_fvd']}}
-            else:
-                flowveldepth_interorder = {}
+            qlat_add_loc = "middle"
 
         LOG.debug("Starting routing function")
         route_start_time = time.time()
@@ -256,18 +213,9 @@ class Model:
             subnetwork_list=self._subnetwork,
             coastal_boundary_depth_df=network.coastal_boundary_depth_df,
             unrefactored_topobathy_df=network.unrefactored_topobathy_df,
-            flowveldepth_interorder=flowveldepth_interorder,
+            qlat_add_loc=qlat_add_loc,
         )
         self._timings["route_time"] = time.time() - route_start_time
-
-        # NHF: append non-routing segment flow scaling to run results
-        if self._is_nhf:
-            run_results = append_nonrouting_to_run_results(
-                run_results,
-                network._flow_scaling_segment_df,
-                qts_subdivisions,
-                nts,
-            )
 
         # create initial conditions for next loop iteration
         network.new_q0(run_results)
