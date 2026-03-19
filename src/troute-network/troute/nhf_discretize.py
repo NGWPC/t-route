@@ -91,6 +91,12 @@ class LinkArrays:
         self.up_node_id = self.up_node_id[mask]
         self.length = self.length[mask]
 
+    def remove(self, ind: int) -> None:
+        """Remove a specific index from all arrays."""
+        self.fp_id = np.delete(self.fp_id, ind)
+        self.dn_node_id = np.delete(self.dn_node_id, ind)
+        self.up_node_id = np.delete(self.up_node_id, ind)
+        self.length = np.delete(self.length, ind)
 
 ### MAIN FUNCTION ###
 
@@ -268,24 +274,25 @@ def _aggregate_links(
     merged_node_crosswalk: dict[int, int] = {}
 
     while short_mask.sum() > 0:
-        short_idx = np.where(short_mask)[0]
+        # Process one short reach at a time
+        idx = np.argmax(short_mask)  # First occurence
 
-        for idx in short_idx:
-            up_node = links.up_node_id[idx]
-            dn_node = links.dn_node_id[idx]
-            length = links.length[idx]
+        up_node = links.up_node_id[idx]
+        dn_node = links.dn_node_id[idx]
+        length = links.length[idx]
 
-            # Merge short links into immediate upstream link if upstream exists
-            us_filter = links.dn_node_id == up_node
-            if us_filter.sum() > 0:  # Merge with upstream
-                links.dn_node_id[us_filter] = dn_node
-                links.length[us_filter] += length
+        # Merge short links into immediate upstream link if upstream exists
+        us_filter = links.dn_node_id == up_node
+        if us_filter.sum() > 0:  # Merge with upstream
+            links.dn_node_id[us_filter] = dn_node
+            links.length[us_filter] += length
 
-                merged_node_crosswalk[up_node] = dn_node
-            else:  # Retain
-                short_mask[idx]
+            # Update ancilliary records
+            merged_node_crosswalk[up_node] = dn_node
+        else:  # Retain
+            raise RuntimeError(f"Attempted to merge link {up_node} (dx={int(length)}), but no upstream links were present.")
 
-        links.filter(~short_mask)
+        links.remove(idx)
         short_mask = links.get_short_mask(discretization_len_m)
 
     # Clean remapping so each node maps directly to its final downstream node
