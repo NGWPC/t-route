@@ -18,7 +18,8 @@ from troute.nhd_network_utilities_v02 import organize_independent_networks
 import troute.nhd_io as nhd_io 
 from .AbstractRouting import MCOnly, MCwithDiffusive, MCwithDiffusiveNatlXSectionNonRefactored, MCwithDiffusiveNatlXSectionRefactored
 
-LOG = logging.getLogger('')
+from troute_ewts import MODULE_NAME
+LOG = logging.getLogger(MODULE_NAME)
 
 class AbstractNetwork(ABC):
     """
@@ -142,6 +143,9 @@ class AbstractNetwork(ABC):
             "lateral inflow DataFrame creation complete in %s seconds." \
                 % (time.time() - start_time)
                 )
+        self.assemble_coastal_coupling_data()
+
+    def assemble_coastal_coupling_data(self):
 
         #---------------------------------------------------------------------------
         # Assemble catchment ET data for channel loss

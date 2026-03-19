@@ -85,12 +85,15 @@ else
 fi
 echo "using NETCDFINC=${NETCDFINC}"
 
+
+
 if [[ "$build_mc_kernel" == true ]]; then
     #building reach and resevoir kernel files .o
     cd $REPOROOT/src/kernel/muskingum/
     make clean
     make || exit
     make install || exit
+
 fi
 
 if [[ "$build_diffusive_tulane_kernel" == true ]]; then
@@ -113,6 +116,21 @@ if [[ "$build_reservoir_kernel" == true ]]; then
     make
     make install_lp || exit
     make install_rfc || exit
+    
+fi
+
+cd $REPOROOT/src/troute_ewts
+if [[ ${WITH_EDITABLE} == true ]]; then
+  pip install --editable . || exit
+else
+  pip install . || exit
+fi
+
+cd $REPOROOT/src/troute_ewts
+if [[ ${WITH_EDITABLE} == true ]]; then
+  pip install --editable . || exit
+else
+  pip install . || exit
 fi
 
 if [[ "$build_framework" == true ]]; then
