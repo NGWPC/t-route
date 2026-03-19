@@ -144,6 +144,22 @@ def discretize_flowpaths(
 
     """
     cur_node_id = virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID].max() + 1
+
+    ##############################################
+    ### TEMPORARY PATCH ###  See looped headwaters
+    mask = virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID] == virtual_flowpaths[FIELD_DN_VIRTUAL_NEX_ID]
+    n = mask.sum()
+    virtual_flowpaths.loc[mask, FIELD_UP_VIRTUAL_NEX_ID] = np.arange(cur_node_id, cur_node_id + n)
+    cur_node_id += n + 1
+
+    ### TEMP PATCH 2 ###  see 1162231
+    dup_up_node = virtual_flowpaths.groupby(FIELD_UP_VIRTUAL_NEX_ID).cumcount()
+    mask = dup_up_node > 0
+    n = mask.sum()
+    virtual_flowpaths.loc[mask, FIELD_UP_VIRTUAL_NEX_ID] = np.arange(cur_node_id, cur_node_id + n)
+    cur_node_id += n + 1
+    #############################################
+    
     links = _load_initial_links(virtual_flowpaths, reference_flowpaths)
     if aggregate_short_reaches:
         links, merged_node_crosswalk = _aggregate_links(links, discretization_len_m)
