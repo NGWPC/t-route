@@ -231,7 +231,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
            flows. 
         """
         # Make a dataframe for every vfp with percentage_area_contribution, div_id, dn_nex_id, and virtual_fp_id
-        vfp_map = pd.merge(reference_flowpaths[["virtual_fp_id", "div_id"]].copy().drop_duplicates().astype("Int64"), virtual_flowpaths[["virtual_fp_id", "percentage_area_contribution", "dn_virtual_nex_id"]], on="virtual_fp_id", how="left")
+        vfp_map = pd.merge(reference_flowpaths[["virtual_fp_id", "div_id"]].copy().dropna(subset="virtual_fp_id").drop_duplicates().astype("Int64"), virtual_flowpaths[["virtual_fp_id", "percentage_area_contribution", "dn_virtual_nex_id"]], on="virtual_fp_id", how="left")
 
         # Remap down nexuses that changed in discretization
         remap_mask = vfp_map["dn_virtual_nex_id"].isin(nexus_remapping)
@@ -241,7 +241,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # (explanation) In NHF, flows are added at the downstream end of a virtual_flowpath. To achieve this, we apply 
         # discharges at the link just upstream of the downstream end of the virtual flowpath and use the "bottom" option 
         # for lateral addition location
-        vfp_map = pd.merge(vfp_map, self._dataframe.reset_index()[["up_node_id", "downstream"]], how="left", left_on="dn_virtual_nex_id", right_on="downstream")
+        vfp_map = pd.merge(vfp_map, self._dataframe.reset_index()[["up_node_id", "downstream", "fp_id"]], how="left", left_on=["dn_virtual_nex_id", "div_id"], right_on=["downstream", "fp_id"])
 
         # Fallback for vfps that hit a headwater
         # (explanation) When a virtual flowpath is the div headwater, there's no link for it to add it's flows to. 
@@ -249,7 +249,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         vfp_map.loc[vfp_map["up_node_id"].isna(), "up_node_id"] = vfp_map.loc[vfp_map["up_node_id"].isna(), "dn_virtual_nex_id"]
 
         # Cleanup
-        vfp_map = vfp_map[["virtual_fp_id", "percentage_area_contribution", "div_id", "up_node_id"]]
+        vfp_map = vfp_map[["virtual_fp_id", "percentage_area_contribution", "div_id", "up_node_id"]].copy()
         vfp_map["up_node_id"] = vfp_map["up_node_id"].astype(int)
 
         # Make weights
