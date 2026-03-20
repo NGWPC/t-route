@@ -273,7 +273,7 @@ To run t-route on NHF at the CONUS scale, use the example workflow below. This t
 cd test/nhf/conus
 mkdir domain
 ln -s /path/to/your/nhf.gpkg domain/nhf.gpkg
-python ../make_forcing.py --start-time "2022-07-25 00:00" --end-time "2022-07-31 00:00" --case-id conus --hf-file nhf.gpkg --run-id retro
+python ../make_forcing.py --start-time "2022-07-25 00:00" --end-time "2022-07-26 12:00" --case-id conus --hf-file nhf.gpkg --run-id retro
 python -m nwm_routing -V5 -f retro.yaml
-python ../generate_diagnostics.py conus/retro.yaml
+python ../generate_diagnostics.py --file retro.yaml 
 ```
