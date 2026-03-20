@@ -11,14 +11,11 @@ from troute.NHDNetwork import NHDNetwork
 from troute.HYFeaturesNetwork import HYFeaturesNetwork
 from troute.NHF import NHF
 from troute.DataAssimilation import DataAssimilation
-from troute.nhf_discretize import distribute_catchment_discharge
 
 import troute.hyfeature_network_utilities as hnu
 
 import nwm_routing.nwm_route as nwm_routing
 from nwm_routing.output import nwm_output_generator
-from nwm_routing.flow_scaling_utils import append_nonrouting_to_run_results
-from nwm_routing.log_level_set import log_level_set
 
 from troute_ewts import configure_logging, MODULE_NAME
 LOG = logging.getLogger(MODULE_NAME)
@@ -86,7 +83,6 @@ class Model:
         else:
             raise Exception("Supernetwork network type must be HYFeaturesNetwork, NHDNetwork, or NHF")
         self._is_nhf = (self.supernetwork_parameters["network_type"] == "NHF")
-        self._network.assemble_coastal_coupling_data()
         network_creation_time = time.time() - network_start_time
 
         # Data data assimilation
@@ -252,7 +248,6 @@ class Model:
             nexus_dict=network.nexus_dict,
             poi_crosswalk=network.poi_nex_dict or {},
             fp_outlet_crosswalk=network.fp_outlet_crosswalk if self._is_nhf else None,
-            link_ids=network.links_df.index if self._is_nhf else None,
         )
         self._timings["output_time"] = time.time() - output_start_time
 
