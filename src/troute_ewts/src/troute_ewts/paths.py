@@ -30,6 +30,7 @@ import getpass
 import os
 from datetime import datetime, timezone
 
+from .helper import getenv_any
 from .constants import (
     MODULE_NAME,
     EV_NGEN_LOGFILEPATH,
@@ -66,13 +67,13 @@ def get_log_file_path():
     appendEntries = True
     moduleLogFileExists = False
 
-     # Determine if a log file has laready been opened for this module (either the ngen log or default)
-    moduleEnvVar = os.getenv(EV_MODULE_LOGFILEPATH, "")
+     # Determine if a log file has already been opened for this module (either the ngen log or default)
+    moduleEnvVar = getenv_any(EV_MODULE_LOGFILEPATH,"").strip()
     if moduleEnvVar:
         logFilePath = moduleEnvVar
         moduleLogFileExists = True
     else:
-        ngenEnvVar = os.getenv(EV_NGEN_LOGFILEPATH, "")
+        ngenEnvVar = getenv_any(EV_NGEN_LOGFILEPATH).strip()
         if ngenEnvVar:
             logFilePath = ngenEnvVar
         else:
