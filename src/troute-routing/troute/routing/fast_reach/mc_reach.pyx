@@ -277,7 +277,7 @@ cpdef object compute_network_structured(
     if data_values.shape[0] != data_idx.shape[0] or data_values.shape[1] != data_cols.shape[0]:
         raise ValueError(f"data_values shape mismatch")
     #define and initialize the final output array, add one extra time step for initial conditions
-    cdef int qvd_ts_w = 3  # There are 3 values per timestep (corresponding to 3 columns per timestep)
+    cdef int qvd_ts_w = 4  # There are 4 values per timestep (corresponding to 4 columns per timestep)
     cdef np.ndarray[float, ndim=3] flowveldepth_nd = np.zeros((data_idx.shape[0], nsteps+1, qvd_ts_w), dtype='float32')
     #Make ndarrays from the mem views for convience of indexing...may be a better method
     cdef np.ndarray[float, ndim=2] data_array = np.asarray(data_values)
@@ -306,7 +306,6 @@ cpdef object compute_network_structured(
     cdef float[:] lateral_flows
     # accumulators and indices for qlat addition location
     cdef int qlat_ts_previous
-    cdef int qlat_ts_previous_previous
     # list of reach objects to operate on
     cdef list reach_objects = []
     cdef list segment_objects
@@ -505,6 +504,7 @@ cpdef object compute_network_structured(
             else:
                 flowveldepth_nd[fill_index, 0, 0] = init_array[fill_index, 0] # initial flow condition
                 flowveldepth_nd[fill_index, 0, 2] = init_array[fill_index, 2] # initial depth condition
+                flowveldepth_nd[fill_index, 0, 3] = init_array[fill_index, 3] # initial depth condition
 
     #Init buffers
     lateral_flows = np.zeros( max_buff_size, dtype='float32' )
@@ -530,7 +530,6 @@ cpdef object compute_network_structured(
     
     while timestep < nsteps+1:
         qlat_ts_previous = (timestep-1) // qts_subdivisions
-        qlat_ts_previous_previous = (timestep-2) // qts_subdivisions
 
         for i in range(num_reaches):
             r = &reach_structs[i]
@@ -783,10 +782,6 @@ cpdef object compute_network_structured(
                 for _i in range(r.reach.mc_reach.num_segments):
                     segment = get_mc_segment(r, _i)
                     qlat = qlat_array[segment.id, qlat_ts_previous]
-                    if qlat_ts_previous_previous < 0:
-                        qlat_previous_previous= 0
-                    else:
-                        qlat_previous_previous = qlat_array[segment.id, qlat_ts_previous_previous]
 
                     # Add qlat to middle
                     buf_view[_i, 0] = qlat
@@ -802,7 +797,7 @@ cpdef object compute_network_structured(
                     buf_view[_i, 10] = flowveldepth[segment.id, timestep-1, 0]
                     buf_view[_i, 11] = 0.0 #flowveldepth[segment.id, timestep-1, 1]
                     buf_view[_i, 12] = flowveldepth[segment.id, timestep-1, 2]
-                    buf_view[_i, 13] = qlat_previous_previous
+                    buf_view[_i, 13] = flowveldepth[segment.id, timestep-1, 3]
 
                 compute_reach_kernel(previous_upstream_flows, upstream_flows,
                                      r.reach.mc_reach.num_segments, buf_view,
@@ -823,6 +818,7 @@ cpdef object compute_network_structured(
                         printf("segment.id: %d\t", usgs_positions[reach_has_gage[i]])
                     flowveldepth[segment.id, timestep, 1] = out_buf[_i, 1]
                     flowveldepth[segment.id, timestep, 2] = out_buf[_i, 2]
+                    flowveldepth[segment.id, timestep, 3] = qlat_array[segment.id, qlat_ts_previous]
 
                     # Ensuring flow does not go negative
                     if flowveldepth[segment.id, timestep, 0] <= 0.0:
