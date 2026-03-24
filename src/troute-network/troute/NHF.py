@@ -22,6 +22,11 @@ from troute.nhf_preprocess import (
     read_qlat_file,
 )
 
+import logging
+from troute_ewts import MODULE_NAME
+LOG = logging.getLogger(MODULE_NAME)
+
+
 __verbose__ = False
 __showtiming__ = False
 
@@ -75,7 +80,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         self.showtiming = showtiming
 
         if self.verbose:
-            print("creating NHF supernetwork connections set")
+            LOG.info("creating NHF supernetwork connections set")
         if self.showtiming:
             start_time = time.time()
 
@@ -132,9 +137,9 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
 
         if self.verbose:
-            print("supernetwork connections set complete")
+            LOG.info("supernetwork connections set complete")
         if self.showtiming:
-            print("... in %s seconds." % (time.time() - start_time))
+            LOG.info("... in %s seconds." % (time.time() - start_time))
 
         super().__init__(from_files, value_dict)
 
