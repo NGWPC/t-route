@@ -10,7 +10,7 @@ network_topology_parameters:
     #----------
     supernetwork_parameters:
         #----------
-        geo_file_path: domain/02374250.gpkg
+        geo_file_path: domain/437343.gpkg
         network_type: NHF
     waterbody_parameters:
       #----------
@@ -25,13 +25,15 @@ compute_parameters:
     cpu_pool               : 1
     restart_parameters:
         #----------
-        start_datetime: "2000-01-01 00:00:00"
+        start_datetime: "2009-12-12 00:00:00"
     forcing_parameters:
         #----------
-        qts_subdivisions            : 1
+        qts_subdivisions            : 12
         dt                          : 300 # [sec]
-        nts                         : 5760
+        nts                         : 7356
         max_loop_size               : 288
+        qlat_file_pattern_filter: '*.CHRTOUT_DOMAIN1.csv'
+        qlat_input_folder: channel_forcing_retro/
     data_assimilation_parameters:
         streamflow_da:
             streamflow_nudging            : False
@@ -44,7 +46,7 @@ compute_parameters:
 #--------------------------------------------------------------------------------
 output_parameters:
   stream_output:
-      stream_output_directory: output/
+      stream_output_directory: output_retro/
       stream_output_time: -1 # [hr]
       stream_output_type: '.nc'
       stream_output_internal_frequency: 60
