@@ -259,17 +259,7 @@ def nwm_output_generator(
 
         # reindex from link_id to fp_id, keeping outlet links + non-link rows (VFPs)
         if fp_outlet_crosswalk:
-            og_fp_mask = flowveldepth.index.isin(fp_outlet_crosswalk)
-            df = flowveldepth.loc[og_fp_mask]
-
-            # Build expanded index + row mapping
-            repeats = df.index.map(lambda x: len(fp_outlet_crosswalk[x]))
-            expanded_df = df.loc[df.index.repeat(repeats)]
-
-            # Assign new index
-            expanded_df.index = np.concatenate(df.index.map(fp_outlet_crosswalk).to_numpy())
-
-            flowveldepth = expanded_df
+            flowveldepth = remap_outputs(flowveldepth, fp_outlet_crosswalk)
 
         # todo: create a unit test by saving FVD array to disk and then checking that
         # it matches FVD array from parent branch or other configurations.
@@ -294,16 +284,7 @@ def nwm_output_generator(
 
             # reindex courant from link_id to fp_id
             if fp_outlet_crosswalk:
-                courant_df = courant.loc[og_fp_mask]
-
-                # Build expanded index + row mapping
-                repeats = courant_df.index.map(lambda x: len(fp_outlet_crosswalk[x]))
-                expanded_courant_df = courant_df.loc[courant_df.index.repeat(repeats)]
-
-                # Assign new index
-                expanded_courant_df.index = np.concatenate(courant_df.index.map(fp_outlet_crosswalk).to_numpy())
-
-                courant = expanded_courant_df
+                courant = remap_courant(courant, fp_outlet_crosswalk)
 
         LOG.debug("Constructing the FVD DataFrame took %s seconds." % (time.time() - start))
     
@@ -639,3 +620,46 @@ def nwm_output_generator(
         )
 
         LOG.debug("parity check complete in %s seconds." % (time.time() - start_time))
+
+
+def remap_outputs(flowveldepth: pd.DataFrame, fp_outlet_crosswalk: dict[int, int]) -> pd.DataFrame:
+    """Reindex from link_id to fp_id."""
+    og_fp_mask = flowveldepth.index.isin(fp_outlet_crosswalk)
+    df = flowveldepth.loc[og_fp_mask]
+
+    mapped = df.index.map(fp_outlet_crosswalk)
+    base = df.assign(id2=mapped).explode("id2")
+
+    cols = df.columns
+
+    q_cols = [c for c in cols if c[1] == "q"]
+    v_cols = [c for c in cols if c[1] == "v"]
+    d_cols = [c for c in cols if c[1] == "d"]
+
+    q_out = base.groupby("id2")[q_cols].sum()
+    v_out = base.groupby("id2")[v_cols].max()
+    d_out = base.groupby("id2")[d_cols].max()
+
+    out = pd.concat([q_out, v_out, d_out], axis=1)
+    return out.reindex(columns=flowveldepth.columns)
+
+def remap_courant(courant: pd.DataFrame, fp_outlet_crosswalk: dict[int, int]) -> pd.DataFrame:
+    """Reindex from link_id to fp_id."""
+    og_fp_mask = courant.index.isin(fp_outlet_crosswalk)
+    df = courant.loc[og_fp_mask]
+
+    mapped = df.index.map(fp_outlet_crosswalk)
+    base = df.assign(id2=mapped).explode("id2")
+
+    cols = df.columns
+
+    cn_cols = [c for c in cols if c[1] == "cn"]
+    ck_cols = [c for c in cols if c[1] == "ck"]
+    x_cols = [c for c in cols if c[1] == "x"]
+
+    cn_out = base.groupby("id2")[cn_cols].sum()
+    ck_out = base.groupby("id2")[ck_cols].max()
+    x_out = base.groupby("id2")[x_cols].max()
+
+    out = pd.concat([cn_out, ck_out, x_out], axis=1)
+    return out.reindex(columns=courant.columns)
