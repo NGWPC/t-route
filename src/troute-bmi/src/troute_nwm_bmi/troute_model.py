@@ -56,7 +56,6 @@ class Model:
                 verbose=self.verbose,
                 showtiming=self.show_timing,
             )
-            self._is_nhf = False
         elif self.supernetwork_parameters["network_type"] == "NHDNetwork":
             self._network = NHDNetwork(
                 supernetwork_parameters=self.supernetwork_parameters,
@@ -70,7 +69,6 @@ class Model:
                 verbose=self.verbose,
                 showtiming=self.show_timing,
             )
-            self._is_nhf = False
         elif self.supernetwork_parameters["network_type"] == "NHF":
             self._network = NHF(
                 supernetwork_parameters=self.supernetwork_parameters,
@@ -87,7 +85,6 @@ class Model:
                 from_files=True,
                 bmi_parameters=self.bmi_parameters,
             )
-            self._is_nhf = True
         else:
             raise Exception("Supernetwork network type must be HYFeaturesNetwork or NHDNetwork")
         self._orig_t0 = self._network.t0
@@ -129,6 +126,7 @@ class Model:
         }
 
     def run(self, bmi_values: dict[str, NDArray]):
+        is_nhf = self._is_nhf()
         qts_subdivisions = self.qts_subdivisions
         nts = self.nts
 
@@ -139,14 +137,10 @@ class Model:
 
         # Build param_df
         param_df = self._network.dataframe
-        if self._is_nhf:
+        if is_nhf:
             qlat_add_loc = "bottom"
         else:
             qlat_add_loc = "middle"
-
-        usgs_df = self._data_assimilation.usgs_df
-        if not usgs_df.empty:
-            usgs_df = usgs_df.loc[:,self._network.t0:]
 
         usgs_df = self._data_assimilation.usgs_df
         if not usgs_df.empty:
@@ -255,7 +249,7 @@ class Model:
             [pd.DataFrame(r[1], index=r[0], columns=qvd_columns) for r in run_results],
             copy=False,
         )
-        if self._is_nhf:
+        if is_nhf:
             flowveldepth = remap_outputs(flowveldepth, self._network.fp_outlet_crosswalk)
         _update_values("channel_exit_water_x-section__volume_flow_rate", flowveldepth.iloc[:,-3])
         _update_values("channel_water_flow__speed", flowveldepth.iloc[:,-2])
@@ -265,7 +259,7 @@ class Model:
         i_columns = pd.MultiIndex.from_product(
             [range(int(nts)), ["i"]]
         ).to_flat_index()
-        if self._is_nhf:
+        if is_nhf:
             # Waterbodies are not implemented in NHF yet.
             wbdy = pd.DataFrame(columns=i_columns)
         else:
@@ -418,6 +412,9 @@ class Model:
         # backup if NGEN's delta time was not explicitly set
         return int(self.dt * self.qts_subdivisions)
 
+    def _is_nhf(self):
+        return self.supernetwork_parameters["network_type"] == "NHF"
+
     def _construct_qlats(self, bmi_values: dict[str, NDArray]):
         dt = self.ngen_dt(bmi_values)
         step_time = self._network.t0
@@ -429,12 +426,13 @@ class Model:
         df_data = {}
         index = 0
         while index < len(water_source_values):
-            timeslice = water_source_values[index:(index + num_ids)]
+            next_index = index + num_ids
+            timeslice = water_source_values[index:next_index]
             timestamp = step_time.strftime("%Y%m%d%H%M")
             df_data[timestamp] = timeslice
             step_time += timedelta(seconds=dt)
-            index += num_ids
-        if self._is_nhf:
+            index = next_index
+        if self._is_nhf():
             qlats = pd.DataFrame(data=df_data, index=bmi_values["land_surface_water_source__id"])
             self._network._build_qlateral_array_direct(qlats)
             return self._network._qlateral
