@@ -9,11 +9,6 @@ import numpy as np
 import pandas as pd
 
 from .AbstractNetwork import AbstractNetwork
-from troute.nhf_topology import (
-    build_link_connections,
-    get_terminal_nexus_ids,
-    validate_connections,
-)
 from troute.nhf_discretize import discretize_flowpaths
 
 from troute.nhf_preprocess import (
@@ -205,35 +200,33 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         B) Use the timeseries from the next downstream link (will overestimate flow)
         We choose option B.
         """
-        # Get fp_id and source of data
+        # Get fp_ids.  Pull out IDs that were merged
         ids = reference_flowpaths["fp_id"].dropna().astype(int).unique()
         ids_merged = set(ids).difference(self._dataframe["fp_id"])
 
-        # Aggregate links in _dataframe.  Assumes node IDs increase in downstream direction.
-        link_mapping = (
-            self._dataframe.reset_index().groupby("fp_id", sort=False)["up_node_id"]
-            .max()  # Strong assumption.  Currently true.
-            .reset_index()
-            .groupby("up_node_id")["fp_id"]
-            .agg(list)
-            .to_dict()
-        )
+        # Aggregate links in _dataframe to get one outlet per fp_id.  Assumes node IDs increase in downstream direction.
+        mapping_base = self._dataframe.reset_index().groupby("fp_id", sort=False)["up_node_id"].max().reset_index().astype(int)
+        link_2_fp = mapping_base.set_index("up_node_id")["fp_id"].to_dict()
+        fp_2_link = mapping_base.set_index("fp_id")["up_node_id"].to_dict()
 
-        # Aggregate virtual flowpaths.  Handles merged links
-        sub_ref = reference_flowpaths[reference_flowpaths["fp_id"].isin(ids_merged)][["virtual_fp_id", "fp_id"]].drop_duplicates()
+        ### Get vfp not in mapping. Make a mapping from their upstream to the missing fps.  When we go to outputs, the 
+        ### upstream outflows will be summed and reported for the merged reach.
+        # Get vfps and join fp_id
+        sub_ref = reference_flowpaths[["virtual_fp_id", "fp_id"]].dropna().drop_duplicates().astype(int)
         tmp_vfp = pd.merge(sub_ref, virtual_flowpaths[["virtual_fp_id", "dn_virtual_nex_id", "up_virtual_nex_id"]], how="left", on="virtual_fp_id")
 
-        # Optional remap when successive merging occured
-        merged_mask = tmp_vfp["dn_virtual_nex_id"].isin(nexus_remapping)
-        tmp_vfp.loc[merged_mask, "dn_virtual_nex_id"] = tmp_vfp.loc[merged_mask, "dn_virtual_nex_id"].map(nexus_remapping)
+        # Get upstream vfps for all vfps not in mapping
+        tmp_vfp = tmp_vfp.dropna().astype(int)
+        tmp_vfp = pd.merge(tmp_vfp[tmp_vfp["fp_id"].isin(ids_merged)], tmp_vfp, left_on="up_virtual_nex_id", right_on="dn_virtual_nex_id", suffixes=("_dn", "_up"))
 
+        # Map u/s fp_id to u/s outlet link
+        tmp_vfp["outlet_link"] = tmp_vfp["fp_id_up"].map(fp_2_link)
+
+        # Agg on missing vfp
         merged_mapping = (
             tmp_vfp
-            .groupby("fp_id", sort=False)["dn_virtual_nex_id"]
-            .max()
-            .reset_index()
             .astype(int)
-            .groupby("dn_virtual_nex_id")["fp_id"]
+            .groupby("outlet_link")["fp_id_dn"]
             .agg(list)
             .to_dict()
         )
@@ -241,12 +234,12 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # Put all results into the mapping dict
         self._fp_outlet_crosswalk = defaultdict(list)
         # Add link mapping
-        for k, v in link_mapping.items():
-            self._fp_outlet_crosswalk[k].extend(v)
+        for k, v in link_2_fp.items():
+            self._fp_outlet_crosswalk[k].append(v)
         # Append virtual mapping
         for k, v in merged_mapping.items():
             self._fp_outlet_crosswalk[k].extend(v)
-
+        
 
     def _build_div_weighting_matrix(self, virtual_flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]) -> pd.DataFrame:
         """Create weights that can be used to expand div direct runoff into vfp direct runoff.
@@ -268,16 +261,21 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         """
         # Make a dataframe for every vfp with percentage_area_contribution, div_id, dn_nex_id, and virtual_fp_id
         vfp_map = pd.merge(reference_flowpaths[["virtual_fp_id", "div_id"]].copy().dropna(subset="virtual_fp_id").drop_duplicates().astype("Int64"), virtual_flowpaths[["virtual_fp_id", "percentage_area_contribution", "dn_virtual_nex_id"]], on="virtual_fp_id", how="left")
+        vfp_map["dn_virtual_nex_id"] = vfp_map["dn_virtual_nex_id"].astype(int)
 
         # Remap down nexuses that changed in discretization
-        remap_mask = vfp_map["dn_virtual_nex_id"].isin(nexus_remapping)
-        vfp_map.loc[remap_mask, "dn_virtual_nex_id"] = vfp_map.loc[remap_mask, "dn_virtual_nex_id"].map(nexus_remapping)
+        vfp_map["dn_virtual_nex_id"] = vfp_map["dn_virtual_nex_id"].map(nexus_remapping).fillna(vfp_map["dn_virtual_nex_id"]).astype(int)
 
         # Remap all down nexuses to their on-network link
         # (explanation) In NHF, flows are added at the downstream end of a virtual_flowpath. To achieve this, we apply 
         # discharges at the link just upstream of the downstream end of the virtual flowpath and use the "bottom" option 
         # for lateral addition location
         vfp_map = pd.merge(vfp_map, self._dataframe.reset_index()[["up_node_id", "downstream", "fp_id"]], how="left", left_on=["dn_virtual_nex_id", "div_id"], right_on=["downstream", "fp_id"])
+
+        # Map all merged vfps to one of their tribs.
+        merged_us_lookup = vfp_map.dropna().set_index("dn_virtual_nex_id")["up_node_id"].to_dict() # Dropna subets dict to only non-merged paths
+        insna_mask = vfp_map["up_node_id"].isna()
+        vfp_map.loc[insna_mask, "up_node_id"] = vfp_map.loc[insna_mask, "dn_virtual_nex_id"].map(merged_us_lookup)
 
         # Fallback for vfps that hit a headwater
         # (explanation) When a virtual flowpath is the div headwater, there's no link for it to add it's flows to. 
