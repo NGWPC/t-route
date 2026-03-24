@@ -17,8 +17,8 @@ import troute.nhd_network_utilities_v02 as nnu
 import troute.hyfeature_network_utilities as hnu
 
 
-LOG = logging.getLogger('')
-
+from troute_ewts import MODULE_NAME, configure_logging
+LOG = logging.getLogger(MODULE_NAME)
 
 def nhf_routing(argv):
 
@@ -32,6 +32,8 @@ def nhf_routing(argv):
         help="Path of a .yaml or .json file containing model configuration parameters. See doc/v3_doc.yaml",
     )
     args = parser.parse_args(argv)
+
+    configure_logging()
     
     # unpack user inputs
     (
