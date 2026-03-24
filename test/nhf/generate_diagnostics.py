@@ -142,6 +142,23 @@ class RunContext:
         forcing.index = pd.to_datetime(forcing.index)
         # Final trim
         forcing = forcing.loc[(forcing.index >= t0) & (forcing.index < tmax)]
+
+        # Remap merged qlats to one of their upstreams
+        vfp_map = pd.merge(self.reference_flowpaths_gdf[["virtual_fp_id", "div_id"]].copy().dropna(subset="virtual_fp_id").drop_duplicates().astype("Int64"), self.virtual_flowpaths_gdf[["virtual_fp_id", "percentage_area_contribution", "dn_virtual_nex_id"]], on="virtual_fp_id", how="left")
+        vfp_map["dn_virtual_nex_id"] = vfp_map["dn_virtual_nex_id"].astype(int)
+        vfp_map["dn_virtual_nex_id"] = vfp_map["dn_virtual_nex_id"].map(self.node_remapping).fillna(vfp_map["dn_virtual_nex_id"]).astype(int)
+        vfp_map = pd.merge(vfp_map, self.links_df.reset_index()[["up_node_id", "downstream", "fp_id"]], how="left", left_on=["dn_virtual_nex_id", "div_id"], right_on=["downstream", "fp_id"])
+        merged_us_lookup = vfp_map.dropna().set_index("dn_virtual_nex_id")["up_node_id"].to_dict()
+        vfp_map = vfp_map[vfp_map["up_node_id"].isna()]
+        vfp_map["up_node_id"] = vfp_map["dn_virtual_nex_id"].map(merged_us_lookup)
+        # vfp_map.loc[vfp_map["up_node_id"].isna(), "up_node_id"] = vfp_map.loc[vfp_map["up_node_id"].isna(), "dn_virtual_nex_id"]
+        vfp_map = vfp_map[["virtual_fp_id", "div_id", "up_node_id"]].dropna().astype(int)
+        removed_fps = vfp_map["div_id"].unique()
+        vfp_map = pd.merge(vfp_map, self.links_df.reset_index()[["up_node_id", "fp_id"]], how="left", on="up_node_id")
+        lat_lookup = vfp_map.set_index("div_id")["fp_id"].to_dict()
+        lat_lookup = {c: lat_lookup.get(c, c) for c in forcing.columns}
+        forcing = forcing.T.groupby(lat_lookup).sum().T
+        forcing.loc[:, removed_fps] = 0.0
         return forcing
 
     @cached_property
@@ -731,7 +748,11 @@ def generate_reach_diagnostics(
     # Log routing stats
     results["routing"] = rerouted_results
 
-    if plot:
+    # Plot triggers
+    a = results["pct_attenuation"] < -3
+    b = results["local_mass_conservation_error"] > 10
+    c = results["network_mass_conservation_error"] > 10
+    if a or b or c:
         plot_hydrograps(
             qin_hydrograph, qout_hydrograph, qreroute, reach_id, run_context
         )
