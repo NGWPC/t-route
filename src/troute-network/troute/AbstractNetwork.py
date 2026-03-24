@@ -218,7 +218,7 @@ class AbstractNetwork(ABC):
         self._q0 = pd.concat(
             [
                 pd.DataFrame(
-                    r[1][:, [-3, -3, -1]], index=r[0], columns=["qu0", "qd0", "h0"]
+                    r[1][:, [-3, -3, -1, -3]], index=r[0], columns=["qu0", "qd0", "h0", "ql0"]
                 )
                 for r in run_results
             ],
@@ -348,7 +348,7 @@ class AbstractNetwork(ABC):
         """
         if self._q0 is None:
             self._q0 =  pd.DataFrame(
-            0, index=self._dataframe.index, columns=["qu0", "qd0", "h0"], dtype="float32",
+            0, index=self._dataframe.index, columns=["qu0", "qd0", "h0", "ql0"], dtype="float32",
             )
         return self._q0
 
@@ -764,10 +764,7 @@ class AbstractNetwork(ABC):
             else:
                 # Set cold initial state
                 # assume to be zero
-                # 0, index=connections.keys(), columns=["qu0", "qd0", "h0",], dtype="float32"
-                self._q0 = pd.DataFrame(
-                    0, index=self.segment_index, columns=["qu0", "qd0", "h0"], dtype="float32",
-                    )
+                # self._q0 is set to default on first getter call
                 
                 # get initial time from user inputs
                 self._t0 = restart_parameters.get("start_datetime")
