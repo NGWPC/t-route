@@ -60,6 +60,8 @@ def create_forcing_dataset(t_start: str, t_end: str, forcing_dir: str, hydrofabr
         first = True
         for _, gage in gages.iterrows():
             # Load retrospective flow for the gage's reference flowpath
+            if pd.isna(gage["fp_id"]):
+                continue
             fp_id = int(gage["fp_id"])
             ref_fp_id = crosswalk.loc[crosswalk["fp_id"] == fp_id, "ref_fp_id"].values[0]
             retro_q = retro.sel(feature_id=ref_fp_id, time=slice(t_start, t_end))[RETROSPECTIVE_FLOW_FIELD].reset_coords(drop=True).to_dataframe()
@@ -67,9 +69,13 @@ def create_forcing_dataset(t_start: str, t_end: str, forcing_dir: str, hydrofabr
 
             # Load USGS data, if available
             site_no = gage["site_no"]
-            usgs_q = nwis.get_iv(site=site_no, start=t_start.strftime("%Y-%m-%dT%H:%MZ"), end=t_end.strftime("%Y-%m-%dT%H:%MZ"), parameterCd="00060")[0].rename(columns={"00060": "usgs_q"})
-            usgs_q.index = pd.to_datetime(usgs_q.index)
-            usgs_q = usgs_q.reindex(retro_q.index, method="nearest", tolerance=pd.Timedelta("15min"))
+            usgs_raw = nwis.get_iv(site=site_no, start=t_start.strftime("%Y-%m-%dT%H:%MZ"), end=t_end.strftime("%Y-%m-%dT%H:%MZ"), parameterCd="00060")[0]
+            if "00060" in usgs_raw.columns:
+                usgs_q = usgs_raw.rename(columns={"00060": "usgs_q"})
+                usgs_q.index = pd.to_datetime(usgs_q.index)
+                usgs_q = usgs_q.reindex(retro_q.index, method="nearest", tolerance=pd.Timedelta("15min"))
+            else:
+                usgs_q = pd.DataFrame({"usgs_q": np.nan}, index=retro_q.index)
 
             if first:
                 time_index = pd.DatetimeIndex(retro_q.index).tz_localize(None)
