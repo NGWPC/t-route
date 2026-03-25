@@ -2,6 +2,18 @@
 #TODO include instuctions on blowing away entire package for fresh install e.g. rm -r ~/venvs/mesh/lib/python3.6/site-packages/troute/*
 #set root folder of github repo (should be named t-route)
 REPOROOT=`pwd`
+
+# Path to nwm-ewts python package source (development fallback)
+: "${EWTS_PY_ROOT:=$REPOROOT/../../../nwm-ewts/runtime/python/ewts}"
+
+# Preferred EWTS install prefix and wheel location
+: "${EWTS_PREFIX:=/tmp/ewts_install}"
+: "${EWTS_WHEEL_DIR:=$EWTS_PREFIX/python/dist}"
+
+echo "using EWTS_PY_ROOT=${EWTS_PY_ROOT}"
+echo "using EWTS_PREFIX=${EWTS_PREFIX}"
+echo "using EWTS_WHEEL_DIR=${EWTS_WHEEL_DIR}"
+
 #For each build step, you can set these to true to make it build
 #or set it to anything else (or unset) to skip that step
 build_mc_kernel=true
@@ -63,7 +75,7 @@ if  [[ "$build_mc_kernel" == true ]]; then
 fi
 
 if  [[ "$build_diffusive_tulane_kernel" == true ]]; then
-  #building reach and resevoir kernel files .o  
+  #building reach and resevoir kernel files .o
   cd $REPOROOT/src/kernel/diffusive/
   make clean
   make diffusive.o
@@ -85,18 +97,31 @@ if [[ "$build_reservoir_kernel" == true ]]; then
 
 fi
 
-cd $REPOROOT/src/troute_ewts
-if [[ ${WITH_EDITABLE} == true ]]; then
-  pip install --editable . || exit
+# Remove any old/stale ewts/troute_ewts from the environment to avoid shadowing
+pip uninstall -y ewts troute_ewts >/dev/null 2>&1 || true
+
+# Prefer installed EWTS wheel; fall back to source tree for development
+EWTS_WHEEL=""
+if compgen -G "${EWTS_WHEEL_DIR}/ewts-*.whl" > /dev/null; then
+  EWTS_WHEEL=$(ls -1t "${EWTS_WHEEL_DIR}"/ewts-*.whl | head -n 1)
+fi
+
+if [[ -n "${EWTS_WHEEL}" ]]; then
+  echo "Installing EWTS from wheel: ${EWTS_WHEEL}"
+  pip install "${EWTS_WHEEL}" || exit
 else
-  pip install . || exit
+  echo "No EWTS wheel found in ${EWTS_WHEEL_DIR}"
+  echo "Falling back to source install from ${EWTS_PY_ROOT}"
+
+  if [[ ${WITH_EDITABLE} == true ]]; then
+    pip install --editable "${EWTS_PY_ROOT}" || exit
+  else
+    pip install "${EWTS_PY_ROOT}" || exit
+  fi
 fi
 
 if [[ "$build_framework" == true ]]; then
-  #creates troute package
   cd $REPOROOT/src/troute-network
-  rm -rf build
-
   if [[ ${WITH_EDITABLE} == true ]]; then
     pip install --no-build-isolation --config-setting='--build-option=--use-cython' --editable . --config-setting='editable_mode=compat' || exit
   else

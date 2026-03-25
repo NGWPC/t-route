@@ -19,8 +19,8 @@ from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data
 import netCDF4
 from troute.config import Config
 
-from troute_ewts import configure_logging
-LOG = configure_logging()
+import ewts
+LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 class DAforcing_model():
 
@@ -28,6 +28,9 @@ class DAforcing_model():
         """
         
         """
+        # This is required prior to the first log message is issued by t-route.
+        LOG.bind()
+
         __slots__ = ['_data_assimilation_parameters', '_forcing_parameters', '_compute_parameters',
                      '_output_parameters', '_usgs_df', 'reservoir_usgs_df', 'reservoir_usace_df', 
                      '_rfc_timeseries_df', '_lastobs_df', '_t0', '_q0', '_waterbody_df', '_write_lite_restart',
@@ -56,7 +59,6 @@ class DAforcing_model():
                      '_waterbodyLR_nCol', '_waterbodyLR_indexArray', '_waterbodyLR_nIndex',
                      '_waterbodyLR_Array'                    
                      ]
-
 
         if bmi_cfg_file:
             (compute_parameters,

@@ -10,6 +10,8 @@ from .troute_model import Model
 if typing.TYPE_CHECKING:
     from numpy.typing import NDArray
 
+import ewts
+LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 _VAR_NAME_UNITS_MAP = {
     'land_surface_water_source__volume_flow_rate': ['streamflow_cms', 'm3 s-1'],
@@ -44,6 +46,9 @@ class BmiTroute(Bmi):
     _model: Model
 
     def __init__(self):
+        # This is required prior to the first log message is issued by t-route.
+        LOG.bind()
+        
         super().__init__()
         self._values: dict[str, NDArray] = {
             "ngen_dt": np.array([-1], dtype=np.intc),
