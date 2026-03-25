@@ -209,27 +209,37 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         link_2_fp = mapping_base.set_index("up_node_id")["fp_id"].to_dict()
         fp_2_link = mapping_base.set_index("fp_id")["up_node_id"].to_dict()
 
-        ### Get vfp not in mapping. Make a mapping from their upstream to the missing fps.  When we go to outputs, the 
+        ### Get vfp not in mapping. Make a mapping from their upstream to the missing fps.  When we go to outputs, the
         ### upstream outflows will be summed and reported for the merged reach.
         # Get vfps and join fp_id
         sub_ref = reference_flowpaths[["virtual_fp_id", "fp_id"]].dropna().drop_duplicates().astype(int)
         tmp_vfp = pd.merge(sub_ref, virtual_flowpaths[["virtual_fp_id", "dn_virtual_nex_id", "up_virtual_nex_id"]], how="left", on="virtual_fp_id")
-
-        # Get upstream vfps for all vfps not in mapping
         tmp_vfp = tmp_vfp.dropna().astype(int)
-        tmp_vfp = pd.merge(tmp_vfp[tmp_vfp["fp_id"].isin(ids_merged)], tmp_vfp, left_on="up_virtual_nex_id", right_on="dn_virtual_nex_id", suffixes=("_dn", "_up"))
 
-        # Map u/s fp_id to u/s outlet link
-        tmp_vfp["outlet_link"] = tmp_vfp["fp_id_up"].map(fp_2_link)
-
-        # Agg on missing vfp
-        merged_mapping = (
-            tmp_vfp
-            .astype(int)
-            .groupby("outlet_link")["fp_id_dn"]
-            .agg(list)
-            .to_dict()
+        # For each merged VFP, find its upstream VFP; keep only cross-fp connections
+        cross_fp = pd.merge(
+            tmp_vfp[tmp_vfp["fp_id"].isin(ids_merged)],
+            tmp_vfp,
+            left_on="up_virtual_nex_id",
+            right_on="dn_virtual_nex_id",
+            suffixes=("_dn", "_up"),
         )
+        cross_fp = cross_fp[cross_fp["fp_id_dn"] != cross_fp["fp_id_up"]]
+
+        # Build merged fp → upstream fp mapping, then resolve chains for consecutive merges
+        merged_to_upstream = dict(zip(cross_fp["fp_id_dn"], cross_fp["fp_id_up"]))
+        merged_mapping = {}
+        for merged_fp in ids_merged:
+            current = merged_fp
+            seen = set()
+            while current in ids_merged and current in merged_to_upstream:
+                if current in seen:
+                    break
+                seen.add(current)
+                current = merged_to_upstream[current]
+            if current in fp_2_link:
+                outlet_link = fp_2_link[current]
+                merged_mapping.setdefault(outlet_link, []).append(merged_fp)
 
         # Put all results into the mapping dict
         self._fp_outlet_crosswalk = defaultdict(list)
