@@ -181,7 +181,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
     def preprocess_network(self, flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, discretization_len_m=300.0):
         """Create routing links (self._dataframe) and weighting data to assign fp flows to links."""
-        self._dataframe, nexus_remapping = discretize_flowpaths(
+        self._dataframe, self.nexus_remapping = discretize_flowpaths(
             flowpaths=flowpaths,
             virtual_flowpaths=virtual_flowpaths,
             reference_flowpaths=reference_flowpaths,
@@ -189,8 +189,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         )
         self._connections = None  # Forces recomputation on first call to self.connections
         self._terminal_codes = set(self._dataframe["downstream"]).difference(self._dataframe.index)  # Outlets
-        self._build_fp_outlet_crosswalk(reference_flowpaths, virtual_flowpaths, nexus_remapping)
-        self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, nexus_remapping)
+        self._build_fp_outlet_crosswalk(reference_flowpaths, virtual_flowpaths, self.nexus_remapping)
+        self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, self.nexus_remapping)
 
     def _build_fp_outlet_crosswalk(self, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]):
         """Build a mapping from routing link ID to fp_id to be used when writing results.
