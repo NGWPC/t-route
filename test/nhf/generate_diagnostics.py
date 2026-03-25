@@ -1,4 +1,5 @@
 import argparse
+import os
 import random
 import warnings
 from datetime import datetime
@@ -10,11 +11,11 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from troute.NHF import NHF
 import xarray as xr
 import yaml
 from matplotlib import pyplot as plt
-from troute.nhf_discretize import discretize_flowpaths
-from troute.routing.fast_reach.reach import compute_reach_kernel
+from troute.config import Config
 
 SAMPLE_RANDOM_SEED = 11
 random.seed(SAMPLE_RANDOM_SEED)
@@ -37,7 +38,45 @@ class RunContext:
         with open(self.config_path) as f:
             self.config = yaml.safe_load(f)
 
-        self._links_df, self._node_remapping = None, None
+        # Emulate running from config dir
+        cdir = Path(os.curdir).resolve()
+        os.chdir(self.config_path.parent)
+        troute_configuration = Config.with_strict_mode(**self.config)
+        config_dict = troute_configuration.dict()
+
+        compute_parameters = config_dict.get("compute_parameters")
+        network_topology_parameters = config_dict.get("network_topology_parameters")
+        output_parameters = config_dict.get("output_parameters")
+
+        preprocessing_parameters = network_topology_parameters.get(
+            "preprocessing_parameters"
+        )
+        supernetwork_parameters = network_topology_parameters.get(
+            "supernetwork_parameters"
+        )
+        waterbody_parameters = network_topology_parameters.get("waterbody_parameters")
+        forcing_parameters = compute_parameters.get("forcing_parameters")
+        restart_parameters = compute_parameters.get("restart_parameters")
+        hybrid_parameters = compute_parameters.get("hybrid_parameters")
+        data_assimilation_parameters = compute_parameters.get(
+            "data_assimilation_parameters"
+        )
+
+        self.network = NHF(
+            supernetwork_parameters,
+            waterbody_parameters,
+            data_assimilation_parameters,
+            restart_parameters,
+            compute_parameters,
+            forcing_parameters,
+            hybrid_parameters,
+            preprocessing_parameters,
+            output_parameters,
+            verbose=True,
+        )
+
+        self.links_df = self.network._dataframe
+        os.chdir(cdir)
 
     @property
     def result_output_dir(self) -> Path:
@@ -143,22 +182,20 @@ class RunContext:
         # Final trim
         forcing = forcing.loc[(forcing.index >= t0) & (forcing.index < tmax)]
 
-        # Remap merged qlats to one of their upstreams
-        vfp_map = pd.merge(self.reference_flowpaths_gdf[["virtual_fp_id", "div_id"]].copy().dropna(subset="virtual_fp_id").drop_duplicates().astype("Int64"), self.virtual_flowpaths_gdf[["virtual_fp_id", "percentage_area_contribution", "dn_virtual_nex_id"]], on="virtual_fp_id", how="left")
-        vfp_map["dn_virtual_nex_id"] = vfp_map["dn_virtual_nex_id"].astype(int)
-        vfp_map["dn_virtual_nex_id"] = vfp_map["dn_virtual_nex_id"].map(self.node_remapping).fillna(vfp_map["dn_virtual_nex_id"]).astype(int)
-        vfp_map = pd.merge(vfp_map, self.links_df.reset_index()[["up_node_id", "downstream", "fp_id"]], how="left", left_on=["dn_virtual_nex_id", "div_id"], right_on=["downstream", "fp_id"])
-        merged_us_lookup = vfp_map.dropna().set_index("dn_virtual_nex_id")["up_node_id"].to_dict()
-        vfp_map = vfp_map[vfp_map["up_node_id"].isna()]
-        vfp_map["up_node_id"] = vfp_map["dn_virtual_nex_id"].map(merged_us_lookup)
-        # vfp_map.loc[vfp_map["up_node_id"].isna(), "up_node_id"] = vfp_map.loc[vfp_map["up_node_id"].isna(), "dn_virtual_nex_id"]
-        vfp_map = vfp_map[["virtual_fp_id", "div_id", "up_node_id"]].dropna().astype(int)
-        removed_fps = vfp_map["div_id"].unique()
-        vfp_map = pd.merge(vfp_map, self.links_df.reset_index()[["up_node_id", "fp_id"]], how="left", on="up_node_id")
-        lat_lookup = vfp_map.set_index("div_id")["fp_id"].to_dict()
-        lat_lookup = {c: lat_lookup.get(c, c) for c in forcing.columns}
-        forcing = forcing.T.groupby(lat_lookup).sum().T
-        forcing.loc[:, removed_fps] = 0.0
+        all_fp = forcing.columns.values
+        self.network._build_qlateral_array_direct(forcing.T)
+        forcing = self.network._qlateral
+        forcing = pd.merge(
+            forcing,
+            self.network.dataframe[["fp_id"]],
+            how="left",
+            left_index=True,
+            right_index=True,
+        )
+        forcing = forcing.groupby("fp_id").agg("sum")
+        forcing = forcing.T
+        forcing[list(set(all_fp).difference(forcing.columns))] = 0
+
         return forcing
 
     @cached_property
@@ -193,39 +230,14 @@ class RunContext:
         return gpd.read_file(self.hydrofabric_path, layer="flowpaths")
 
     @cached_property
-    def virtual_nexus_gdf(self) -> gpd.GeoDataFrame:
-        """Load virtual nexus layer."""
-        return gpd.read_file(self.hydrofabric_path, layer="virtual_nexus")
-
-    @cached_property
-    def nexus_gdf(self) -> gpd.GeoDataFrame:
-        """Load nexus layer."""
-        return gpd.read_file(self.hydrofabric_path, layer="nexus")
-
-    @cached_property
-    def vfp_length_mapping(self) -> dict[int, float]:
-        """Make a mapping from virtual flowpath ID to its length."""
+    def fp_length_mapping(self) -> dict[int, float]:
+        """Make a mapping from flowpath ID to its length."""
         return dict(
             zip(
                 self.flowpaths_gdf["fp_id"].to_numpy(),
                 self.flowpaths_gdf["length_km"].to_numpy(),
             )
         )
-
-    @cached_property
-    def virtual_name_remap(self) -> dict[int, int]:
-        """Make a mapping from virtual nexuses to their downstream virtual flowpath ID."""
-        # Drop rows where upstream ID is NaN
-        mask = self.virtual_flowpaths_gdf["up_virtual_nex_id"].notna()
-
-        up = (
-            self.virtual_flowpaths_gdf.loc[mask, "up_virtual_nex_id"]
-            .astype("int64")
-            .to_numpy()
-        )
-        down = self.virtual_flowpaths_gdf.loc[mask, "virtual_fp_id"].to_numpy()
-
-        return dict(zip(up, down))
 
     @cached_property
     def us_mapping(self) -> dict[int, list[int]]:
@@ -236,61 +248,6 @@ class RunContext:
             .groupby(df.columns[1])[df.columns[0]]
             .apply(list)
             .to_dict()
-        )
-
-    @cached_property
-    def vfp_fp_mapping(self) -> dict[int, int]:
-        """Make a mapping from virtual flowpath ID to flowpath ID."""
-        reference_flowpaths_gdf = pd.merge(
-            self.reference_flowpaths_gdf[["virtual_fp_id", "div_id"]],
-            self.flowpaths_gdf[["div_id", "fp_id"]],
-            on="div_id",
-            how="left",
-        )
-        return {
-            row[0]: row[2] for row in reference_flowpaths_gdf.itertuples(index=False)
-        }
-
-    @cached_property
-    def da_pct_mapping(self) -> dict[int, float]:
-        """Make a mapping for percent area of each div corresponding to each virtual flowpath ID."""
-        return dict(
-            zip(
-                self.virtual_flowpaths_gdf["virtual_fp_id"].to_numpy(),
-                self.virtual_flowpaths_gdf["percentage_area_contribution"].to_numpy(),
-            )
-        )
-
-    @cached_property
-    def stream_order_mapping(self) -> dict[int, int]:
-        """Make a mapping from flowpath ID to stream order."""
-        return dict(
-            zip(
-                self.flowpaths_gdf["fp_id"].to_numpy(),
-                self.flowpaths_gdf["stream_order"].to_numpy(),
-            )
-        )
-
-    @property
-    def links_df(self) -> pd.DataFrame:
-        """Links that routing is performed on."""
-        if self._links_df is None:
-            self._discretize_network()
-        return self._links_df
-
-    @property
-    def node_remapping(self) -> pd.DataFrame:
-        """Nodes that routing is performed between."""
-        if self._node_remapping is None:
-            self._discretize_network()
-        return self._node_remapping
-
-    def _discretize_network(self):
-        self._links_df, self._node_remapping = discretize_flowpaths(
-            self.flowpaths_gdf,
-            self.virtual_flowpaths_gdf,
-            self.reference_flowpaths_gdf,
-            self.nhf_discretization_len,
         )
 
 
@@ -356,42 +313,6 @@ def sample_reaches(
     return attribute_reaches(run_context, working_reach_list)
 
 
-def generate_links_and_nodes(
-    fp_id: int, run_context: RunContext
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # Get div_id
-    sql = f"SELECT div_id FROM reference_flowpaths WHERE fp_id = {fp_id} LIMIT 1"
-    div_id = gpd.read_file(run_context.hydrofabric_path, sql=sql)["div_id"].item()
-
-    # Make flowpaths
-    sql = f"SELECT * FROM flowpaths WHERE fp_id = {fp_id}"
-    flowpaths = gpd.read_file(run_context.hydrofabric_path, sql=sql)
-
-    # Make virtual flowpaths
-    sql = f"SELECT vfp.* from virtual_flowpaths vfp LEFT JOIN reference_flowpaths rf1 ON vfp.virtual_fp_id = rf1.virtual_fp_id WHERE div_id = {div_id}"
-    vfps = gpd.read_file(run_context.hydrofabric_path, sql=sql)
-
-    # Make virtual nexuses
-    in_clause = "(" + ", ".join(vfps["dn_virtual_nex_id"].astype(str).values) + ")"
-    sql = f"SELECT * FROM virtual_nexus WHERE virtual_nex_id IN {in_clause}"
-    vnex = gpd.read_file(run_context.hydrofabric_path, sql=sql)
-
-    # Make reference flowpaths
-    sql = f"SELECT * FROM reference_flowpaths WHERE div_id = {div_id}"
-    ref_fp = gpd.read_file(run_context.hydrofabric_path, sql=sql)
-
-    # Make nexus
-    nex_id = flowpaths["dn_nex_id"].item()
-    sql = f"SELECT * FROM nexus WHERE nex_id = {nex_id}"
-    nexus = gpd.read_file(run_context.hydrofabric_path, sql=sql)
-
-    links_df, nodes_df = discretize_flowpaths(
-        flowpaths, vfps, vnex, ref_fp, nexus, run_context.nhf_discretization_len
-    )
-    links_df["up_node_id"] = links_df["up_node_id"].astype("Int64").fillna(-9999)
-    return links_df, nodes_df
-
-
 def attribute_reaches(
     run_context: RunContext, reach_list: set[int]
 ) -> dict[int, dict[str, Any]]:
@@ -417,168 +338,6 @@ def attribute_reaches(
     return reach_attributes
 
 
-def reroute(
-    run_context: RunContext,
-    fp_id: int,
-    qlat: np.ndarray,
-    qus: np.ndarray,
-    dt: float,
-    qts_subdivisions: int,
-):
-    route_links = run_context.links_df[run_context.links_df["fp_id"] == fp_id]
-    div_id = (
-        run_context.reference_flowpaths_gdf.loc[
-            run_context.reference_flowpaths_gdf["fp_id"] == fp_id, "div_id"
-        ]
-        .dropna()
-        .values[0]
-    )
-    vfp_id = (
-        run_context.reference_flowpaths_gdf.loc[
-            run_context.reference_flowpaths_gdf["div_id"] == div_id, "virtual_fp_id"
-        ]
-        .dropna()
-        .values
-    )
-    vfps = run_context.virtual_flowpaths_gdf[
-        run_context.virtual_flowpaths_gdf["virtual_fp_id"].isin(vfp_id)
-    ]
-
-    # Distribute flows
-    lats = {int(i): np.zeros_like(qlat) for i in route_links.index}
-    for i in vfps.itertuples(index=False):
-        dn_nex = run_context.node_remapping.get(
-            i.dn_virtual_nex_id, i.dn_virtual_nex_id
-        )
-        if dn_nex in route_links["downstream"].values:
-            link_id = route_links[route_links["downstream"] == dn_nex].index.item()
-            lats[link_id] += qlat * i.percentage_area_contribution
-
-    # Make null qlat (all flows from top)
-    qlat_zero = np.repeat(np.zeros_like(qlat), qts_subdivisions)
-
-    # Route flood pulse
-    cur_reach = (set(route_links.index) - set(route_links["downstream"])).pop()
-    route_results = {}
-    while cur_reach is not None:
-        row = route_links.loc[cur_reach]
-        dx = row["dx"].item()
-        So = row["s0"].item()
-        n = row["n"].item()
-        Cs = row["cs"].item()
-        Bw = row["bw"].item()
-        Tw = row["tw"].item()
-        TwCC = row["twcc"].item()
-        nCC = row["ncc"].item()
-
-        if not np.all(qus == 0):
-            qus = np.repeat(qus, qts_subdivisions)
-            route_results[cur_reach] = _route(
-                qlat_zero, qus, dx, Bw, Tw, TwCC, n, nCC, Cs, So, dt, qts_subdivisions
-            )
-            qout = route_results[cur_reach]["qout"]
-        else:
-            qout = np.zeros_like(qus)
-
-        qus = qout + lats[row.name]
-
-        if row["downstream"] in route_links.index.values:
-            cur_reach = route_links.loc[
-                route_links.index == row["downstream"]
-            ].index.item()
-        else:
-            cur_reach = None
-
-    return qus, route_results
-
-
-def _route(
-    qlat: np.ndarray,
-    qus: np.ndarray,
-    dx: float,
-    Bw: float,
-    Tw: float,
-    TwCC: float,
-    n: float,
-    nCC: float,
-    Cs: float,
-    So: float,
-    dt: float,
-    qts_subdivisions: int,
-):
-    qdp = qus[0]
-    velp = 0
-    depthp = 0
-    outflows = []
-    depths = []
-    courants = []
-    celerities = []
-    xs = []
-    for i in range(len(qus)):
-        quc = qus[i]
-        qup = qus[i]
-        ql = qlat[i]
-        out = compute_reach_kernel(
-            dt=dt,
-            qup=qup,
-            quc=quc,
-            qdp=qdp,
-            ql=ql,
-            dx=dx,
-            bw=Bw,
-            tw=Tw,
-            twcc=TwCC,
-            n=n,
-            ncc=nCC,
-            cs=Cs,
-            s0=So,
-            velp=velp,
-            depthp=depthp,
-        )
-        depthp = out["depthc"]
-        qdp = out["qdc"]
-        velp = out["velc"]
-        if (i % qts_subdivisions) == 0:
-            outflows.append(out["qdc"])
-            depths.append(out["depthc"])
-            courants.append(out["cn"])
-            celerities.append(out["ck"])
-            xs.append(out["X"])
-
-    geom = hydraulic_geometry(np.array(depths), Bw, Tw, TwCC, Cs, n, nCC, So, dx)
-    rerouted_results = {
-        "qout": np.array(outflows),
-        "depth": np.array(depths),
-        "courant": np.array(courants),
-        "celerity": np.array(celerities),
-        "x": np.array(xs),
-        "twl": geom["twl"],
-        "celerity_recalc": geom["ck_recalc"],
-        "x_recalc": geom["x_recalc"],
-        "courant_recalc": geom["ck_recalc"] * (dt / dx),
-    }
-
-    # Get ratio of reach length to courant ideal
-    # Uses method of Ponce and Theurer (1982) Accuracy Criteria in Diffusion Routing
-    qref = (rerouted_results["qout"].max() + rerouted_results["qout"].min()) / 2
-    ref_ind = np.argmin(np.abs(rerouted_results["qout"] - qref))
-    qref_actual = rerouted_results["qout"][ref_ind]
-    cref = rerouted_results["celerity"][ref_ind]
-    twref = rerouted_results["twl"][ref_ind]
-    if cref > 0:
-        dxc = dt * cref
-        dxd = (qref_actual / twref) / (So * cref)
-        dxmax = 0.5 * (dxc + dxd)
-        cmax = rerouted_results["celerity"].max()
-        dxmin = cmax * dt
-        ideal_dx = max([dxmin, dxmax])
-        rerouted_results["dx_ratio"] = dx / ideal_dx
-    else:
-        rerouted_results["dx_ratio"] = None
-
-    return rerouted_results
-
-
 def hydraulic_geometry(
     h: Union[float, np.ndarray],
     bw: float,
@@ -590,6 +349,7 @@ def hydraulic_geometry(
     so: float,
     dx: float,
 ):
+    ### DIRECT PORT OF src/kernel/muskingum/MCsingleSegStime_f2py_NOLOOP.f90 ###
     # Convert rise over run to run over rise
     if cs == 0:
         z = 1
@@ -667,9 +427,9 @@ def hydraulic_geometry(
         "WPC": WPC,
         "h_lt_bf": h_lt_bf,
         "h_gt_bf": h_gt_bf,
-        "q_recalc": Q,
-        "ck_recalc": ck,
-        "x_recalc": X,
+        "q": Q,
+        "ck": ck,
+        "x": X,
     }
 
 
@@ -681,9 +441,6 @@ def generate_reach_diagnostics(
     plot: bool = True,
 ) -> dict[str, float]:
     """Test mass conservation for a given reach."""
-    # Initialize results dict
-    results = {}
-
     # Load data
     local_qin, _ = virtual_flowpath_mass_conservation_network(
         reach_id, run_context, max_walk=0
@@ -696,9 +453,19 @@ def generate_reach_diagnostics(
     outflow = qout_hydrograph.sum()
     qlat, qus = get_inflows(run_context, reach_id)
     qin_hydrograph = qlat + qus
-    qreroute, rerouted_results = reroute(
-        run_context, reach_id, qlat, qus, run_context.dt, run_context.qts_subdivisions
+
+    # Summary stats for routing parameters
+    dx_link = run_context.links_df[run_context.links_df["fp_id"] == reach_id][
+        "dx"
+    ].values[0]
+    reach_attributes["dx"] = dx_link
+    results = get_routing_stats(
+        reach_attributes,
+        run_context.routed_results.sel(feature_id=reach_id)["depth"].values,
+        qout_hydrograph,
+        run_context.dt,
     )
+    qreroute = np.ones_like(qout_hydrograph)
 
     # Check mass conservation at-reach
     results["local_mass_conservation_error"] = (
@@ -736,17 +503,6 @@ def generate_reach_diagnostics(
         else np.nan
     )
     results["acceleration"] = np.max(qout_hydrograph) > np.max(qin_hydrograph)
-    results["reroute_mass_error"] = (
-        abs(np.sum(qreroute) - outflow) / outflow if outflow > 0 else np.nan
-    )
-    reroute_sum = np.sum(qreroute)
-    rerouted_centroid = (
-        np.sum(qreroute * dt_seconds) / reroute_sum if reroute_sum > 0 else 0
-    )
-    results["reroute_time_error"] = outflow_centroid - rerouted_centroid
-
-    # Log routing stats
-    results["routing"] = rerouted_results
 
     # Plot triggers
     a = results["pct_attenuation"] < -3
@@ -762,7 +518,7 @@ def generate_reach_diagnostics(
 def virtual_flowpath_mass_conservation_network(
     reach: int, run_context: RunContext, cur_dist: float = 0, max_walk: float = 10
 ):
-    cur_dist += run_context.vfp_length_mapping[reach]
+    cur_dist += run_context.fp_length_mapping[reach]
     out_calc = run_context.forcing_data[reach].values.sum()
     if reach not in run_context.us_mapping:
         return out_calc, cur_dist
@@ -802,6 +558,51 @@ def get_inflows(run_context: RunContext, reach_id: int) -> np.ndarray:
             .values
         )
         return local_qin, us_q
+
+
+def get_routing_stats(
+    reach_attributes: dict, depths: np.ndarray, qs: np.ndarray, dt: float
+) -> dict[str, float]:
+    results = {}
+
+    geom_series = hydraulic_geometry(
+        depths,
+        reach_attributes["Bw"],
+        reach_attributes["Tw"],
+        reach_attributes["TwCC"],
+        reach_attributes["Cs"],
+        reach_attributes["n"],
+        reach_attributes["nCC"],
+        reach_attributes["So"],
+        reach_attributes["dx"],
+    )
+    geom_series["cn"] = geom_series["ck"] * (dt / reach_attributes["dx"])
+    for i in ["cn", "ck", "x"]:
+        s = geom_series[i]
+        results[f"{i}_mean"] = s.mean()
+        results[f"{i}_median"] = np.median(s)
+        results[f"{i}_max"] = s.max()
+        results[f"{i}_min"] = s.min()
+        results[f"{i}_std"] = s.std()
+
+    # Get ratio of reach length to courant ideal
+    # Uses method of Ponce and Theurer (1982) Accuracy Criteria in Diffusion Routing
+    qref = (qs.max() + qs.min()) / 2
+    ref_ind = np.argmin(np.abs(qs - qref))
+    qref_actual = qs[ref_ind]
+    cref = geom_series["ck"][ref_ind]
+    twref = geom_series["twl"][ref_ind]
+    if cref > 0:
+        dxc = dt * cref
+        dxd = (qref_actual / twref) / (reach_attributes["So"] * cref)
+        dxmax = 0.5 * (dxc + dxd)
+        cmax = geom_series["ck"].max()
+        dxmin = cmax * dt
+        ideal_dx = max([dxmin, dxmax])
+        results["dx_ratio"] = reach_attributes["dx"] / ideal_dx
+    else:
+        results["dx_ratio"] = None
+    return results
 
 
 ### PLOTS ###
@@ -962,12 +763,21 @@ def plot_attenuation(df: pd.DataFrame, out_path: Path) -> None:
 def plot_courant(df: pd.DataFrame, out_path: Path) -> None:
     """Plot distribution of Courant number for each reach."""
     fig, ax = plt.subplots()
-    sns.kdeplot(df, x="courant", fill=True, ax=ax)
+    bounds = (0, df["cn_max"].max())
+    sns.kdeplot(
+        df, x="cn_median", fill=True, ax=ax, label="median over hydrograph", clip=bounds
+    )
+    sns.kdeplot(
+        df, x="cn_mean", fill=True, ax=ax, label="mean over hydrograph", clip=bounds
+    )
+    sns.kdeplot(
+        df, x="cn_max", fill=True, ax=ax, label="max over hydrograph", clip=bounds
+    )
     ax.set_xlabel("Courant Number")
     ax.grid()
     ax.set_axisbelow(True)
     ax.set_facecolor("whitesmoke")
-    # ax.set_xlim(0, 1)
+    ax.legend()
     fig.tight_layout()
     fig.savefig(out_path / "courant_number_distributions.png", dpi=300)
 
@@ -1023,41 +833,20 @@ def generate_sampled_run_dataset(
     """Build dataset of run diagnostics at the reach and network level."""
     # Sample from reaches
     reaches = sample_reaches(run_context, n_samples)
-    routing = {}
-    routing_ts = {}
 
     for k, v in reaches.items():
         diagnostics = generate_reach_diagnostics(run_context, k, v, plot=generate_plots)
-        routing_ts_dict = diagnostics.pop("routing")
-        routing_dict = {
-            i: {"dx_ratio": routing_ts_dict[i].pop("dx_ratio")} for i in routing_ts_dict
-        }
-        routing.update(routing_dict)
-        routing_ts.update(routing_ts_dict)
         reaches[k].update(diagnostics)
 
     df_reaches = pd.DataFrame.from_dict(reaches, orient="index")
     df_reaches.to_parquet(
         run_context.result_output_dir / f"{run_context.run_id}_reaches.parquet"
     )
-
-    df_routing = pd.DataFrame.from_dict(routing, orient="index")
-    df_routing.to_parquet(
-        run_context.result_output_dir / f"{run_context.run_id}_routing.parquet"
-    )
-
-    df_routing_ts = pd.DataFrame.from_dict(routing_ts, orient="index")
-    df_routing_ts = df_routing_ts.explode(column=df_routing_ts.columns.values.tolist())
-    df_routing_ts.to_parquet(
-        run_context.result_output_dir / f"{run_context.run_id}_routing_ts.parquet"
-    )
-    return df_reaches, df_routing, df_routing_ts
+    return df_reaches
 
 
 def create_diagnostics(
     df_reaches: pd.DataFrame,
-    df_routing: pd.DataFrame,
-    df_routing_ts: pd.DataFrame,
     run_context: RunContext,
 ):
     """Generate summary file for sampled run dataset on a t-route run."""
@@ -1065,18 +854,18 @@ def create_diagnostics(
     plot_reach_mass_conservation_vs_dx(df_reaches, run_context.diagnostic_plot_dir)
     plot_network_mass_conservation(df_reaches, run_context.diagnostic_plot_dir)
     plot_attenuation(df_reaches, run_context.diagnostic_plot_dir)
-    plot_courant(df_routing_ts, run_context.diagnostic_plot_dir)
-    plot_optimal_reach_length(df_routing, run_context.diagnostic_plot_dir)
+    plot_courant(df_reaches, run_context.diagnostic_plot_dir)
+    plot_optimal_reach_length(df_reaches, run_context.diagnostic_plot_dir)
 
 
 def process_run(config_key: str, n_samples: int = 500):
     """Export diagnostics for a t-route run."""
     run_context = RunContext(config_key)
     generate_reference_gage_plots(run_context)
-    df_reaches, df_routing, df_routing_ts = generate_sampled_run_dataset(
+    df_reaches = generate_sampled_run_dataset(
         run_context, n_samples, generate_plots=False
     )
-    create_diagnostics(df_reaches, df_routing, df_routing_ts, run_context)
+    create_diagnostics(df_reaches, run_context)
 
 
 def main():
