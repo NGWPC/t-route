@@ -504,7 +504,7 @@ cpdef object compute_network_structured(
             else:
                 flowveldepth_nd[fill_index, 0, 0] = init_array[fill_index, 0] # initial flow condition
                 flowveldepth_nd[fill_index, 0, 2] = init_array[fill_index, 2] # initial depth condition
-                flowveldepth_nd[fill_index, 0, 3] = init_array[fill_index, 3] # initial depth condition
+                flowveldepth_nd[fill_index, 0, 3] = init_array[fill_index, 3] # initial qlat condition
 
     #Init buffers
     lateral_flows = np.zeros( max_buff_size, dtype='float32' )

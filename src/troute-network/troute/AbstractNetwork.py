@@ -217,7 +217,7 @@ class AbstractNetwork(ABC):
         self._q0 = pd.concat(
             [
                 pd.DataFrame(
-                    r[1][:, [-4, -4, -2, -3]], index=r[0], columns=["qu0", "qd0", "h0", "ql0"]
+                    r[1][:, [-4, -4, -2, -1]], index=r[0], columns=["qu0", "qd0", "h0", "ql0"]
                 )
                 for r in run_results
             ],
