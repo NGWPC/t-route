@@ -143,17 +143,29 @@ class RunContext:
         return dt_qlat / self.dt
 
     @cached_property
-    def routed_results(self) -> xr.Dataset:
-        """Load results from t-route run."""
+    def _output_paths(self) -> list[Path]:
+        """Paths to routed result netCDF files."""
         output_path = (
             self.config_root
             / self.config["output_parameters"]["stream_output"][
                 "stream_output_directory"
             ]
         )
-        paths = sorted(output_path.glob("*.nc"))
-        flows = [xr.open_dataset(p, engine="netcdf4") for p in paths]
+        return sorted(output_path.glob("*.nc"))
+
+    @cached_property
+    def routed_results(self) -> xr.Dataset:
+        """Load results from t-route run."""
+        flows = [xr.open_dataset(p, engine="netcdf4") for p in self._output_paths]
         return xr.concat(flows, dim="time")
+
+    def subset_routed_results(self, feature_ids: list[int]) -> None:
+        """Load only specific feature IDs from results into memory."""
+        subsets = []
+        for p in self._output_paths:
+            with xr.open_dataset(p, engine="netcdf4") as ds:
+                subsets.append(ds.sel(feature_id=feature_ids).load())
+        self.__dict__["routed_results"] = xr.concat(subsets, dim="time")
 
     @cached_property
     def forcing_data(self) -> pd.DataFrame:
@@ -194,7 +206,9 @@ class RunContext:
         )
         forcing = forcing.groupby("fp_id").agg("sum")
         forcing = forcing.T
-        forcing[list(set(all_fp).difference(forcing.columns))] = 0
+        missing_fps = list(set(all_fp).difference(forcing.columns))
+        if missing_fps:
+            forcing = pd.concat([forcing, pd.DataFrame(0, index=forcing.index, columns=missing_fps)], axis=1)
 
         return forcing
 
@@ -431,6 +445,36 @@ def hydraulic_geometry(
         "ck": ck,
         "x": X,
     }
+
+
+def collect_needed_feature_ids(
+    run_context: RunContext,
+    reaches: dict[int, dict],
+    max_walk: float = 50.0,
+) -> set[int]:
+    """Collect all feature IDs that will be accessed during diagnostics."""
+    needed = set(reaches.keys())
+    for reach_id in reaches:
+        _walk_upstream_ids(reach_id, run_context, needed, 0, max_walk)
+    return needed
+
+
+def _walk_upstream_ids(
+    reach: int,
+    run_context: RunContext,
+    needed: set[int],
+    cur_dist: float,
+    max_walk: float,
+) -> None:
+    """Recursively collect upstream feature IDs within walk distance."""
+    cur_dist += run_context.fp_length_mapping.get(reach, 0)
+    if reach not in run_context.us_mapping:
+        return
+    us = run_context.us_mapping[reach]
+    needed.update(us)
+    if cur_dist < max_walk:
+        for u in us:
+            _walk_upstream_ids(u, run_context, needed, cur_dist, max_walk)
 
 
 def generate_reach_diagnostics(
@@ -828,11 +872,15 @@ def plot_optimal_reach_length(df: pd.DataFrame, out_path: Path) -> None:
 
 
 def generate_sampled_run_dataset(
-    run_context: RunContext, n_samples: int = 500, generate_plots: bool = False
+    run_context: RunContext,
+    n_samples: int = 500,
+    generate_plots: bool = False,
+    reaches: dict[int, dict[str, Any]] = None,
 ) -> pd.DataFrame:
     """Build dataset of run diagnostics at the reach and network level."""
-    # Sample from reaches
-    reaches = sample_reaches(run_context, n_samples)
+    # Sample from reaches if not provided
+    if reaches is None:
+        reaches = sample_reaches(run_context, n_samples)
 
     for k, v in reaches.items():
         diagnostics = generate_reach_diagnostics(run_context, k, v, plot=generate_plots)
@@ -861,9 +909,22 @@ def create_diagnostics(
 def process_run(config_key: str, n_samples: int = 500):
     """Export diagnostics for a t-route run."""
     run_context = RunContext(config_key)
+
+    # Sample reaches upfront so we can subset results before loading
+    reaches = sample_reaches(run_context, n_samples)
+    needed_ids = collect_needed_feature_ids(run_context, reaches)
+
+    # Include gage feature IDs if reference data exists
+    if run_context.reference_data_path.exists():
+        with xr.open_dataset(run_context.reference_data_path) as ref_ds:
+            needed_ids.update(int(fp) for fp in ref_ds["fp_id"].values)
+
+    # Load only the needed subset of routed results
+    run_context.subset_routed_results(list(needed_ids))
+
     generate_reference_gage_plots(run_context)
     df_reaches = generate_sampled_run_dataset(
-        run_context, n_samples, generate_plots=False
+        run_context, n_samples, generate_plots=False, reaches=reaches
     )
     create_diagnostics(df_reaches, run_context)
 
