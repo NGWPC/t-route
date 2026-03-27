@@ -5,6 +5,7 @@ numpy~=1.0
 Cython>3,!=3.0.4
 pandas<3
 xarray
+seaborn
 netcdf4
 pyyaml
 toolz
