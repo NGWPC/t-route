@@ -224,8 +224,7 @@ def export_links_and_nodes(
             link_dn = dn_network[link_dn]
 
         # Build cumulative distances along merged geometry to segment into individual links
-        cumdist = np.cumsum([0.0] + length)
-        cumdist[-1] = geom.length  # just in case
+        cumdist = np.linspace(0, geom.length, len(length) + 1)
         link_geoms = [
             substring(geom, start_dist, end_dist)
             for start_dist, end_dist in zip(cumdist[:-1], cumdist[1:])
