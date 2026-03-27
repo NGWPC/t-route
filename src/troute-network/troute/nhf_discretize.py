@@ -209,6 +209,9 @@ def export_links_and_nodes(
             geoms.append(tmp.geometry)
             dn_node = tmp.dn_virtual_nex_id
         geom = shapely.line_merge(MultiLineString([j.geoms[0] for j in geoms[::-1]]))
+        if geom.geom_type == "MultiLineString":
+            coords = [c for part in geom.geoms for c in part.coords]
+            geom = shapely.LineString(coords)
 
         # Reconstruct link chain between retained nodes using dn_network lookup
         link_up = up_node
@@ -362,7 +365,7 @@ def _aggregate_links(
 def _discretize_links(
     links: LinkArrays, discretization_len_m: float, cur_node_id: int = 0
 ) -> LinkArrays:
-    """Subdivide links longer than threshold into uniform segments (uses ceil such that lengths will undershoot target)."""
+    """Subdivide links longer than threshold into uniform segments (uses floor such that lengths will overshoot target)."""
     ## Subdivide to target length
     long_mask = links.length > discretization_len_m
 
@@ -379,7 +382,7 @@ def _discretize_links(
 
     # Split long links into equal-length segments and insert new intermediate node IDs
     for idx in long_idx:
-        n = int(np.ceil(links.length[idx] / discretization_len_m))
+        n = max(1, int(np.floor(links.length[idx] / discretization_len_m)))
         new_len = links.length[idx] / n
         new_node_ids = np.arange(cur_node_id, cur_node_id + n - 1, dtype=int)
         node_ids = np.concatenate(
