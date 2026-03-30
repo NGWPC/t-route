@@ -53,9 +53,9 @@ class SupernetworkParameters(BaseModel):
         default=300, description="The target length in meters for discretized link segments within T-Route for NHF routing"
     )
 
-    network_type: Literal["HYFeaturesNetwork", "NHDNetwork"] = "HYFeaturesNetwork"
+    network_type: Literal["HYFeaturesNetwork", "NHDNetwork", "NHF"] = "HYFeaturesNetwork"
     """
-    Specify if this is an NHD network or a HYFeatures network.
+    Specify if this is an NHD network, HYFeatures network, or NHF network.
     """
     flowpath_edge_list: Optional[str] = None
     """
@@ -105,7 +105,7 @@ class SupernetworkParameters(BaseModel):
     @field_validator("columns", mode='before')
     def get_columns(cls, columns: dict, values: Dict[str, Any]) -> dict:
         if columns is None:
-            if values['network_type']=="HYFeaturesNetwork":
+            if values['network_type'] in ("HYFeaturesNetwork", "NHF"):
                 default_columns = {
                     'key'       : 'id',
                     'downstream': 'toid',
