@@ -9,7 +9,8 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import yaml
-from icefabric_tools import find_origin
+from icefabric.hydrofabric import find_origin
+from icefabric.schemas import IdType
 
 from troute_rnr import write
 from troute_rnr.schemas.nwps import ProcessedData, SiteData
@@ -121,9 +122,9 @@ def format_config(inputs: ProcessedData, settings: Settings) -> tuple[Path, Path
         The path to the YAML config file and flow files directory
     """
     reach = inputs.reach
-    network = settings.catalog.load_table("hydrofabric.network")
+    network = settings.catalog.load_table("hydrofabric.network").to_polars()
     hy_id = (
-        find_origin(network_table=network, identifier=reach.id, id_type="comid")["id"].values[0].split("-")[1]
+        find_origin(network_table=network, identifier=reach.id, id_type=IdType.ID)["id"].values[0].split("-")[1]
     )
     tmp_flow_files_path = settings.tmp_flow_files_path / inputs.lid
     tmp_flow_files_path.mkdir(exist_ok=True)
