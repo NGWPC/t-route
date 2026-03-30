@@ -1,5 +1,6 @@
 """Basic Model Interface backing model for NGEN t-route."""
 from __future__ import annotations
+import logging
 import time
 import typing
 import yaml
@@ -29,10 +30,6 @@ class Model:
     dt: int
 
     def __init__(self, config_file: str, start_time: float):
-
-        # This is required prior to the first log message is issued by t-route.
-        LOG.bind()
-        
         self._time = start_time
 
         with open(config_file) as reader:
@@ -91,7 +88,6 @@ class Model:
         if not self._is_nhf():
             self._network.assemble_coastal_coupling_data()
         self._orig_t0 = self._network.t0
-        self._is_nhf = (self.supernetwork_parameters["network_type"] == "NHF")
         network_creation_time = time.time() - network_start_time
 
         # Data data assimilation
@@ -119,7 +115,7 @@ class Model:
 
         # Pass empty subnetwork list to nwm_route. These objects will be calculated/populated
         # on first iteration of for loop only. For additional loops this will be passed
-        # to function from inital loop.     
+        # to function from inital loop.
         self._subnetwork = [None, None, None]
 
         self._timings = {
@@ -130,26 +126,13 @@ class Model:
         }
 
     def run(self, bmi_values: dict[str, NDArray]):
-        network = self._network
         is_nhf = self._is_nhf()
         qts_subdivisions = self.qts_subdivisions
         nts = self.nts
 
         LOG.debug("Assembling forcing dataframe")
         forcing_start_time = time.time()
-
-        if self._is_nhf:
-            qlats = pd.DataFrame(data=self._df_data, index=bmi_values["land_surface_water_source__id"])
-            network._build_qlateral_array_direct(qlats)
-            qlats = network._qlateral
-        else:
-            # HYFeatures / NHD: nexus→flowpath rename
-            qlats = pd.DataFrame(data=self._df_data, index=bmi_values["land_surface_water_source__id"])
-            qlats = qlats.rename(index=network.downstream_flowpath_dict)
-            missing = network.segment_index[~network.segment_index.isin(qlats.index)]
-            zeros = pd.DataFrame(data=0.0, index=missing, columns=qlats.columns)
-            qlats = pd.concat([qlats, zeros]).sort_index()
-
+        qlats = self._construct_qlats(bmi_values)
         self._timings["forcing_time"] += time.time() - forcing_start_time
 
         # Build param_df
@@ -240,16 +223,16 @@ class Model:
             qts_subdivisions=qts_subdivisions,
             return_courant=self.compute_parameters.get("return_courant", False),
             cpu_pool=self.cpu_pool,
-            waterbodies_df=network.waterbody_dataframe,
-            waterbody_types_df=network.waterbody_types_dataframe,
-            duplicate_ids_df=getattr(network, "_duplicate_ids_df", pd.DataFrame()),
+            waterbodies_df=self._network.waterbody_dataframe,
+            waterbody_types_df=self._network.waterbody_types_dataframe,
+            duplicate_ids_df=getattr(self._network, "_duplicate_ids_df", pd.DataFrame()),
             data_assimilation_parameters=self.data_assimilation_parameters,
             lastobs_df=self._data_assimilation.lastobs_df,
-            link_gage_df=network.link_gage_df,
-            link_lake_crosswalk=network.link_lake_crosswalk,
-            nexus_dict=network.nexus_dict,
-            poi_crosswalk=network.poi_nex_dict or {},
-            fp_outlet_crosswalk=network.fp_outlet_crosswalk if self._is_nhf else None,
+            link_gage_df=self._network.link_gage_df,
+            link_lake_crosswalk=self._network.link_lake_crosswalk,
+            nexus_dict=self._network.nexus_dict,
+            poi_crosswalk=self._network.poi_nex_dict or {},
+            fp_outlet_crosswalk=self._network.fp_outlet_crosswalk
         )
 
         self._network.new_t0(self.dt, nts)
@@ -387,7 +370,7 @@ class Model:
     @property
     def hybrid_parameters(self) -> dict:
         return self.compute_parameters.get("hybrid_parameters", {})
-    
+
     @property
     def data_assimilation_parameters(self) -> dict:
         return self.compute_parameters.get("data_assimilation_parameters", {})

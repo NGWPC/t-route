@@ -17,9 +17,8 @@ from troute.nhf_preprocess import (
     read_qlat_file,
 )
 
-import logging
-from troute_ewts import MODULE_NAME
-LOG = logging.getLogger(MODULE_NAME)
+import ewts
+LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 
 __verbose__ = False

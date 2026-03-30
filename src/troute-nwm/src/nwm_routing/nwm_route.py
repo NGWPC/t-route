@@ -1,12 +1,11 @@
 """A file to hold the nwm routing function"""
-import logging
 import time
 from typing import Literal
 
 from troute.routing.compute import compute_nhd_routing_v02, compute_diffusive_routing, compute_log_mc, compute_log_diff
 
-
-LOG = logging.getLogger('')
+import ewts
+LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 def nwm_route(
     downstream_connections,
