@@ -448,6 +448,11 @@ class HYFeaturesNetwork(AbstractNetwork):
         # Drop 'gages' column if it is present
         if "gages" in self.dataframe:
             self._dataframe = self.dataframe.drop("gages", axis=1)
+
+        # ensure `cat-` is removed from any divide_ids
+        if "divide_id" in self.dataframe.columns:
+            self._dataframe["divide_id"] = self._dataframe['divide_id'].str.split('-').str[1].values.astype(np.int32)
+        
         # numeric code used to indicate network terminal segments
         terminal_code = self.supernetwork_parameters.get("terminal_code", 0)
 
@@ -892,6 +897,47 @@ class HYFeaturesNetwork(AbstractNetwork):
             qlats_df = qlats_df[qlats_df.index.isin(self.segment_index)]
 
         self._qlateral = qlats_df
+
+    def build_et_array(
+        self,
+        run,
+    ):
+        col_idx = run.get("et_index_name", "divide_id")
+        var_idx = run.get("et_var_name", "ACTUAL_ET")
+        try:
+            ds = run["et_forcing_ds"]
+        except KeyError as e:
+            raise KeyError("Cannot find et_forcing_ds in runs") from e
+        ds_AET = ds[var_idx]
+
+        # mapping catchments to flowpath IDs
+        mapping_dict = dict(zip(
+            self._dataframe['divide_id'].values,
+            self._dataframe.index.values
+        ))
+        keys = np.array([mapping_dict[key] for key in ds_AET[col_idx].values])
+        
+        time_strings = pd.to_datetime(ds_AET.time.values).strftime('%Y%m%d%H%M')
+        aet_df = pd.DataFrame(
+            data=ds_AET.values,
+            index=keys,
+            columns=time_strings
+        )
+        
+        aet_df.index.name = 'key'
+        ordered_aet_df = aet_df.reindex(self._dataframe.index, fill_value=0) # ordering based on the existing 
+
+        # Convert ET into ELOSS
+        try:
+            A_w = self._dataframe["tw"] * self._dataframe["dx"]
+            _E = ordered_aet_df * self.forcing_parameters["peadj"]
+            TIMINT = 1 # Hardcoding for hourly
+            # _E is in mm/hr. Thus, MM/HR × (1/1000) × (1/3600) -> m/s
+            ELOSS_cms = (_E / 1000 / 3600 / TIMINT).mul(A_w.values, axis=0)
+            ELOSS_cfs = ELOSS_cms * 35.3147  # since NGEN runs in cfs, converting from cms to cfs. Can make a config setting later.
+        except KeyError as e:
+            raise KeyError("Cannot find flowpath attributes to map PET. Can you ensure ") from e
+        self._eloss = ELOSS_cfs
 
     ######################################################################
     # FIXME Temporary solution to hydrofabric issues.
