@@ -190,7 +190,6 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         self._connections = None  # Forces recomputation on first call to self.connections
         self._terminal_codes = set(self._dataframe["downstream"]).difference(self._dataframe.index)  # Outlets
         self._build_fp_outlet_crosswalk(reference_flowpaths, virtual_flowpaths, nexus_remapping)
-
         self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, nexus_remapping)
 
     def _build_fp_outlet_crosswalk(self, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]):
@@ -328,7 +327,6 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
             # lateral flows [m^3/s] indexed by div_id (divide/catchment)
             div_direct_runoff = pd.concat(dfs, axis=1)
-            self.run_ts = div_direct_runoff.columns
             return div_direct_runoff
 
     def build_qlateral_array(self, run: dict[str, Any]) -> None:
@@ -353,10 +351,10 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         np.add.at(out, inv, vfp_flows)
 
         # Make qlat dataframe
-        qlat_valid = pd.DataFrame(out, index=unique_ids, columns=self.run_ts)
+        qlat_valid = pd.DataFrame(out, index=unique_ids, columns=div_direct_runoff_df.columns)
 
         # Add empty records for other links
-        qlat_zero = pd.DataFrame(0.0, index=self.zero_nodes, columns=self.run_ts)
+        qlat_zero = pd.DataFrame(0.0, index=self.zero_nodes, columns=div_direct_runoff_df.columns)
 
         self._qlateral = pd.concat([qlat_valid, qlat_zero])
  

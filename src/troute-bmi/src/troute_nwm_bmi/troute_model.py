@@ -12,7 +12,6 @@ from troute.NHDNetwork import NHDNetwork
 from troute.HYFeaturesNetwork import HYFeaturesNetwork
 from troute.NHF import NHF
 from troute.DataAssimilation import DataAssimilation
-from troute.nhf_discretize import distribute_catchment_discharge
 
 import troute.hyfeature_network_utilities as hnu
 
@@ -259,7 +258,6 @@ class Model:
             nexus_dict=network.nexus_dict,
             poi_crosswalk=network.poi_nex_dict or {},
             fp_outlet_crosswalk=network.fp_outlet_crosswalk if self._is_nhf else None,
-            link_ids=network.links_df.index if self._is_nhf else None,
         )
 
         self._network.new_t0(self.dt, nts)
