@@ -31,8 +31,6 @@ def nhf_routing(argv):
     )
     args = parser.parse_args(argv)
 
-    configure_logging()
-    
     # unpack user inputs
     (
         log_parameters,
