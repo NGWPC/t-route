@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 feature_id,200001031300
+=======
+divide_id,streamflow
+>>>>>>> d0bdd34f (tests: added test case for conecuh river test case (#57))
 3490271,0.1093177469230378
 3490292,0.1655604340607699
 3490293,0.0273297037929296
