@@ -97,3 +97,5 @@ uv.lock
 # data #
 ########
 data/
+output/
+*.gif
