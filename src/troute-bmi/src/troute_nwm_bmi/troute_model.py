@@ -88,7 +88,8 @@ class Model:
             )
         else:
             raise Exception("Supernetwork network type must be HYFeaturesNetwork, NHDNetwork, or NHF")
-        self._network.assemble_coastal_coupling_data()
+        if not self._is_nhf():
+            self._network.assemble_coastal_coupling_data()
         self._orig_t0 = self._network.t0
         self._is_nhf = (self.supernetwork_parameters["network_type"] == "NHF")
         network_creation_time = time.time() - network_start_time
