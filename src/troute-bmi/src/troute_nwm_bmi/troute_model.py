@@ -16,7 +16,7 @@ from troute.DataAssimilation import DataAssimilation
 import troute.hyfeature_network_utilities as hnu
 
 import nwm_routing.nwm_route as nwm_routing
-from nwm_routing.output import nwm_output_generator
+from nwm_routing.output import nwm_output_generator, remap_outputs
 
 import ewts
 LOG = ewts.get_logger(ewts.T_ROUTE_ID)
@@ -174,10 +174,10 @@ class Model:
         LOG.debug("Starting routing function")
         route_start_time = time.time()
         run_results, self._subnetwork = nwm_routing.nwm_route(
-            downstream_connections=network.connections,
-            upstream_connections=network.reverse_network,
-            waterbodies_in_connections=network.waterbody_connections,
-            reaches_bytw=network._reaches_by_tw,
+            downstream_connections=self._network.connections,
+            upstream_connections=self._network.reverse_network,
+            waterbodies_in_connections=self._network.waterbody_connections,
+            reaches_bytw=self._network._reaches_by_tw,
             parallel_compute_method=self.compute_parameters.get("parallel_compute_method", "serial"),
             compute_kernel=self.compute_parameters.get("compute_kernel"),
             subnetwork_target_size=self.compute_parameters.get('subnetwork_target_size'),
@@ -186,11 +186,11 @@ class Model:
             dt=self.dt,
             nts=nts,
             qts_subdivisions=qts_subdivisions,
-            independent_networks=network.independent_networks,
+            independent_networks=self._network.independent_networks,
             param_df=param_df,
-            q0=network.q0,
+            q0=self._network.q0,
             qlats=qlats,
-            eloss_df=network._eloss if network._eloss is not None else pd.DataFrame(0.0, index=qlats.index, columns=qlats.columns),
+            eloss_df=self._network._eloss if self._network._eloss is not None else pd.DataFrame(0.0, index=qlats.index, columns=qlats.columns),
             ssout=self.forcing_parameters.get("ssout"),
             usgs_df=self._data_assimilation.usgs_df,
             lastobs_df=self._data_assimilation.lastobs_df,
@@ -204,28 +204,28 @@ class Model:
             reservoir_rfc_param_df=self._data_assimilation.reservoir_rfc_param_df,
             great_lakes_df=self._data_assimilation.great_lakes_df,
             great_lakes_param_df=self._data_assimilation.great_lakes_param_df,
-            great_lakes_climatology_df=network.great_lakes_climatology_df,
+            great_lakes_climatology_df=self._network.great_lakes_climatology_df,
             da_parameter_dict=self._data_assimilation.assimilation_parameters,
             assume_short_ts=self.compute_parameters.get('assume_short_ts', False),
             return_courant=self.compute_parameters.get('return_courant', False),
-            waterbodies_df=network._waterbody_df,
+            waterbodies_df=self._network._waterbody_df,
             data_assimilation_parameters=self.waterbody_parameters,
-            waterbody_types_df=network._waterbody_types_df,
-            waterbody_type_specified=network.waterbody_type_specified,
-            diffusive_network_data=network.diffusive_network_data,
-            topobathy_df=network.topobathy_df,
-            refactored_diffusive_domain=network.refactored_diffusive_domain,
-            refactored_reaches=network.refactored_reaches,
+            waterbody_types_df=self._network._waterbody_types_df,
+            waterbody_type_specified=self._network.waterbody_type_specified,
+            diffusive_network_data=self._network.diffusive_network_data,
+            topobathy_df=self._network.topobathy_df,
+            refactored_diffusive_domain=self._network.refactored_diffusive_domain,
+            refactored_reaches=self._network.refactored_reaches,
             subnetwork_list=self._subnetwork,
-            coastal_boundary_depth_df=network.coastal_boundary_depth_df,
-            unrefactored_topobathy_df=network.unrefactored_topobathy_df,
+            coastal_boundary_depth_df=self._network.coastal_boundary_depth_df,
+            unrefactored_topobathy_df=self._network.unrefactored_topobathy_df,
             qlat_add_loc=qlat_add_loc,
         )
         self._timings["route_time"] = time.time() - route_start_time
 
         # create initial conditions for next loop iteration
-        network.new_q0(run_results)
-        network.update_waterbody_water_elevation()
+        self._network.new_q0(run_results)
+        self._network.update_waterbody_water_elevation()
 
         # update reservoir parameters and lastobs_df
         self._data_assimilation.update_after_compute(run_results, self.dt * nts)
@@ -274,6 +274,8 @@ class Model:
             [pd.DataFrame(r[1], index=r[0], columns=qvd_columns) for r in run_results],
             copy=False,
         )
+        if self._is_nhf:
+            flowveldepth = remap_outputs(flowveldepth, self._network.fp_outlet_crosswalk)
         _update_values("channel_exit_water_x-section__volume_flow_rate", flowveldepth.iloc[:,-3])
         _update_values("channel_water_flow__speed", flowveldepth.iloc[:,-2])
         _update_values("channel_water__mean_depth", flowveldepth.iloc[:,-1])
@@ -282,10 +284,14 @@ class Model:
         i_columns = pd.MultiIndex.from_product(
             [range(int(nts)), ["i"]]
         ).to_flat_index()
-        wbdy = pd.concat(
-            [pd.DataFrame(r[6], index=r[0], columns=i_columns) for r in run_results],
-            copy=False,
-        )
+        if self._is_nhf:
+            # Waterbodies are not implemented in NHF yet.
+            wbdy = pd.DataFrame(columns=i_columns)
+        else:
+            wbdy = pd.concat(
+                [pd.DataFrame(r[6], index=r[0], columns=i_columns) for r in run_results],
+                copy=False,
+            )
 
         wbdy_id = _update_values("lake_water__id", self._network.waterbody_dataframe.index)
         _update_values("lake_water~incoming__volume_flow_rate", wbdy.loc[wbdy_id].iloc[:,-1])
@@ -447,14 +453,19 @@ class Model:
             df_data[timestamp] = timeslice
             step_time += timedelta(seconds=dt)
             index += num_ids
-        ## use a DataFrame to view the inputs grouped by timestep
-        qlats = pd.DataFrame(data=df_data, index=water_source_ids)
-        # Take flowpath ids entering NEXUS and replace NEXUS ids by the upstream flowpath ids
-        qlats = qlats.rename(index=self._network.downstream_flowpath_dict)
-        # create zero values for missing values
-        missing = self._network.segment_index[~self._network.segment_index.isin(qlats.index)]
-        zeros = pd.DataFrame(data=0.0, index=missing, columns=qlats.columns)
-        return pd.concat([qlats, zeros]).sort_index()
+        if self._is_nhf:
+            qlats = pd.DataFrame(data=df_data, index=bmi_values["land_surface_water_source__id"])
+            self._network._build_qlateral_array_direct(qlats)
+            return self._network._qlateral
+        else:
+            ## use a DataFrame to view the inputs grouped by timestep
+            qlats = pd.DataFrame(data=df_data, index=water_source_ids)
+            # Take flowpath ids entering NEXUS and replace NEXUS ids by the upstream flowpath ids
+            qlats = qlats.rename(index=self._network.downstream_flowpath_dict)
+            # create zero values for missing values
+            missing = self._network.segment_index[~self._network.segment_index.isin(qlats.index)]
+            zeros = pd.DataFrame(data=0.0, index=missing, columns=qlats.columns)
+            return pd.concat([qlats, zeros]).sort_index()
 
     def _log_times(self):
         def sec_and_per(title, key: str):
