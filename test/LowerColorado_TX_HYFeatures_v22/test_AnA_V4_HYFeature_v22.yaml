@@ -9,7 +9,7 @@ network_topology_parameters:
     #----------
     supernetwork_parameters:
         #----------
-        geo_file_path: domain/lower_colorado.gpkg
+        geo_file_path: domain/LowerColorado_v22_no_lakes.gpkg
         columns: 
             key: 'id'
             downstream: 'to'
