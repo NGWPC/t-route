@@ -401,6 +401,10 @@ class AbstractNetwork(ABC):
     @property
     def usace_lake_gage_crosswalk(self):
         return self._usace_lake_gage_crosswalk
+
+    @property
+    def usbr_lake_gage_crosswalk(self):
+        return self._usbr_lake_gage_crosswalk
     
     @property
     def rfc_lake_gage_crosswalk(self):
