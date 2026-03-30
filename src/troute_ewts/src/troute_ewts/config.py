@@ -104,6 +104,10 @@ def configure_logging():
     log_level = translate_ngwpc_log_level(
         getenv_any(EV_MODULE_LOGLEVEL, "INFO")
     )
+    try:
+        log_level = int(log_level)
+    except Exception:
+        pass
 
     module_fmt = MODULE_NAME.upper().ljust(LOG_MODULE_NAME_LEN)[:LOG_MODULE_NAME_LEN]
 
