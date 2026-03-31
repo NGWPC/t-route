@@ -243,12 +243,16 @@ class Model:
             array = bmi_values[name] = values.to_numpy(dtype=dtype, copy=True)
             return array
         qvd_columns = pd.MultiIndex.from_product(
-            [range(nts), ["q", "v", "d"]]
+            [range(nts), ["q", "v", "d", "ql"]]
         ).to_flat_index()
+
         flowveldepth = pd.concat(
             [pd.DataFrame(r[1], index=r[0], columns=qvd_columns) for r in run_results],
             copy=False,
         )
+        flowveldepth = flowveldepth.drop(columns=[
+            col for col in flowveldepth.columns if col[1] == "ql"
+        ])
         if is_nhf:
             flowveldepth = remap_outputs(flowveldepth, self._network.fp_outlet_crosswalk)
         _update_values("channel_exit_water_x-section__volume_flow_rate", flowveldepth.iloc[:,-3])
@@ -432,13 +436,12 @@ class Model:
             df_data[timestamp] = timeslice
             step_time += timedelta(seconds=dt)
             index = next_index
+        ## use a DataFrame to view the inputs grouped by timestep
+        qlats = pd.DataFrame(data=df_data, index=water_source_ids)
         if self._is_nhf():
-            qlats = pd.DataFrame(data=df_data, index=bmi_values["land_surface_water_source__id"])
             self._network._build_qlateral_array_direct(qlats)
             return self._network._qlateral
         else:
-            ## use a DataFrame to view the inputs grouped by timestep
-            qlats = pd.DataFrame(data=df_data, index=water_source_ids)
             # Take flowpath ids entering NEXUS and replace NEXUS ids by the upstream flowpath ids
             qlats = qlats.rename(index=self._network.downstream_flowpath_dict)
             # create zero values for missing values
