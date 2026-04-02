@@ -167,7 +167,7 @@ def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_paramet
             with Parallel(n_jobs=min(cpu_pool, len(LAYERS_TO_READ))) as parallel:
                 gpkg_list = parallel(delayed(read_layer)(layer) for layer in LAYERS_TO_READ)
 
-            table_dict = {LAYERS_TO_READ[i]: gpkg_list[i] for i in range(len(LAYERS_TO_READ))}
+            table_dict = {LAYERS_TO_READ[i]["name"]: gpkg_list[i] for i in range(len(LAYERS_TO_READ))}
         else:
             table_dict = {layer["name"]: read_layer(layer) for layer in LAYERS_TO_READ}
 
