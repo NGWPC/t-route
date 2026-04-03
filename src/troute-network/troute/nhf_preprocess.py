@@ -167,7 +167,7 @@ def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_paramet
             with Parallel(n_jobs=min(cpu_pool, len(LAYERS_TO_READ))) as parallel:
                 gpkg_list = parallel(delayed(read_layer)(layer) for layer in LAYERS_TO_READ)
 
-            table_dict = {LAYERS_TO_READ[i]: gpkg_list[i] for i in range(len(LAYERS_TO_READ))}
+            table_dict = {LAYERS_TO_READ[i]["name"]: gpkg_list[i] for i in range(len(LAYERS_TO_READ))}
         else:
             table_dict = {layer["name"]: read_layer(layer) for layer in LAYERS_TO_READ}
 
@@ -242,18 +242,24 @@ class NHFPreprocessMixin:
     ):
         self._nexus_dict = virtual_flowpaths.groupby("dn_virtual_nex_id")["virtual_fp_id"].apply(list).to_dict()  ##{id: toid}
         if not hydrolocations.empty:
-            waterbody_ids = hydrolocations.merge(
-                waterbodies,
-                left_on='hy_id',
-                right_on='hy_id',
-                how='right'
-            )
-            gage_ids = hydrolocations.merge(
-                gages,
-                left_on='hy_id',
-                right_on='hy_id',
-                how='right'
-            )
+            if not waterbodies.empty:
+                waterbody_ids = hydrolocations.merge(
+                    waterbodies,
+                    left_on='hy_id',
+                    right_on='hy_id',
+                    how='right'
+                )
+            else:
+                waterbody_ids = pd.DataFrame(columns=["hy_id", "ref_fp_id"])
+            if not hydrolocations.empty:
+                gage_ids = hydrolocations.merge(
+                    gages,
+                    left_on='hy_id',
+                    right_on='hy_id',
+                    how='right'
+                )
+            else:
+                gage_ids = pd.DataFrame(columns=["hy_id", "ref_fp_id"])
             hy_id_to_ref_id = pd.concat([waterbody_ids[["hy_id", "ref_fp_id"]].copy(), gage_ids[["hy_id", "ref_fp_id"]]])
             _ref_ids = reference_flowpaths.merge(
                 hy_id_to_ref_id,
