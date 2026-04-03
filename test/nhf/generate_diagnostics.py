@@ -184,33 +184,60 @@ class RunContext:
             for f in forcing_files
             if datetime.strptime(f.stem.split(".")[0], "%Y%m%d%H%M") < tmax
         ]
-        forcing = pd.concat(
-            [pd.read_csv(f).sort_values("feature_id") for f in forcing_files], axis=1
-        )
-        columns = forcing["feature_id"].values[:, 0]
-        forcing = forcing.drop(columns=["feature_id"]).T
-        forcing.columns = columns
-        forcing.index = pd.to_datetime(forcing.index)
-        # Final trim
-        forcing = forcing.loc[(forcing.index >= t0) & (forcing.index < tmax)]
 
-        all_fp = forcing.columns.values
-        self.network._build_qlateral_array_direct(forcing.T)
-        forcing = self.network._qlateral
-        forcing = pd.merge(
-            forcing,
-            self.network.dataframe[["fp_id"]],
-            how="left",
-            left_index=True,
-            right_index=True,
-        )
-        forcing = forcing.groupby("fp_id").agg("sum")
+        
+        all_fp = pd.read_csv(forcing_files[0]).sort_values("feature_id")["feature_id"].values
+        forcing = []
+        for f in forcing_files:
+            df = pd.read_csv(f).sort_values("feature_id")
+            df = df.set_index("feature_id")
+            # tstamp = df.columns[0]
+            self.network._build_qlateral_array_direct(df)
+            tmp_force = pd.merge(
+                self.network._qlateral,
+                self.network.dataframe[["fp_id"]],
+                how="left",
+                left_index=True,
+                right_index=True,
+            )
+            tmp_force = tmp_force.groupby("fp_id").agg("sum")
+            # forcing[tstamp] = self.network._qlateral.values[:, 0]
+            forcing.append(tmp_force)
+        forcing = pd.concat(forcing, axis=1)
+
         forcing = forcing.T
         missing_fps = list(set(all_fp).difference(forcing.columns))
         if missing_fps:
             forcing = pd.concat([forcing, pd.DataFrame(0, index=forcing.index, columns=missing_fps)], axis=1)
 
         return forcing
+
+
+        # forcing = pd.concat(
+        #     [pd.read_csv(f).sort_values("feature_id") for f in forcing_files], axis=1
+        # )
+        # columns = forcing["feature_id"].values[:, 0]
+        # forcing = forcing.drop(columns=["feature_id"]).T
+        # forcing.columns = columns
+        # forcing.index = pd.to_datetime(forcing.index)
+        # # Final trim
+        # forcing = forcing.loc[(forcing.index >= t0) & (forcing.index < tmax)]
+
+        # all_fp = forcing.columns.values
+        # self.network._build_qlateral_array_direct(forcing.T)
+        # forcing = self.network._qlateral
+        # forcing = pd.merge(
+        #     forcing,
+        #     self.network.dataframe[["fp_id"]],
+        #     how="left",
+        #     left_index=True,
+        #     right_index=True,
+        # )
+        # forcing = forcing.groupby("fp_id").agg("sum")
+        # forcing = forcing.T
+        # forcing[list(set(all_fp).difference(forcing.columns))] = 0
+
+        # return forcing
 
     @cached_property
     def hydrofabric_path(self) -> Path:
