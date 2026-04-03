@@ -14,10 +14,12 @@ RETRO_PATH = "s3://noaa-nwm-retrospective-3-0-pds/CONUS/zarr/chrtout.zarr"
 RETROSPECTIVE_LATERAL_FIELD = "q_lateral"
 RETROSPECTIVE_FLOW_FIELD = "streamflow"
 
-def create_forcing_dataset(t_start: str, t_end: str, forcing_dir: str, hydrofabric_path: str, retrospective_path: str, forcing_file_pattern: str = "CHRTOUT_DOMAIN1", generate_reference_data: bool = False, reference_dir: Union[str, None] = None, runout_time: int = 0):
+def create_forcing_dataset(t_start: str, t_end: str, forcing_dir: str, hydrofabric_path: str, retrospective_path: str, forcing_file_pattern: str = "CHRTOUT_DOMAIN1", generate_reference_data: bool = False, reference_dir: Union[str, None] = None, runout_time: int = 0, restart_dir = None):
     """Create a dataset of channel forcing files from retrospective data."""
     forcing_dir = Path(forcing_dir)
     forcing_dir.mkdir(parents=True, exist_ok=True)
+    restart_dir = Path(restart_dir)
+    restart_dir.mkdir(parents=True, exist_ok=True)
 
     # Load the data
     crosswalk = gpd.read_file(hydrofabric_path, layer="reference_flowpaths")
@@ -34,6 +36,18 @@ def create_forcing_dataset(t_start: str, t_end: str, forcing_dir: str, hydrofabr
         end=t_end,
         freq="h"
     )
+    # Make hot start file
+    q_out = retro[RETROSPECTIVE_FLOW_FIELD].sel(feature_id=feature_ids_retro, time=iterator[0]).reset_coords(drop=True)
+    q_out = q_out.to_dataframe()
+    q_out = pd.merge(q_out, crosswalk[["ref_fp_id", "fp_id"]], left_index=True, right_on="ref_fp_id", how="left").rename(columns={"fp_id": "feature_id", RETROSPECTIVE_FLOW_FIELD: "qd0"})[["feature_id", "qd0"]]
+    q_out = q_out.groupby("feature_id").max().reset_index()
+    q_out = q_out.fillna(0)
+    q_out["h0"] = 0.1
+    q_out["qu0"] = q_out["qd0"]  # TODO: Consider actually calculating this
+    q_out["ql0"] = 0
+    q_out["time"] = iterator[0]
+    q_out.to_pickle(restart_dir / "restart.pkl")
+    # Make qlats
     for i in iterator:
         print(f"Processing time step {i}...")
         qlat = retro.sel(feature_id=feature_ids_retro, time=i)[RETROSPECTIVE_LATERAL_FIELD].reset_coords(drop=True)
@@ -136,6 +150,7 @@ def make_config_yaml(config_path: str, hydrofabric_path: str, qlat_input_folder:
             "cpu_pool": 1,
             "restart_parameters": {
                 "start_datetime": restart_time,
+                "lite_channel_restart_file": "restart_retro/restart.pkl"
             },
             "forcing_parameters": {
                 "dt": 300,
@@ -166,6 +181,9 @@ def make_config_yaml(config_path: str, hydrofabric_path: str, qlat_input_folder:
                 "stream_output_type": ".nc",
                 "stream_output_internal_frequency": 60,
             },
+            "lite_restart":{
+                "lite_restart_output_directory": "restart_retro"
+                }
         },
     }
 
@@ -178,8 +196,10 @@ def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: 
     end_dt = pd.to_datetime(end_time)
     run_dir = Path(__file__).parent / case_id
     forcing_subdir = f"channel_forcing_{run_id}"
+    restart_subdir = f"restart_{run_id}"
     config_path = run_dir / f"{run_id}.yaml"
     forcing_dir = run_dir / forcing_subdir
+    restart_dir = run_dir / restart_subdir
     hf_path = run_dir / "domain" / hf_file
     output_dir = f"output_{run_id}/"
     if generate_reference_data:
@@ -199,6 +219,7 @@ def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: 
         generate_reference_data=generate_reference_data,
         reference_dir=reference_dir,
         runout_time=runout_time,
+        restart_dir=restart_dir
     )
     dt = 300 # could be an input argument if we want to vary it across runs
     sim_time = (end_dt - start_dt).total_seconds()
