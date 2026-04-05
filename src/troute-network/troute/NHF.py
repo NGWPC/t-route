@@ -227,19 +227,22 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         cross_fp = cross_fp[cross_fp["fp_id_dn"] != cross_fp["fp_id_up"]]
 
         # Build merged fp → upstream fp mapping, then resolve chains for consecutive merges
-        merged_to_upstream = dict(zip(cross_fp["fp_id_dn"], cross_fp["fp_id_up"]))
-        merged_mapping = {}
+        merged_to_upstream = cross_fp.set_index("fp_id_dn")["fp_id_up"].groupby(level=0).agg(list)
+        merged_mapping = defaultdict(list)
         for merged_fp in ids_merged:
-            current = merged_fp
-            seen = set()
-            while current in ids_merged and current in merged_to_upstream:
-                if current in seen:
-                    break
-                seen.add(current)
-                current = merged_to_upstream[current]
-            if current in fp_2_link:
-                outlet_link = fp_2_link[current]
-                merged_mapping.setdefault(outlet_link, []).append(merged_fp)
+            q = list(merged_to_upstream.get(merged_fp, []))
+            visited = set()
+            while len(q) > 0:
+                cur = q.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                us = merged_to_upstream.get(cur)
+                if us:
+                    q.extend(us)
+                else:
+                    merged_mapping[fp_2_link[cur]].append(merged_fp)
+
 
         # Put all results into the mapping dict
         self._fp_outlet_crosswalk = defaultdict(list)
