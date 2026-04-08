@@ -5,7 +5,7 @@ import typing
 import numpy as np
 from bmipy import Bmi
 
-from .troute_model import Model
+from .troute_model import Model, BmiVars
 
 if typing.TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -14,31 +14,34 @@ import ewts
 LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 _VAR_NAME_UNITS_MAP = {
-    'land_surface_water_source__volume_flow_rate': ['streamflow_cms', 'm3 s-1'],
-    'channel_exit_water_x-section__volume_flow_rate': ['streamflow_cms', 'm3 s-1'],
-    'channel_water_flow__speed': ['streamflow_ms', 'm s-1'],
-    'channel_water__mean_depth': ['streamflow_m', 'm'],
-    'lake_water~incoming__volume_flow_rate': ['waterbody_cms', 'm3 s-1'],
-    'lake_water~outgoing__volume_flow_rate': ['waterbody_cms', 'm3 s-1'],
-    'lake_surface__elevation': ['waterbody_m', 'm'],
+    BmiVars.CATCHMENT_VALUE: ['streamflow_cms', 'm3 s-1'],
+    BmiVars.NEXUS_VALUE: ['streamflow_cms', 'm3 s-1'],
+    BmiVars.CHANNEL_WATER_RATE: ['streamflow_cms', 'm3 s-1'],
+    BmiVars.CHANNEL_WATER_SPEED: ['streamflow_ms', 'm s-1'],
+    BmiVars.CHANNEL_WATER_DEPTH: ['streamflow_m', 'm'],
+    BmiVars.LAKE_WATER_INCOMING: ['waterbody_cms', 'm3 s-1'],
+    BmiVars.LAKE_WATER_OUTGOING: ['waterbody_cms', 'm3 s-1'],
+    BmiVars.LAKE_WATER_ELEVATION: ['waterbody_m', 'm'],
 }
 
 _OUTPUT_VAR_NAMES = [
-    "channel_water__id",
-    "channel_exit_water_x-section__volume_flow_rate",
-    "channel_water_flow__speed",
-    "channel_water__mean_depth",
-    "lake_water__id",
-    "lake_water~incoming__volume_flow_rate",
-    "lake_water~outgoing__volume_flow_rate",
-    "lake_surface__elevation"
+    BmiVars.CHANNEL_WATER_ID,
+    BmiVars.CHANNEL_WATER_RATE,
+    BmiVars.CHANNEL_WATER_SPEED,
+    BmiVars.CHANNEL_WATER_DEPTH,
+    BmiVars.LAKE_WATER_ID,
+    BmiVars.LAKE_WATER_INCOMING,
+    BmiVars.LAKE_WATER_OUTGOING,
+    BmiVars.LAKE_WATER_ELEVATION,
 ]
 
 _INPUT_VAR_NAMES = [
-    "land_surface_water_source__id",
-    "land_surface_water_source__volume_flow_rate",
-    "upstream_id",
-    "ngen_dt",
+    BmiVars.CATCHMENT_ID,
+    BmiVars.CATCHMENT_VALUE,
+    BmiVars.NEXUS_ID,
+    BmiVars.NEXUS_VALUE,
+    BmiVars.UPSTREAM_ID,
+    BmiVars.NGEN_DT,
 ]
 
 
@@ -51,18 +54,20 @@ class BmiTroute(Bmi):
         
         super().__init__()
         self._values: dict[str, NDArray] = {
-            "ngen_dt": np.array([-1], dtype=np.intc),
-            "land_surface_water_source__id": np.zeros(0, dtype=np.intc),
-            "land_surface_water_source__volume_flow_rate": np.zeros(0, dtype=np.double),
-            "upstream_id": np.zeros(0, dtype=int),
-            "channel_water__id": np.zeros(0, dtype=np.int64),
-            "channel_exit_water_x-section__volume_flow_rate": np.zeros(0, dtype=np.float32),
-            "channel_water_flow__speed": np.zeros(0, dtype=np.float32),
-            "channel_water__mean_depth": np.zeros(0, dtype=np.float32),
-            "lake_water__id": np.zeros(0, dtype=np.int64),
-            "lake_water~incoming__volume_flow_rate": np.zeros(0, dtype=np.float32),
-            "lake_water~outgoing__volume_flow_rate": np.zeros(0, dtype=np.float32),
-            "lake_surface__elevation": np.zeros(0, dtype=np.float32),
+            BmiVars.NGEN_DT: np.array([-1], dtype=np.intc),
+            BmiVars.NEXUS_ID: np.zeros(0, dtype=np.intc),
+            BmiVars.NEXUS_VALUE: np.zeros(0, dtype=np.double),
+            BmiVars.CATCHMENT_ID: np.zeros(0, dtype=np.intc),
+            BmiVars.CATCHMENT_VALUE: np.zeros(0, dtype=np.double),
+            BmiVars.UPSTREAM_ID: np.zeros(0, dtype=int),
+            BmiVars.CHANNEL_WATER_ID: np.zeros(0, dtype=np.int64),
+            BmiVars.CHANNEL_WATER_RATE: np.zeros(0, dtype=np.float32),
+            BmiVars.CHANNEL_WATER_SPEED: np.zeros(0, dtype=np.float32),
+            BmiVars.CHANNEL_WATER_DEPTH: np.zeros(0, dtype=np.float32),
+            BmiVars.LAKE_WATER_ID: np.zeros(0, dtype=np.int64),
+            BmiVars.LAKE_WATER_INCOMING: np.zeros(0, dtype=np.float32),
+            BmiVars.LAKE_WATER_OUTGOING: np.zeros(0, dtype=np.float32),
+            BmiVars.LAKE_WATER_ELEVATION: np.zeros(0, dtype=np.float32),
         }
         self._free_serialized()
 
@@ -72,8 +77,9 @@ class BmiTroute(Bmi):
     def update(self):
         self._model.run(self._values)
         # clear current flow values
-        dtype = self._values["land_surface_water_source__volume_flow_rate"].dtype
-        self._values["land_surface_water_source__volume_flow_rate"] = np.zeros(0, dtype=dtype)
+        for inputs_var in [BmiVars.NEXUS_VALUE, BmiVars.CATCHMENT_VALUE]:
+            dtype = self._values[inputs_var].dtype
+            self._values[inputs_var] = np.zeros(0, dtype=dtype)
 
     def update_until(self, time):
         if self._model.time < time:

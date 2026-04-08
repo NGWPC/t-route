@@ -26,6 +26,25 @@ if typing.TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+class BmiVars:
+    CATCHMENT_ID = "catchment_water_source__id"
+    CATCHMENT_VALUE = "catchment_water_source__volume_flow_rate"
+    NEXUS_ID = "land_surface_water_source__id"
+    NEXUS_VALUE = "land_surface_water_source__volume_flow_rate"
+    NGEN_DT = "ngen_dt"
+    UPSTREAM_ID = "upstream_id"
+
+    CHANNEL_WATER_ID = "channel_water__id"
+    CHANNEL_WATER_RATE = "channel_exit_water_x-section__volume_flow_rate"
+    CHANNEL_WATER_SPEED = "channel_water_flow__speed"
+    CHANNEL_WATER_DEPTH = "channel_water__mean_depth"
+
+    LAKE_WATER_ID = "lake_water__id"
+    LAKE_WATER_INCOMING = "lake_water~incoming__volume_flow_rate"
+    LAKE_WATER_OUTGOING = "lake_water~outgoing__volume_flow_rate"
+    LAKE_WATER_ELEVATION = "lake_surface__elevation"
+
+
 class Model:
     dt: int
 
@@ -255,10 +274,10 @@ class Model:
         ])
         if is_nhf:
             flowveldepth = remap_outputs(flowveldepth, self._network.fp_outlet_crosswalk)
-        _update_values("channel_exit_water_x-section__volume_flow_rate", flowveldepth.iloc[:,-3])
-        _update_values("channel_water_flow__speed", flowveldepth.iloc[:,-2])
-        _update_values("channel_water__mean_depth", flowveldepth.iloc[:,-1])
-        _update_values("channel_water__id", flowveldepth.index)
+        _update_values(BmiVars.CHANNEL_WATER_RATE, flowveldepth.iloc[:,-3])
+        _update_values(BmiVars.CHANNEL_WATER_SPEED, flowveldepth.iloc[:,-2])
+        _update_values(BmiVars.CHANNEL_WATER_DEPTH, flowveldepth.iloc[:,-1])
+        _update_values(BmiVars.CHANNEL_WATER_ID, flowveldepth.index)
 
         i_columns = pd.MultiIndex.from_product(
             [range(int(nts)), ["i"]]
@@ -272,10 +291,10 @@ class Model:
                 copy=False,
             )
 
-        wbdy_id = _update_values("lake_water__id", self._network.waterbody_dataframe.index)
-        _update_values("lake_water~incoming__volume_flow_rate", wbdy.loc[wbdy_id].iloc[:,-1])
-        _update_values("lake_water~outgoing__volume_flow_rate", flowveldepth.loc[wbdy_id].iloc[:,-3])
-        _update_values("lake_surface__elevation", flowveldepth.loc[wbdy_id].iloc[:,-1])
+        wbdy_id = _update_values(BmiVars.LAKE_WATER_ID, self._network.waterbody_dataframe.index)
+        _update_values(BmiVars.LAKE_WATER_INCOMING, wbdy.loc[wbdy_id].iloc[:,-1])
+        _update_values(BmiVars.LAKE_WATER_OUTGOING, flowveldepth.loc[wbdy_id].iloc[:,-3])
+        _update_values(BmiVars.LAKE_WATER_ELEVATION, flowveldepth.loc[wbdy_id].iloc[:,-1])
 
         self._timings["output_time"] = time.time() - output_start_time
 
@@ -409,8 +428,8 @@ class Model:
         return self.forcing_parameters["qts_subdivisions"]
 
     def ngen_dt(self, bmi_values: dict[str, NDArray]) -> int:
-        if len(bmi_values.get("ngen_dt", "")) == 1:
-            dt = bmi_values["ngen_dt"][0]
+        if len(bmi_values.get(BmiVars.NGEN_DT, "")) == 1:
+            dt = bmi_values[BmiVars.NGEN_DT][0]
             if dt > 0:
                 return int(dt)
         # backup if NGEN's delta time was not explicitly set
@@ -422,8 +441,13 @@ class Model:
     def _construct_qlats(self, bmi_values: dict[str, NDArray]):
         dt = self.ngen_dt(bmi_values)
         step_time = self._network.t0
-        water_source_ids = bmi_values["land_surface_water_source__id"]
-        water_source_values = bmi_values["land_surface_water_source__volume_flow_rate"]
+        # NHF uses catchment results whilst the other fabrics use accumulated nexus flows
+        if self._is_nhf():
+            water_source_ids = bmi_values[BmiVars.CATCHMENT_ID]
+            water_source_values = bmi_values[BmiVars.CATCHMENT_VALUE]
+        else:
+            water_source_ids = bmi_values[BmiVars.NEXUS_ID]
+            water_source_values = bmi_values[BmiVars.NEXUS_VALUE]
         num_ids = len(water_source_ids)
         # build the dataframe data
         # the flow rate data should be organized as one large array broken into chunks per timestep with sources aligned with the IDs
