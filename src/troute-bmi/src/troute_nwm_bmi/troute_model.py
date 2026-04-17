@@ -6,6 +6,7 @@ import typing
 import yaml
 import numpy as np
 import pandas as pd
+from copy import deepcopy
 from datetime import timedelta, datetime
 from troute.config import Config
 
@@ -114,11 +115,8 @@ class Model:
         forcing_start_time = time.time()
         da_run = {}
         if self.data_assimilation_parameters:
-            run_set = {
-                "nts": self.nts,
-                "final_timestamp": self.t0 + timedelta(seconds=self.nts * self.dt)
-            }
-            da_sets = hnu.build_da_sets(self.data_assimilation_parameters, [run_set], self._network.t0)
+            run_sets = self._build_run_sets()
+            da_sets = hnu.build_da_sets(self.data_assimilation_parameters, run_sets, self._network.t0)
             if da_sets:
                 da_run = da_sets[0]
         self._data_assimilation = DataAssimilation(
@@ -161,68 +159,76 @@ class Model:
         else:
             qlat_add_loc = "middle"
 
-        usgs_df = self._data_assimilation.usgs_df
-        if not usgs_df.empty:
-            usgs_df = usgs_df.loc[:,self._network.t0:]
-
         LOG.debug("Starting routing function")
         route_start_time = time.time()
-        run_results, self._subnetwork = nwm_routing.nwm_route(
-            downstream_connections=self._network.connections,
-            upstream_connections=self._network.reverse_network,
-            waterbodies_in_connections=self._network.waterbody_connections,
-            reaches_bytw=self._network._reaches_by_tw,
-            parallel_compute_method=self.compute_parameters.get("parallel_compute_method", "serial"),
-            compute_kernel=self.compute_parameters.get("compute_kernel"),
-            subnetwork_target_size=self.compute_parameters.get('subnetwork_target_size'),
-            cpu_pool=self.cpu_pool,
-            t0=self.t0,
-            dt=self.dt,
-            nts=nts,
-            qts_subdivisions=qts_subdivisions,
-            independent_networks=self._network.independent_networks,
-            param_df=param_df,
-            q0=self._network.q0,
-            qlats=qlats,
-            eloss_df=self._network._eloss if self._network._eloss is not None else pd.DataFrame(0.0, index=qlats.index, columns=qlats.columns),
-            ssout=self.forcing_parameters.get("ssout"),
-            usgs_df=self._data_assimilation.usgs_df,
-            lastobs_df=self._data_assimilation.lastobs_df,
-            reservoir_usgs_df=self._data_assimilation.reservoir_usgs_df,
-            reservoir_usgs_param_df=self._data_assimilation.reservoir_usgs_param_df,
-            reservoir_usace_df=self._data_assimilation.reservoir_usace_df,
-            reservoir_usace_param_df=self._data_assimilation.reservoir_usace_param_df,
-            reservoir_usbr_df=self._data_assimilation.reservoir_usbr_df,
-            reservoir_usbr_param_df=self._data_assimilation.reservoir_usbr_param_df,
-            reservoir_rfc_df=self._data_assimilation.reservoir_rfc_df,
-            reservoir_rfc_param_df=self._data_assimilation.reservoir_rfc_param_df,
-            great_lakes_df=self._data_assimilation.great_lakes_df,
-            great_lakes_param_df=self._data_assimilation.great_lakes_param_df,
-            great_lakes_climatology_df=self._network.great_lakes_climatology_df,
-            da_parameter_dict=self._data_assimilation.assimilation_parameters,
-            assume_short_ts=self.compute_parameters.get('assume_short_ts', False),
-            return_courant=self.compute_parameters.get('return_courant', False),
-            waterbodies_df=self._network._waterbody_df,
-            data_assimilation_parameters=self.waterbody_parameters,
-            waterbody_types_df=self._network._waterbody_types_df,
-            waterbody_type_specified=self._network.waterbody_type_specified,
-            diffusive_network_data=self._network.diffusive_network_data,
-            topobathy_df=self._network.topobathy_df,
-            refactored_diffusive_domain=self._network.refactored_diffusive_domain,
-            refactored_reaches=self._network.refactored_reaches,
-            subnetwork_list=self._subnetwork,
-            coastal_boundary_depth_df=self._network.coastal_boundary_depth_df,
-            unrefactored_topobathy_df=self._network.unrefactored_topobathy_df,
-            qlat_add_loc=qlat_add_loc,
-        )
+        full_results = []
+        for run in self._build_run_sets(qlats):
+            usgs_df = self._data_assimilation.usgs_df
+            if not usgs_df.empty:
+                usgs_df = usgs_df.loc[:,run["t0"]:]
+
+            run_results, self._subnetwork = nwm_routing.nwm_route(
+                downstream_connections=self._network.connections,
+                upstream_connections=self._network.reverse_network,
+                waterbodies_in_connections=self._network.waterbody_connections,
+                reaches_bytw=self._network._reaches_by_tw,
+                parallel_compute_method=self.compute_parameters.get("parallel_compute_method", "serial"),
+                compute_kernel=self.compute_parameters.get("compute_kernel"),
+                subnetwork_target_size=self.compute_parameters.get('subnetwork_target_size'),
+                cpu_pool=self.cpu_pool,
+                t0=run["t0"],
+                dt=self.dt,
+                nts=run["nts"],
+                qts_subdivisions=qts_subdivisions,
+                independent_networks=self._network.independent_networks,
+                param_df=param_df,
+                q0=self._network.q0,
+                qlats=run.get("qlats", qlats),
+                eloss_df=self._network._eloss if self._network._eloss is not None else pd.DataFrame(0.0, index=qlats.index, columns=qlats.columns),
+                ssout=self.forcing_parameters.get("ssout"),
+                usgs_df=self._data_assimilation.usgs_df,
+                lastobs_df=self._data_assimilation.lastobs_df,
+                reservoir_usgs_df=self._data_assimilation.reservoir_usgs_df,
+                reservoir_usgs_param_df=self._data_assimilation.reservoir_usgs_param_df,
+                reservoir_usace_df=self._data_assimilation.reservoir_usace_df,
+                reservoir_usace_param_df=self._data_assimilation.reservoir_usace_param_df,
+                reservoir_usbr_df=self._data_assimilation.reservoir_usbr_df,
+                reservoir_usbr_param_df=self._data_assimilation.reservoir_usbr_param_df,
+                reservoir_rfc_df=self._data_assimilation.reservoir_rfc_df,
+                reservoir_rfc_param_df=self._data_assimilation.reservoir_rfc_param_df,
+                great_lakes_df=self._data_assimilation.great_lakes_df,
+                great_lakes_param_df=self._data_assimilation.great_lakes_param_df,
+                great_lakes_climatology_df=self._network.great_lakes_climatology_df,
+                da_parameter_dict=self._data_assimilation.assimilation_parameters,
+                assume_short_ts=self.compute_parameters.get('assume_short_ts', False),
+                return_courant=self.compute_parameters.get('return_courant', False),
+                waterbodies_df=self._network._waterbody_df,
+                data_assimilation_parameters=self.waterbody_parameters,
+                waterbody_types_df=self._network._waterbody_types_df,
+                waterbody_type_specified=self._network.waterbody_type_specified,
+                diffusive_network_data=self._network.diffusive_network_data,
+                topobathy_df=self._network.topobathy_df,
+                refactored_diffusive_domain=self._network.refactored_diffusive_domain,
+                refactored_reaches=self._network.refactored_reaches,
+                subnetwork_list=self._subnetwork,
+                coastal_boundary_depth_df=self._network.coastal_boundary_depth_df,
+                unrefactored_topobathy_df=self._network.unrefactored_topobathy_df,
+                qlat_add_loc=qlat_add_loc,
+            )
+
+            # create initial conditions for next loop iteration
+            self._network.new_q0(run_results)
+            self._network.update_waterbody_water_elevation()
+
+            # update reservoir parameters and lastobs_df
+            self._data_assimilation.update_after_compute(run_results, self.dt * run["nts"])
+
+            full_results.extend(run_results)
+
         self._timings["route_time"] = time.time() - route_start_time
 
-        # create initial conditions for next loop iteration
-        self._network.new_q0(run_results)
-        self._network.update_waterbody_water_elevation()
-
-        # update reservoir parameters and lastobs_df
-        self._data_assimilation.update_after_compute(run_results, self.dt * nts)
+        #merged_results = tuple(r[0] for r in full_results)
+        merged_results = self._merge_results(full_results)
 
         LOG.debug("Generating output")
         output_start_time = time.time()
@@ -233,7 +239,7 @@ class Model:
         }
         nwm_output_generator(
             run=run_params,
-            results=run_results,
+            results=merged_results,
             supernetwork_parameters=self.supernetwork_parameters,
             output_parameters=self.output_parameters,
             parity_parameters=self.parity_parameters,
@@ -266,7 +272,7 @@ class Model:
         ).to_flat_index()
 
         flowveldepth = pd.concat(
-            [pd.DataFrame(r[1], index=r[0], columns=qvd_columns) for r in run_results],
+            [pd.DataFrame(r[1], index=r[0], columns=qvd_columns) for r in merged_results],
             copy=False,
         )
         flowveldepth = flowveldepth.drop(columns=[
@@ -282,12 +288,12 @@ class Model:
         i_columns = pd.MultiIndex.from_product(
             [range(int(nts)), ["i"]]
         ).to_flat_index()
-        if is_nhf:
+        if is_nhf or sum(len(w) for r in merged_results for w in r[6]) == 0:
             # Waterbodies are not implemented in NHF yet.
             wbdy = pd.DataFrame(columns=i_columns)
         else:
             wbdy = pd.concat(
-                [pd.DataFrame(r[6], index=r[0], columns=i_columns) for r in run_results],
+                [pd.DataFrame(r[6], index=r[0], columns=i_columns) for r in merged_results],
                 copy=False,
             )
 
@@ -428,12 +434,37 @@ class Model:
         return self.forcing_parameters["qts_subdivisions"]
 
     def ngen_dt(self, bmi_values: dict[str, NDArray]) -> int:
-        if len(bmi_values.get(BmiVars.NGEN_DT, "")) == 1:
+        if len(bmi_values.get(BmiVars.NGEN_DT, [])) == 1:
             dt = bmi_values[BmiVars.NGEN_DT][0]
             if dt > 0:
                 return int(dt)
         # backup if NGEN's delta time was not explicitly set
         return int(self.dt * self.qts_subdivisions)
+
+    def _build_run_sets(self, qlats: pd.DataFrame = None) -> list[dict]:
+        # multiply by qts_subdivisions to align loop size with nts
+        loop_size = self.forcing_parameters.get("max_loop_size", 0)
+        if qlats is None or loop_size <= 0:
+            # default to single run of full range
+            return [{
+                "nts": self.nts,
+                "final_timestamp": self.t0 + timedelta(seconds=self.nts * self.dt),
+                "t0": self.t0
+            }]
+        nts = len(qlats.columns)
+        run_sets = []
+        step = 0
+        while step < nts:
+            next_step = step + loop_size
+            times = qlats.columns[step:next_step]
+            run_sets.append({
+                "nts": len(times) * self.qts_subdivisions,
+                "qlats": qlats[times],
+                "t0": datetime.strptime(times[0], "%Y%m%d%H%M%S"),
+                "final_timestamp": datetime.strptime(times[-1], "%Y%m%d%H%M%S")
+            })
+            step = next_step
+        return run_sets
 
     def _is_nhf(self):
         return self.supernetwork_parameters["network_type"] == "NHF"
@@ -472,6 +503,40 @@ class Model:
             missing = self._network.segment_index[~self._network.segment_index.isin(qlats.index)]
             zeros = pd.DataFrame(data=0.0, index=missing, columns=qlats.columns)
             return pd.concat([qlats, zeros]).sort_index()
+
+    def _merge_results(self, full_results):
+        if len(full_results) == 1:
+            return (full_results[0],)
+
+        def _concat(a, b):
+            if len(a) + len(b) == 0:
+                if len(a.shape) == 2:
+                    shape = (0, a.shape[1] + b.shape[1])
+                else:
+                    shape = a.shape
+                return np.zeros(shape, dtype=a.dtype)
+            return np.concatenate([a, b], axis=1)
+        do_not_merge = {0}
+        merged = list(deepcopy(full_results[0]))
+        # convert to mutable lists
+        for i, value in enumerate(merged):
+            if isinstance(value, tuple):
+                merged[i] = list(value)
+        for results in full_results[1:]:
+            for i, output in enumerate(results):
+                if i not in do_not_merge:
+                    if isinstance(output, (tuple, list)):
+                        for j, sub in enumerate(output):
+                            merged[i][j] = _concat(merged[i][j], sub)
+                    elif isinstance(output, int):
+                        merged[i] += output # completely unsure of this
+                    else: # numpy array
+                        merged[i] = _concat(merged[i], output)
+        # convert back to tuples
+        for i, value in enumerate(merged):
+            if isinstance(value, list):
+                merged[i] = tuple(value)
+        return (tuple(merged),)
 
     def _log_times(self):
         def sec_and_per(title, key: str):
