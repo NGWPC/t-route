@@ -465,7 +465,6 @@ class Model:
             }
         else:
             loop_size = math.ceil(nts / divisions)
-            loop_size = 1000
             # construct run sets based on the loop size determined by available rmemory
             step = 0
             while step < nts:
