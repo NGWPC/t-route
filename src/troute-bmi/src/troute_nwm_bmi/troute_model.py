@@ -527,7 +527,14 @@ class Model:
                 else:
                     shape = a.shape
                 return np.zeros(shape, dtype=a.dtype)
-            return np.concatenate([a, b], axis=1)
+            try:
+                return np.concatenate([a, b], axis=1)
+            except Exception as e:
+                msg = f"Failed attempt to concat results at index {i}"
+                if j >= 0:
+                    msg += "," + str(j)
+                LOG.error(msg)
+                raise
         merged = list(deepcopy(full_results[0]))
         # convert to mutable lists
         for i, value in enumerate(merged):
@@ -535,6 +542,7 @@ class Model:
                 merged[i] = list(value)
         # merge results except for indexing locations
         for results in full_results[1:]:
+            j = -1
             for i in range(1, len(results)):
                 output = results[i]
                 if isinstance(output, (tuple, list)):
