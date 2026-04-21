@@ -261,7 +261,7 @@ class Model:
             link_lake_crosswalk=self._network.link_lake_crosswalk,
             nexus_dict=self._network.nexus_dict,
             poi_crosswalk=self._network.poi_nex_dict or {},
-            fp_outlet_crosswalk=self._network.fp_outlet_crosswalk
+            fp_outlet_crosswalk=self._network.fp_outlet_crosswalk if is_nhf else None,
         )
 
         self._network.new_t0(self.dt, nts)
@@ -445,7 +445,7 @@ class Model:
         # backup if NGEN's delta time was not explicitly set
         return int(self.dt * self.qts_subdivisions)
 
-    def _build_run_sets(self, qlats: pd.DataFrame) -> list[dict]:
+    def _build_run_sets(self, qlats: pd.DataFrame):
         nts = len(qlats.columns)
         # estimate required memory
         required_bytes = qlats.shape[0] \
@@ -528,22 +528,23 @@ class Model:
                     shape = a.shape
                 return np.zeros(shape, dtype=a.dtype)
             return np.concatenate([a, b], axis=1)
-        do_not_merge = {0}
         merged = list(deepcopy(full_results[0]))
         # convert to mutable lists
         for i, value in enumerate(merged):
             if isinstance(value, tuple):
                 merged[i] = list(value)
+        # merge results except for indexing locations
         for results in full_results[1:]:
-            for i, output in enumerate(results):
-                if i not in do_not_merge:
-                    if isinstance(output, (tuple, list)):
-                        for j, sub in enumerate(output):
-                            merged[i][j] = _concat(merged[i][j], sub)
-                    elif isinstance(output, int):
-                        merged[i] += output # completely unsure of this
-                    else: # numpy array
-                        merged[i] = _concat(merged[i], output)
+            for i in range(1, len(results)):
+                output = results[i]
+                if isinstance(output, (tuple, list)):
+                    for j in range(1, len(output)):
+                        sub = output[j]
+                        merged[i][j] = _concat(merged[i][j], sub)
+                elif isinstance(output, int):
+                    merged[i] += output # completely unsure of this
+                else: # numpy array
+                    merged[i] = _concat(merged[i], output)
         # convert back to tuples
         for i, value in enumerate(merged):
             if isinstance(value, list):
