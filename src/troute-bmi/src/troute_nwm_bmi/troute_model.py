@@ -456,7 +456,7 @@ class Model:
         system_memory = psutil.virtual_memory()
         available_memory = system_memory.available * 0.9  # only account for 90% of the currently available memory
         divisions = math.ceil(required_bytes / available_memory)
-        if False and divisions <= 1:
+        if divisions <= 1:
             yield {
                 "nts": nts * self.qts_subdivisions,
                 "qlats": qlats,
