@@ -1,6 +1,7 @@
 """Basic Model Interface backing model for NGEN t-route."""
 from __future__ import annotations
-import logging
+import math
+import psutil
 import time
 import typing
 import yaml
@@ -115,8 +116,11 @@ class Model:
         forcing_start_time = time.time()
         da_run = {}
         if self.data_assimilation_parameters:
-            run_sets = self._build_run_sets()
-            da_sets = hnu.build_da_sets(self.data_assimilation_parameters, run_sets, self._network.t0)
+            run_set = {
+                "nts": self.nts,
+                "final_timestamp": self.t0 + timedelta(seconds=self.nts * self.dt)
+            }
+            da_sets = hnu.build_da_sets(self.data_assimilation_parameters, [run_set], self._network.t0)
             if da_sets:
                 da_run = da_sets[0]
         self._data_assimilation = DataAssimilation(
@@ -441,30 +445,39 @@ class Model:
         # backup if NGEN's delta time was not explicitly set
         return int(self.dt * self.qts_subdivisions)
 
-    def _build_run_sets(self, qlats: pd.DataFrame = None) -> list[dict]:
-        # multiply by qts_subdivisions to align loop size with nts
-        loop_size = self.forcing_parameters.get("max_loop_size", 0)
-        if qlats is None or loop_size <= 0:
-            # default to single run of full range
-            return [{
-                "nts": self.nts,
-                "final_timestamp": self.t0 + timedelta(seconds=self.nts * self.dt),
-                "t0": self.t0
-            }]
+    def _build_run_sets(self, qlats: pd.DataFrame) -> list[dict]:
         nts = len(qlats.columns)
-        run_sets = []
-        step = 0
-        while step < nts:
-            next_step = step + loop_size
-            times = qlats.columns[step:next_step]
-            run_sets.append({
-                "nts": len(times) * self.qts_subdivisions,
-                "qlats": qlats[times],
-                "t0": datetime.strptime(times[0], "%Y%m%d%H%M%S"),
-                "final_timestamp": datetime.strptime(times[-1], "%Y%m%d%H%M%S")
-            })
-            step = next_step
-        return run_sets
+        # estimate required memory
+        required_bytes = qlats.shape[0] \
+            * qlats.shape[1] \
+            * self.qts_subdivisions \
+            * 200  # 200 based size of large arrays made during compute plus some padding
+        # determing loop size based on system available memory
+        system_memory = psutil.virtual_memory()
+        available_memory = system_memory.available * 0.9  # only account for 90% of the currently available memory
+        divisions = math.ceil(required_bytes / available_memory)
+        if False and divisions <= 1:
+            yield {
+                "nts": nts * self.qts_subdivisions,
+                "qlats": qlats,
+                "t0": self.t0,
+                "final_timestamp": self.t0 + timedelta(seconds=self.nts * self.dt)
+            }
+        else:
+            loop_size = math.ceil(nts / divisions)
+            loop_size = 1000
+            # construct run sets based on the loop size determined by available rmemory
+            step = 0
+            while step < nts:
+                next_step = step + loop_size
+                times = qlats.columns[step:next_step]
+                yield {
+                    "nts": len(times) * self.qts_subdivisions,
+                    "qlats": qlats[times],
+                    "t0": datetime.strptime(times[0], "%Y%m%d%H%M%S"),
+                    "final_timestamp": datetime.strptime(times[-1], "%Y%m%d%H%M%S")
+                }
+                step = next_step
 
     def _is_nhf(self):
         return self.supernetwork_parameters["network_type"] == "NHF"
