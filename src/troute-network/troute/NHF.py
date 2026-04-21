@@ -98,7 +98,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
             # Handle different key column names between flowpaths and flowpath_attributes
             flowpaths = nhf["flowpaths"]
-            waterbodies = nhf["waterbodies"]
+            waterbodies = nhf["lakes"]
             gages = nhf["gages"]
             reference_flowpaths = nhf["reference_flowpaths"]
             virtual_flowpaths = nhf["virtual_flowpaths"]

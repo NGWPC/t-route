@@ -258,7 +258,7 @@ def nwm_output_generator(
 
         # replace waterbody lake_ids with outlet link ids
         if (link_lake_crosswalk):
-            flowveldepth = _reindex_lake_to_link_id(flowveldepth, link_lake_crosswalk)
+            flowveldepth = flowveldepth.rename(index=link_lake_crosswalk)
 
         # reindex from link_id to fp_id, keeping outlet links + non-link rows (VFPs)
         if fp_outlet_crosswalk:
