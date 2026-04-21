@@ -189,10 +189,10 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         )
         self._connections = None  # Forces recomputation on first call to self.connections
         self._terminal_codes = set(self._dataframe["downstream"]).difference(self._dataframe.index)  # Outlets
-        self._build_fp_outlet_crosswalk(reference_flowpaths, virtual_flowpaths, self.nexus_remapping)
+        self._build_fp_outlet_crosswalk(reference_flowpaths, virtual_flowpaths)
         self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, self.nexus_remapping)
 
-    def _build_fp_outlet_crosswalk(self, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]):
+    def _build_fp_outlet_crosswalk(self, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame):
         """Build a mapping from routing link ID to fp_id to be used when writing results.
         
         N.B. There are a few strategies one could use to assign an outflow timeseries for a merged flowpath
@@ -204,8 +204,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         ids = reference_flowpaths["fp_id"].dropna().astype(int).unique()
         ids_merged = set(ids).difference(self._dataframe["fp_id"])
 
-        # Aggregate links in _dataframe to get one outlet per fp_id.  Assumes node IDs increase in downstream direction.
-        mapping_base = self._dataframe.reset_index().groupby("fp_id", sort=False)["up_node_id"].max().reset_index().astype(int)
+        # Aggregate links in _dataframe to get one outlet per fp_id.
+        mapping_base = self._dataframe.loc[self._dataframe.groupby("fp_id", sort=False)["segment_order"].idxmax()].reset_index()[["fp_id", "up_node_id"]].astype(int)
         link_2_fp = mapping_base.set_index("up_node_id")["fp_id"].to_dict()
         fp_2_link = mapping_base.set_index("fp_id")["up_node_id"].to_dict()
 
