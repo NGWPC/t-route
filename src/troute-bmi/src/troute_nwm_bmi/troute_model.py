@@ -227,7 +227,7 @@ class Model:
             # update reservoir parameters and lastobs_df
             self._data_assimilation.update_after_compute(run_results, self.dt * run["nts"])
 
-            full_results.extend(run_results)
+            full_results.append(run_results)
 
         self._timings["route_time"] = time.time() - route_start_time
 
@@ -516,9 +516,9 @@ class Model:
             zeros = pd.DataFrame(data=0.0, index=missing, columns=qlats.columns)
             return pd.concat([qlats, zeros]).sort_index()
 
-    def _merge_results(self, full_results):
+    def _merge_results(self, full_results: list[list[tuple]]):
         if len(full_results) == 1:
-            return (full_results[0],)
+            return full_results[0]
 
         def _concat(a, b):
             if len(a) + len(b) == 0:
@@ -529,35 +529,45 @@ class Model:
                 return np.zeros(shape, dtype=a.dtype)
             try:
                 return np.concatenate([a, b], axis=1)
-            except Exception as e:
-                msg = f"Failed attempt to concat results at index {i}"
-                if j >= 0:
-                    msg += "," + str(j)
+            except Exception:
+                msg = f"Failed attempt to concat results at index {sub_i}, {item_i}"
+                if subitem_i >= 0:
+                    msg += ", " + str(subitem_i)
                 LOG.error(msg)
                 raise
         merged = list(deepcopy(full_results[0]))
         # convert to mutable lists
-        for i, value in enumerate(merged):
-            if isinstance(value, tuple):
-                merged[i] = list(value)
+        for i, sub_result in enumerate(merged):
+            if isinstance(sub_result, tuple):
+                sub_result = merged[i] = list(sub_result)
+            for i, item in enumerate(sub_result):
+                if isinstance(item, tuple):
+                    sub_result[i] = list(item)
+
         # merge results except for indexing locations
         for results in full_results[1:]:
-            j = -1
-            for i in range(1, len(results)):
-                output = results[i]
-                if isinstance(output, (tuple, list)):
-                    for j in range(1, len(output)):
-                        sub = output[j]
-                        merged[i][j] = _concat(merged[i][j], sub)
-                elif isinstance(output, int):
-                    merged[i] += output # completely unsure of this
-                else: # numpy array
-                    merged[i] = _concat(merged[i], output)
+            for sub_i, sub_result in enumerate(results):
+                for item_i in range(1, len(sub_result)):
+                    subitem_i = -1
+                    item = sub_result[item_i]
+                    if isinstance(item, (tuple, list)):
+                        for subitem_i in range(1, len(item)):
+                            subitem = item[subitem_i]
+                            merged[sub_i][item_i][subitem_i] = \
+                                _concat(merged[sub_i][item_i][subitem_i], subitem)
+                    elif isinstance(item, int):
+                        merged[sub_i][item_i] += item # completely unsure of this
+                    else: # numpy array
+                        merged[sub_i][item_i] = \
+                            _concat(merged[sub_i][item_i], item)
         # convert back to tuples
-        for i, value in enumerate(merged):
-            if isinstance(value, list):
-                merged[i] = tuple(value)
-        return (tuple(merged),)
+        for i, sub_result in enumerate(merged):
+            for j, item in enumerate(sub_result):
+                if isinstance(item, list):
+                    sub_result[j] = tuple(item)
+            if isinstance(sub_result, list):
+                merged[i] = tuple(sub_result)
+        return tuple(merged)
 
     def _log_times(self):
         def sec_and_per(title, key: str):
