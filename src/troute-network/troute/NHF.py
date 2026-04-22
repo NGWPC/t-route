@@ -372,7 +372,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # Add empty records for other links
         qlat_zero = pd.DataFrame(0.0, index=self.zero_nodes, columns=div_direct_runoff_df.columns)
 
-        self._qlateral = pd.concat([qlat_valid, qlat_zero])
+        self._qlateral = pd.concat([qlat_valid, qlat_zero]).fillna(0.0)
  
 
     def build_et_array(
