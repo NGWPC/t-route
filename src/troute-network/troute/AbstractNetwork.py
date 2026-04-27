@@ -663,7 +663,9 @@ class AbstractNetwork(ABC):
                 else:
                     # TODO: Consider adding option to read cold state from route-link file
                     waterbodies_initial_ds_flow_const = 0.0
-                    waterbodies_initial_depth_const = -1e9
+                    # NOTE: Changing initial depth from -1e9 to OrificeE because it improves routing behavior when
+                    # inital state is unknown. Unsure of broader impacts.
+                    waterbodies_initial_depth_const = self.waterbody_dataframe["OrificeE"]
                     # Set initial states from cold-state
                     waterbodies_initial_states_df = pd.DataFrame(
                         0,

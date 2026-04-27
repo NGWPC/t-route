@@ -279,27 +279,9 @@ class NHFPreprocessMixin:
         else:
             self._poi_nex_dict = None
 
-    def preprocess_waterbodies(self, lakes, nexus):
+    def preprocess_waterbodies(self, lakes):
         if not lakes.empty:
             lake_id_field = "lake_id"
-            # self._waterbody_df = lakes[
-            #     [
-            #         "wb_id",
-            #         "fp_id",
-            #         "ifd",
-            #         "LkArea",
-            #         "LkMxE",
-            #         "OrficeA",
-            #         "OrficeC",
-            #         "OrficeE",
-            #         "WeirC",
-            #         "WeirE",
-            #         "WeirL",
-            #     ]
-            # ].copy()
-
-            # self._waterbody_df = self._waterbody_df.rename(columns={"OrficeA": "OrificeA", "OrficeC": "OrificeC", "OrficeE": "OrificeE"})
-
             self._waterbody_df = lakes[
                 [
                     lake_id_field,
@@ -315,12 +297,12 @@ class NHFPreprocessMixin:
                     "WeirL",
                 ]
             ].copy()
-            # self._waterbody_df = self._waterbody_df.rename(columns={"lake_id": "wb_id"})
 
             self._waterbody_df[lake_id_field] = self._waterbody_df[lake_id_field].astype(int)
-            # self._waterbody_df.loc[:, "lake_id"] = self.waterbody_dataframe.lake_id.astype(float).astype(int)
             self._waterbody_df = self.waterbody_dataframe.set_index(lake_id_field).drop_duplicates().sort_index()
-            
+            assert (self._waterbody_df["OrificeE"] < self._waterbody_df["WeirE"]).all(), "Some orifice elevations are higher than weir elevations, which does not match the conceptual model of the level pool scheme."
+            assert (self._waterbody_df["WeirE"] < self._waterbody_df["LkMxE"]).all(), "Some weir elevations are higher than lake max elevations, which does not match the conceptual model of the level pool scheme."
+
             # Drop any waterbodies that do not have parameters
             self._waterbody_df = self.waterbody_dataframe.dropna()
 
@@ -331,10 +313,6 @@ class NHFPreprocessMixin:
             self._waterbody_df = self._waterbody_df.rename_axis(lake_id_field)
             self._waterbody_df["fp_id"] = self._waterbody_df["fp_id"].astype(int)
             self._duplicate_ids_df = {}  # Relic from how hyfeatures and NHD handled this.
-
-            # self._waterbody_df.loc[self._waterbody_df["fp_id"] == 5263846, "fp_id"] = 5263806
-            # self._waterbody_df.loc[self._waterbody_df["fp_id"] == 5263806, "WeirE"] = 54
-            # self._waterbody_df["LkArea"] /= 1e6
 
             self._dataframe = pd.merge(self.dataframe.reset_index(), self._waterbody_df[["fp_id"]].reset_index(), how="left", left_on="fp_id", right_on="fp_id")
             self._dataframe = self._dataframe.set_index("up_node_id")
