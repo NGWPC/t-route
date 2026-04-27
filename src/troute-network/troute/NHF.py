@@ -118,7 +118,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             )
 
             # Preprocess waterbody objects
-            self.preprocess_waterbodies(waterbodies, virtual_nexus)
+            self.preprocess_waterbodies(waterbodies)
 
             # Preprocess data assimilation objects #TODO: Move to DataAssimilation.py?
             self.preprocess_data_assimilation(
