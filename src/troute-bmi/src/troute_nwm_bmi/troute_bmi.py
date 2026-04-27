@@ -98,21 +98,19 @@ class BmiTroute(Bmi):
         """
         if var_name == "serialization_create":
             self._serialize()
-            return
         elif var_name == "serialization_state":
             self._deserialize(src)
-            return
         elif var_name == "serialization_free":
             self._free_serialized()
-            return
         elif var_name == "reset_time":
             self._model.reset_time()
-            return
-        var = self._values[var_name]
-        if len(src) == len(var):
-            var[:] = src
         else:
-            self._values[var_name] = np.array(src, dtype=var.dtype)
+            _log_set_value(var_name, src)
+            var = self._values[var_name]
+            if len(src) == len(var):
+                var[:] = src
+            else:
+                self._values[var_name] = np.array(src, dtype=var.dtype, copy=True)
 
     def get_value(self, var_name: str):
         """Copy of values.
@@ -403,3 +401,14 @@ class BmiTroute(Bmi):
     def _free_serialized(self):
         self._serialized = np.zeros(0, dtype=np.uint8)
         self._serialized_size = np.zeros(1, dtype=np.uint64)
+
+
+def _log_set_value(var_name: str, array: np.ndarray):
+    size = array.size
+    if size > 5:
+        array = array[:4]
+        end = ", ..."
+    else:
+        end = ""
+    msg = f"Setting {var_name} with {size} elements: [{', '.join(map(str, array))}{end}]"
+    LOG.debug(msg)

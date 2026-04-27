@@ -149,7 +149,10 @@ class Model:
     def run(self, bmi_values: dict[str, NDArray]):
         is_nhf = self._is_nhf()
         qts_subdivisions = self.qts_subdivisions
-        nts = self.nts
+        output_params = {
+            "t0": self.t0,
+            "dt": self.dt
+        }
 
         LOG.debug("Assembling forcing dataframe")
         forcing_start_time = time.time()
@@ -165,8 +168,10 @@ class Model:
 
         LOG.debug("Starting routing function")
         route_start_time = time.time()
-        full_results = []
+        full_results = None
+        nts = 0
         for run in self._build_run_sets(qlats):
+            nts += run["nts"]
             usgs_df = self._data_assimilation.usgs_df
             if not usgs_df.empty:
                 usgs_df = usgs_df.loc[:,run["t0"]:]
@@ -227,23 +232,19 @@ class Model:
             # update reservoir parameters and lastobs_df
             self._data_assimilation.update_after_compute(run_results, self.dt * run["nts"])
 
-            full_results.append(run_results)
+            if full_results is None:
+                full_results = run_results
+            else:
+                full_results = full_results.append_timesteps(run_results)
 
         self._timings["route_time"] = time.time() - route_start_time
 
-        #merged_results = tuple(r[0] for r in full_results)
-        merged_results = self._merge_results(full_results)
-
         LOG.debug("Generating output")
         output_start_time = time.time()
-        run_params = {
-            "t0": self.t0,
-            "dt": self.dt,
-            "nts": nts,
-        }
+        output_params["nts"] = nts
         nwm_output_generator(
-            run=run_params,
-            results=merged_results,
+            run=output_params,
+            results=full_results,
             supernetwork_parameters=self.supernetwork_parameters,
             output_parameters=self.output_parameters,
             parity_parameters=self.parity_parameters,
@@ -266,45 +267,45 @@ class Model:
 
         self._network.new_t0(self.dt, nts)
 
-        # compute BMI outputs
-        def _update_values(name: str, values: pd.Series | pd.Index):
-            dtype = bmi_values[name].dtype
-            array = bmi_values[name] = values.to_numpy(dtype=dtype, copy=True)
-            return array
-        qvd_columns = pd.MultiIndex.from_product(
-            [range(nts), ["q", "v", "d", "ql"]]
-        ).to_flat_index()
+        # # compute BMI outputs
+        # def _update_values(name: str, values: pd.Series | pd.Index):
+        #     dtype = bmi_values[name].dtype
+        #     array = bmi_values[name] = values.to_numpy(dtype=dtype, copy=True)
+        #     return array
+        # qvd_columns = pd.MultiIndex.from_product(
+        #     [range(nts), ["q", "v", "d", "ql"]]
+        # ).to_flat_index()
 
-        flowveldepth = pd.concat(
-            [pd.DataFrame(r[1], index=r[0], columns=qvd_columns) for r in merged_results],
-            copy=False,
-        )
-        flowveldepth = flowveldepth.drop(columns=[
-            col for col in flowveldepth.columns if col[1] == "ql"
-        ])
-        if is_nhf:
-            flowveldepth = remap_outputs(flowveldepth, self._network.fp_outlet_crosswalk)
-        _update_values(BmiVars.CHANNEL_WATER_RATE, flowveldepth.iloc[:,-3])
-        _update_values(BmiVars.CHANNEL_WATER_SPEED, flowveldepth.iloc[:,-2])
-        _update_values(BmiVars.CHANNEL_WATER_DEPTH, flowveldepth.iloc[:,-1])
-        _update_values(BmiVars.CHANNEL_WATER_ID, flowveldepth.index)
+        # flowveldepth = pd.concat(
+        #     [pd.DataFrame(r[1], index=r[0], columns=qvd_columns) for r in full_results],
+        #     copy=False,
+        # )
+        # flowveldepth = flowveldepth.drop(columns=[
+        #     col for col in flowveldepth.columns if col[1] == "ql"
+        # ])
+        # if is_nhf:
+        #     flowveldepth = remap_outputs(flowveldepth, self._network.fp_outlet_crosswalk)
+        # _update_values(BmiVars.CHANNEL_WATER_RATE, flowveldepth.iloc[:,-3])
+        # _update_values(BmiVars.CHANNEL_WATER_SPEED, flowveldepth.iloc[:,-2])
+        # _update_values(BmiVars.CHANNEL_WATER_DEPTH, flowveldepth.iloc[:,-1])
+        # _update_values(BmiVars.CHANNEL_WATER_ID, flowveldepth.index)
 
-        i_columns = pd.MultiIndex.from_product(
-            [range(int(nts)), ["i"]]
-        ).to_flat_index()
-        if is_nhf or sum(len(w) for r in merged_results for w in r[6]) == 0:
-            # Waterbodies are not implemented in NHF yet.
-            wbdy = pd.DataFrame(columns=i_columns)
-        else:
-            wbdy = pd.concat(
-                [pd.DataFrame(r[6], index=r[0], columns=i_columns) for r in merged_results],
-                copy=False,
-            )
+        # i_columns = pd.MultiIndex.from_product(
+        #     [range(int(nts)), ["i"]]
+        # ).to_flat_index()
+        # if is_nhf or sum(len(w) for r in full_results for w in r[6]) == 0:
+        #     # Waterbodies are not implemented in NHF yet.
+        #     wbdy = pd.DataFrame(columns=i_columns)
+        # else:
+        #     wbdy = pd.concat(
+        #         [pd.DataFrame(r[6], index=r[0], columns=i_columns) for r in full_results],
+        #         copy=False,
+        #     )
 
-        wbdy_id = _update_values(BmiVars.LAKE_WATER_ID, self._network.waterbody_dataframe.index)
-        _update_values(BmiVars.LAKE_WATER_INCOMING, wbdy.loc[wbdy_id].iloc[:,-1])
-        _update_values(BmiVars.LAKE_WATER_OUTGOING, flowveldepth.loc[wbdy_id].iloc[:,-3])
-        _update_values(BmiVars.LAKE_WATER_ELEVATION, flowveldepth.loc[wbdy_id].iloc[:,-1])
+        # wbdy_id = _update_values(BmiVars.LAKE_WATER_ID, self._network.waterbody_dataframe.index)
+        # _update_values(BmiVars.LAKE_WATER_INCOMING, wbdy.loc[wbdy_id].iloc[:,-1])
+        # _update_values(BmiVars.LAKE_WATER_OUTGOING, flowveldepth.loc[wbdy_id].iloc[:,-3])
+        # _update_values(BmiVars.LAKE_WATER_ELEVATION, flowveldepth.loc[wbdy_id].iloc[:,-1])
 
         self._timings["output_time"] = time.time() - output_start_time
 
@@ -464,6 +465,7 @@ class Model:
                 "final_timestamp": self.t0 + timedelta(seconds=self.nts * self.dt)
             }
         else:
+            LOG.info(f"T-Route detected a high probability of exceeding system memory. The processing will be broken into {divisions} chunks.")
             loop_size = math.ceil(nts / divisions)
             # construct run sets based on the loop size determined by available rmemory
             step = 0
@@ -491,6 +493,7 @@ class Model:
         else:
             water_source_ids = bmi_values[BmiVars.NEXUS_ID]
             water_source_values = bmi_values[BmiVars.NEXUS_VALUE]
+        LOG.debug(f"Qlat data constructed from {len(water_source_values)} values between {water_source_values.min()} and {water_source_values.max()}")
         num_ids = len(water_source_ids)
         # build the dataframe data
         # the flow rate data should be organized as one large array broken into chunks per timestep with sources aligned with the IDs

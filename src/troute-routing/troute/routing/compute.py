@@ -1,7 +1,8 @@
+from __future__ import annotations
 from collections import defaultdict
 from itertools import chain
 from functools import partial
-from typing import Literal
+from typing import Literal, TYPE_CHECKING, Iterable
 from joblib import delayed, Parallel
 from datetime import datetime, timedelta
 import time
@@ -18,6 +19,11 @@ from troute.routing.fast_reach import diffusive
 import logging
 import ewts
 LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+
+if TYPE_CHECKING:
+    from typing import Annotated
+    from numpy.typing import NDArray
+
 
 _compute_func_map = defaultdict(
     compute_network_structured,
@@ -1903,7 +1909,7 @@ def compute_nhd_routing_v02(
                 )
             )
 
-    return results, subnetwork_list
+    return RoutingResultsCollection(results), subnetwork_list
 
 def compute_diffusive_routing(
     results,
@@ -2050,3 +2056,314 @@ def compute_diffusive_routing(
         )
 
     return results_diffusive
+
+
+class _RoutingResultsParser:
+    def __init__(self, raw_results: tuple):
+        self._raw = raw_results
+
+    def __getitem__(self, index: int):
+        return self._raw[index]
+
+    def __iter__(self):
+        return iter(self._raw)
+
+    def __len__(self):
+        return len(self._raw)
+
+    @property
+    def ids(self) -> np.ndarray[tuple[int], np.intp]:
+        """Segment IDs as 1D array"""
+        return self._raw[0]
+
+    def _append(self, a: np.ndarray, b: np.ndarray):
+        axis = len(a.shape) - 1
+        return np.concatenate([a, b], axis=axis)
+
+    def append(self, other: _RoutingResultsParser):
+        copy = list(self)
+        # skip first element as that is the ID
+        for i in range(1, len(self)):
+            copy[i] = self._append(self[i], other[i])
+        return self.__class__(copy)
+
+    def merge(self, other: _RoutingResultsParser):
+        copy = [None] * len(self)
+        for i, current in enumerate(self):
+            copy[i] = np.concatenate([current, other[i]], axis=0)
+        return self.__class__(copy)
+
+    def align_ids(self, source: _RoutingResultsParser):
+        if self.ids.size and not np.array_equal(self.ids, source.ids):
+            copy = [None] * len(self)
+            sorter = np.argsort(source.ids)
+            for i, item in enumerate(self):
+                copy[i] = item[sorter]
+            return self.__class__(copy)
+        return self
+
+    def _set_index(self, value, index: int):
+        if isinstance(self._raw, tuple):
+            self._raw = list(self._raw)
+        self._raw[index] = value
+
+
+class RoutingResultsCollection:
+    def __init__(self, results: Iterable[tuple]):
+        self.results = [RoutingResults(r) for r in results]
+
+    def __getitem__(self, index: int):
+        return self.results[index]
+
+    def __iter__(self):
+        return iter(self.results)
+
+    def __len__(self):
+        return len(self.results)
+
+    def flow_velocity_depth(self, nts: int, drop_ql: bool = False):
+        columns = pd.MultiIndex.from_product(
+            [range(nts), ["q", "v", "d", "ql"]]
+        ).to_flat_index()
+        dfs = []
+        for result in self.results:
+            df = pd.DataFrame(
+                result.flow,
+                index=result.ids,
+                columns=columns,
+            )
+            dfs.append(df)
+        flowveldepth = pd.concat(dfs, copy=False)
+        if drop_ql:
+            flowveldepth = flowveldepth.drop(columns=[
+                col for col in flowveldepth.columns if col[1] == "ql"
+            ])
+        return flowveldepth
+
+    def waterbodies(self, nts: int):
+        columns = pd.MultiIndex.from_product(
+            [range(nts), ["i"]]
+        ).to_flat_index()
+        dfs = []
+        for result in self.results:
+            df = pd.DataFrame(
+                result.upstream,
+                index=result.ids,
+                columns=columns,
+            )
+            dfs.append(df)
+        return pd.concat(dfs, copy=False)
+
+    def courant(self, nts: int):
+        columns = pd.MultiIndex.from_product(
+            [range(nts), ["cn", "ck", "X"]]
+        ).to_flat_index()
+        dfs = []
+        for result in self.results:
+            df = pd.DataFrame(
+                result.courant,
+                index=result.ids,
+                columns=columns,
+            )
+            dfs.append(df)
+        return pd.concat(dfs, copy=False)
+
+    def nudge(self):
+        return np.concatenate(
+            [result.nudge for result in self.results]
+        )
+
+    def usgs_position_ids(self):
+        return np.concatenate(
+            [result.usgs_reservoir.ids for result in self.results]
+        )
+
+    def merged_results(self) -> RoutingResults:
+        """Merge the separate results into one single results."""
+        if len(self.results) > 1:
+            merged = RoutingResults([None] * len(self.results[0]))
+            merged.ids = np.concatenate([r.ids for r in self.results])
+            merged.flow = np.concatenate([r.flow for r in self.results], axis=0)
+            merged.courant = 0 # fix when this is no longer a placeholder
+            merged.lastobs = RoutingLastObs.merge([r.lastobs for r in self.results])
+            merged.usgs_reservoir = RoutingReservoir.merge([r.usgs_reservoir for r in self.results])
+            merged.usace_reservoir = RoutingReservoir.merge([r.usace_reservoir for r in self.results])
+            merged.usbr_reservoir = RoutingReservoir.merge([r.usbr_reservoir for r in self.results])
+            merged.upstream = np.concatenate([r.upstream for r in self.results], axis=0)
+            merged.rfc_reservoir = RoutingRfc.merge([r.rfc_reservoir for r in self.results])
+            merged.nudge = np.concatenate([r.nudge for r in self.results], axis=0)
+            merged.great_lakes = RoutingGreatLakes.merge([r.great_lakes for r in self.results])
+            return merged
+        return self.results[0]
+
+    def append_timesteps(self, other: RoutingResultsCollection):
+        a = self.merged_results()
+        b = other.merged_results()
+        b = b.align_ids(a)
+        return RoutingResultsCollection([a.append(b)])
+
+
+class RoutingResults(_RoutingResultsParser):
+    def align_ids(self, source: RoutingResults):
+        if not np.array_equal(self.ids, source.ids):
+            self = RoutingResults(list(self))
+            sorter = np.argsort(source.ids)
+            self.ids = self.ids[sorter]
+            self.flow = self.flow[sorter]
+            if self.upstream.size > 0:
+                self.upstream = self.upstream[sorter]
+            if self.nudge.size > 0:
+                self.nudge = self.nudge[sorter]
+        self.usgs_reservoir = self.usgs_reservoir.align_ids(source.usgs_reservoir)
+        self.usace_reservoir = self.usace_reservoir.align_ids(source.usace_reservoir)
+        self.usbr_reservoir = self.usbr_reservoir.align_ids(source.usbr_reservoir)
+        self.rfc_reservoir = self.rfc_reservoir.align_ids(source.rfc_reservoir)
+        self.great_lakes = self.great_lakes.align_ids(source.great_lakes)
+        return self
+
+    def append(self, other: RoutingResults):
+        appended = RoutingResults(list(self))
+        appended.flow = self._append(self.flow, other.flow)
+        appended.lastobs = self.lastobs.append(other.lastobs)
+        appended.usgs_reservoir = self.usgs_reservoir.append(other.usgs_reservoir)
+        appended.usace_reservoir = self.usace_reservoir.append(other.usace_reservoir)
+        appended.usbr_reservoir = self.usbr_reservoir.append(other.usbr_reservoir)
+        appended.upstream = self._append(self.upstream, other.upstream)
+        appended.rfc_reservoir = self.rfc_reservoir.append(other.rfc_reservoir)
+        # remove leading timestep from other's nudge
+        appended.nudge = self._append(self.nudge, other.nudge[:, 1:])
+        appended.great_lakes = self.great_lakes.append(other.great_lakes)
+        return appended
+
+    @property
+    def ids(self) -> np.ndarray[tuple[int], np.intp]:
+        """Catchment IDs as 1D array"""
+        return self._raw[0]
+    @ids.setter
+    def ids(self, value):
+        self._set_index(value, 0)
+
+    @property
+    def flow(self) -> np.ndarray[tuple[int], np.dtype[np.float32]]:
+        """Flow velocity depth 2D array: (num_ids, nts * 4)"""
+        return self._raw[1]
+    @flow.setter
+    def flow(self, value):
+        self._set_index(value, 1)
+
+    @property
+    def courant(self) -> Literal[0]:
+        """Is currently a placeholder, so the value will always be 0."""
+        return self._raw[2]
+    @courant.setter
+    def courant(self, value):
+        self._set_index(value, 2)
+
+    @property
+    def lastobs(self):
+        return RoutingLastObs(self._raw[3])
+    @lastobs.setter
+    def lastobs(self, value):
+        self._set_index(list(value), 3)
+
+    @property
+    def usgs_reservoir(self):
+        return RoutingReservoir(self._raw[4])
+    @usgs_reservoir.setter
+    def usgs_reservoir(self, value):
+        self._set_index(list(value), 4)
+
+    @property
+    def usace_reservoir(self):
+        return RoutingReservoir(self._raw[5])
+    @usace_reservoir.setter
+    def usace_reservoir(self, value):
+        self._set_index(list(value), 5)
+
+    @property
+    def usbr_reservoir(self):
+        return RoutingReservoir(self._raw[6])
+    @usbr_reservoir.setter
+    def usbr_reservoir(self, value):
+        self._set_index(list(value), 6)
+
+    @property
+    def upstream(self) -> np.ndarray[tuple[int], np.float32]:
+        """Upstream 2D array: (num_ids, nts)"""
+        return self._raw[7]
+    @upstream.setter
+    def upstream(self, value):
+        self._set_index(value, 7)
+
+    @property
+    def rfc_reservoir(self):
+        return RoutingRfc(self._raw[8])
+    @rfc_reservoir.setter
+    def rfc_reservoir(self, value):
+        self._set_index(value, 8)
+
+    @property
+    def nudge(self) -> np.ndarray[tuple[int, int], np.float32]:
+        """Nudge 2D array: (num_ids, nts + 1)"""
+        return self._raw[9]
+    @nudge.setter
+    def nudge(self, value):
+        self._set_index(value, 9)
+
+    @property
+    def great_lakes(self):
+        return RoutingGreatLakes(self._raw[10])
+    @great_lakes.setter
+    def great_lakes(self, value):
+        self._set_index(list(value), 10)
+
+class RoutingLastObs(_RoutingResultsParser):
+    @property
+    def times(self) -> np.ndarray[tuple[int], np.float32]:
+        return self._raw[1]
+
+    @property
+    def values(self) -> np.ndarray[tuple[int], np.float32]:
+        return self._raw[2]
+
+
+class RoutingReservoir(_RoutingResultsParser):
+    @property
+    def update_times(self) -> np.ndarray[tuple[int], np.float32]:
+        return self._raw[1]
+
+    @property
+    def persisted_outflow(self) -> np.ndarray[tuple[int], np.float32]:
+        return self._raw[2]
+
+    @property
+    def persistence_index(self) -> np.ndarray[tuple[int], np.float32]:
+        return self._raw[3]
+
+    @property
+    def persistence_update_time(self) -> np.ndarray[tuple[int], np.float32]:
+        return self._raw[4]
+
+
+class RoutingRfc(_RoutingResultsParser):
+    @property
+    def update_times(self) -> np.ndarray[tuple[int], np.float32]:
+        return self._raw[1]
+
+    @property
+    def timeseries(self) -> np.ndarray[tuple[int], np.intp]:
+        return self._raw[2]
+
+
+class RoutingGreatLakes(_RoutingResultsParser):
+    @property
+    def outflows(self) -> np.ndarray[tuple[int], np.float32]:
+        return self._raw[1]
+
+    @property
+    def timestamps(self) -> np.ndarray[tuple[int], np.intp]:
+        return self._raw[2]
+
+    @property
+    def update_times(self) -> np.ndarray[tuple[int], np.intp]:
+        return self._raw[3]
