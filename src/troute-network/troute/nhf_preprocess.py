@@ -241,7 +241,9 @@ class NHFPreprocessMixin:
         reference_flowpaths
     ):
         self._nexus_dict = virtual_flowpaths.groupby("dn_virtual_nex_id")["virtual_fp_id"].apply(list).to_dict()  ##{id: toid}
-        if not hydrolocations.empty:
+        if hydrolocations.empty or gages.empty:
+            self._poi_nex_dict = None
+        else:
             waterbody_ids = hydrolocations.merge(
                 waterbodies,
                 left_on='hy_id',
@@ -268,8 +270,6 @@ class NHFPreprocessMixin:
                 how='left',
             )
             self._poi_nex_dict = result.groupby("hy_id")["dn_virtual_nex_id"].apply(list).to_dict()
-        else:
-            self._poi_nex_dict = None
 
     def preprocess_waterbodies(self, lakes, nexus):
         # TODO work on waterbodies support for NHF

@@ -157,6 +157,7 @@ class Model:
         LOG.debug("Assembling forcing dataframe")
         forcing_start_time = time.time()
         qlats = self._construct_qlats(bmi_values)
+        LOG.debug(str(qlats))
         self._timings["forcing_time"] += time.time() - forcing_start_time
 
         # Build param_df
