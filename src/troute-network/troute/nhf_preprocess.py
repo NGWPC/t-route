@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import pyogrio
-from troute.nhf_topology import replace_waterbodies_connections
 import xarray as xr
 from joblib import Parallel, delayed
 
@@ -281,6 +280,7 @@ class NHFPreprocessMixin:
 
     def preprocess_waterbodies(self, lakes):
         if not lakes.empty:
+            # Formate waterbodies df
             lake_id_field = "lake_id"
             self._waterbody_df = lakes[
                 [
@@ -297,12 +297,12 @@ class NHFPreprocessMixin:
                     "WeirL",
                 ]
             ].copy()
-
             self._waterbody_df[lake_id_field] = self._waterbody_df[lake_id_field].astype(int)
             self._waterbody_df = self.waterbody_dataframe.set_index(lake_id_field).drop_duplicates().sort_index()
+
+            # Validate
             assert (self._waterbody_df["OrificeE"] < self._waterbody_df["WeirE"]).all(), "Some orifice elevations are higher than weir elevations, which does not match the conceptual model of the level pool scheme."
             assert (self._waterbody_df["WeirE"] < self._waterbody_df["LkMxE"]).all(), "Some weir elevations are higher than lake max elevations, which does not match the conceptual model of the level pool scheme."
-
             # Drop any waterbodies that do not have parameters
             self._waterbody_df = self.waterbody_dataframe.dropna()
 
@@ -314,24 +314,7 @@ class NHFPreprocessMixin:
             self._waterbody_df["fp_id"] = self._waterbody_df["fp_id"].astype(int)
             self._duplicate_ids_df = {}  # Relic from how hyfeatures and NHD handled this.
 
-            self._dataframe = pd.merge(self.dataframe.reset_index(), self._waterbody_df[["fp_id"]].reset_index(), how="left", left_on="fp_id", right_on="fp_id")
-            self._dataframe = self._dataframe.set_index("up_node_id")
-
-            wbody_conn = self.dataframe[[lake_id_field]].dropna().astype(int).reset_index()
-
-            self._waterbody_connections = wbody_conn.set_index("up_node_id").to_dict()[lake_id_field]
-
-            # if waterbodies are being simulated, adjust the connections graph so that
-            # waterbodies are collapsed to single nodes. Also, build a mapping between
-            # waterbody outlet segments and lake ids
-            break_network_at_waterbodies = self.waterbody_parameters.get("break_network_at_waterbodies", False)
-            if break_network_at_waterbodies:
-                self._connections, self._link_lake_crosswalk = replace_waterbodies_connections(
-                    self.connections, self.waterbody_connections
-                )
-            else:
-                self._link_lake_crosswalk = None
-            self._remap_div_weighting_waterbodies()
+            self._refactor_reservoirs(lake_id_field)
 
             # Add lat, lon, and crs columns for LAKEOUT files:
             lakeout = self.output_parameters.get("lakeout_output", None)
@@ -394,16 +377,102 @@ class NHFPreprocessMixin:
             self._waterbody_type_specified = False
             self._link_lake_crosswalk = None
             self._duplicate_ids_df = pd.DataFrame()
+
+
     
-    def _remap_div_weighting_waterbodies(self) -> None:
-        """Remap div flows from a routing link to the waterbody it falls within."""
-        # Build lookup table
-        max_id = self.vfp_nex_ids.max()
-        lookup = np.arange(max_id + 1)  # or zeros if you want default = 0
-        for k, v in self._waterbody_connections.items():
-            lookup[k] = v
+    def _refactor_reservoirs(self, lake_id_field: str = "lake_id"):
+        """Refactor network connectivity to explicitly represent reservoirs (waterbodies) and their interactions with flowpaths and links.
+
+        Conceptual model:
+            - Multiple flowpaths may exist within a single waterbody.
+            - A single flowpath may intersect multiple waterbodies.
+
+        For each flowpath containing at least one waterbody (``outlet_fp``):
+            1. Identify all flowpaths contained within any waterbody intersecting
+            the outlet flowpath (``all_fp``).
+            2. Identify all network links associated with these flowpaths (``all_links``).
+            3. Remove all links in ``all_links`` from the network dataframe.
+            4. For each waterbody associated with ``outlet_fp``, insert ordered
+            connections into the network connectivity structure.
+            5. For each link whose downstream node lies within ``all_links``,
+            redirect its connection to the most upstream waterbody.
+            6. Create a synthetic headwater link (``qlat_link``) that drains into
+            the appropriate waterbody link (``wb_link``).
+            7. Redirect all lateral inflows (qlats) from ``all_fp`` to ``qlat_link``.
+
+        Parameters
+        ----------
+        lake_id_field : str, optional
+            Column name used to uniquely identify waterbodies in the input
+            dataframe. Default is ``"lake_id"``.
+
+        """
+        # Until this is implemented in NHF, spoof here
+        lake_overlaps = self._waterbody_df[["fp_id"]].reset_index().copy()
+
+        max_node_id = self.dataframe.index.max()
+        lookup = np.arange(max_node_id + 1)
+        df_rows = []
+        index_vals = []
+        for outlet_fp, wb_group in self._waterbody_df.groupby("fp_id"):
+            # Until this is implemented in NHF, spoof here
+            wb_group["lake_order"] = np.arange(len(wb_group))
+            wb_group = wb_group.sort_values("lake_order")
+
+            # Get all flowpaths associated with the waterbody(ies)
+            all_fp = lake_overlaps[lake_overlaps[lake_id_field].isin(wb_group.index.values)]
+            all_links = self.dataframe[self.dataframe["fp_id"].isin(all_fp["fp_id"])].reset_index()
+            ds = set(all_links["downstream"]).difference(all_links["up_node_id"]).pop()
+            us = set(all_links["up_node_id"]).difference(all_links["downstream"]).pop()
+
+            # Remove references to those links
+            self._dataframe = self._dataframe.drop(all_links["up_node_id"])                
+            if self._connections is not None:
+                for i in all_links["up_node_id"]:
+                    # Remove connection
+                    self._connections.pop(i)
+            else:
+                self.connections
+            self.zero_nodes = list(set(self.zero_nodes).difference(all_links["up_node_id"].values))
+
+            # Modify connections to use waterbodies instead
+            for i in wb_group.index.values:
+                self._connections[i] = [ds]
+                ds = i
+            for i in self.dataframe[self.dataframe["downstream"] == us].index:
+                self._connections[i] = [ds]
+
+            # Add synthetic headwater reach
+            self.vfp_nex_ids
+            headwater = all_links[all_links["fp_id"] == outlet_fp].iloc[0]
+            head_id = int(headwater["up_node_id"])
+            self._connections[head_id] = [ds]
+            headwater["downstream"] = ds
+            row = headwater.drop(labels="up_node_id").to_dict()
+            df_rows.append(row)
+            index_vals.append(head_id)
+
+            # TODO: consider putting these within single condensed for loop with above.
+            # Reroute all div flows to headwater
+            for i in all_links["up_node_id"]:
+                lookup[i] = head_id
+
+            # Remap outflow from waterbody to fps
+            # self._fp_outlet_crosswalk[wb_group.index[0]] = []
+            for i in all_links["up_node_id"]:
+                if i in self._fp_outlet_crosswalk:
+                    self._fp_outlet_crosswalk[wb_group.index[0]].extend(self._fp_outlet_crosswalk[i])
+                    del self._fp_outlet_crosswalk[i]
 
         self.vfp_nex_ids = lookup[self.vfp_nex_ids]
+        self._link_lake_crosswalk = None  # Handled by _fp_outlet_crosswalk
+        self._waterbody_connections = {i: i for i in self._waterbody_df.index}
+
+        row_df = pd.DataFrame(df_rows, index=index_vals)
+        row_df.index.name = self._dataframe.index.name
+        row_df = row_df.astype(self._dataframe.dtypes.to_dict())
+        self._dataframe = pd.concat([self._dataframe, row_df])
+
 
     def preprocess_data_assimilation(
         self,
