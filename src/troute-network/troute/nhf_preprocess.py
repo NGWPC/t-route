@@ -253,7 +253,7 @@ class NHFPreprocessMixin:
                 )
             else:
                 waterbody_ids = pd.DataFrame(columns=["hy_id", "ref_fp_id"])
-            if not hydrolocations.empty:
+            if not hydrolocations.empty and not gages.empty:
                 gage_ids = hydrolocations.merge(
                     gages,
                     left_on='hy_id',
