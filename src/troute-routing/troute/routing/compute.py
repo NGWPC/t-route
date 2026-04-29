@@ -2087,11 +2087,13 @@ class _RoutingResultsParser:
             copy[i] = self._append(self[i], other[i])
         return self.__class__(copy)
 
-    def merge(self, other: _RoutingResultsParser):
-        copy = [None] * len(self)
-        for i, current in enumerate(self):
-            copy[i] = np.concatenate([current, other[i]], axis=0)
-        return self.__class__(copy)
+    @classmethod
+    def merge(cls, to_merge: list[_RoutingResultsParser]):
+        size = len(to_merge[0])
+        data = [None] * size
+        for i in range(size):
+            data[i] = np.concatenate([r[i] for r in to_merge], axis=0)
+        return cls(data)
 
     def align_ids(self, source: _RoutingResultsParser):
         if self.ids.size and not np.array_equal(self.ids, source.ids):
@@ -2316,6 +2318,7 @@ class RoutingResults(_RoutingResultsParser):
     @great_lakes.setter
     def great_lakes(self, value):
         self._set_index(list(value), 10)
+
 
 class RoutingLastObs(_RoutingResultsParser):
     @property
