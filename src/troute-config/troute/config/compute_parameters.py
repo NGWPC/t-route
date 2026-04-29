@@ -234,6 +234,10 @@ class ReservoirPersistenceDA(BaseModel):
     """
     If True, Great Lakes will perform data assimilation.
     """
+    reservoir_persistence_usbr: bool = False
+    """
+    If True, USBR Reservoirs will perform data assimilation.
+    """
 
     crosswalk_usgs_gage_field: str = "usgs_gage_id"
     """
@@ -315,6 +319,11 @@ class DataAssimilationParameters(BaseModel):
     Directory path to usace timeslice files.
     NOTE: required for USACE reservoir DA
     """
+    usbr_timeslices_folder: Optional[DirectoryPath] = None
+    """
+    Directory path to USBR timeslice files.
+    NOTE: required for USBR reservoir DA
+    """
     canada_timeslices_folder: Optional[DirectoryPath] = None
     """
     Directory path to canadian timeslice files. 
@@ -376,6 +385,10 @@ class ForcingParameters(BaseModel):
     Time step size (seconds). Default is 5 mintues
     """
     qlat_input_folder: Optional[DirectoryPath] = None
+    et_input_folder: Optional[DirectoryPath] = None
+    """
+    Name of the directory where ET forcings are stored for channel loss
+    """
     nts: Optional[int] = 288
     """
     Number of timesteps. This value, multiplied by 'dt', gives the total simulation time in seconds.
@@ -407,6 +420,10 @@ class ForcingParameters(BaseModel):
     """
     Globbing file pattern to identify q_lateral forcing files.
     """
+    et_file_pattern_filter: Optional[str] = None
+    """
+    Globbing file pattern to identify ET forcing files.
+    """
 
     qlat_forcing_sets: Optional[List[QLateralForcingSet]] = None
     binary_nexus_file_folder: Optional[DirectoryPath] = None
@@ -424,6 +441,15 @@ class ForcingParameters(BaseModel):
     NOTE: Only used if running diffusive routing.
     """
 
+    ssout: float = 0.0
+    """
+    Parameter SSOUT specifies the sub-surface loss and is defined as the rate in CMS of sub-surface outflow along the stream channel.
+    """
+
+    peadj: float = 1.0 
+    """
+    When ET data are used the daily ET values can be adjusted with a constant adjustment factor (PEADJ). This is calibratable
+    """
 
 class ComputeParameters(BaseModel):
     """
