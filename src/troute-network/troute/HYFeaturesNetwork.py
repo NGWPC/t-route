@@ -280,12 +280,6 @@ def load_bmi_data(
 class HYFeaturesNetwork(AbstractNetwork):
     """ """
 
-    __slots__ = [
-        "_upstream_terminal",
-        "_nexus_latlon",
-        "_duplicate_ids_df",
-    ]
-
     def __init__(
         self,
         supernetwork_parameters,

@@ -1,6 +1,5 @@
 """A file to contain the main function for running nhf routing"""
 import argparse
-import logging
 import time
 
 import numpy as np
@@ -16,9 +15,8 @@ from troute.DataAssimilation import DataAssimilation
 import troute.nhd_network_utilities_v02 as nnu
 import troute.hyfeature_network_utilities as hnu
 
-
-from troute_ewts import MODULE_NAME, configure_logging
-LOG = logging.getLogger(MODULE_NAME)
+import ewts
+LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 def nhf_routing(argv):
 
@@ -33,8 +31,6 @@ def nhf_routing(argv):
     )
     args = parser.parse_args(argv)
 
-    configure_logging()
-    
     # unpack user inputs
     (
         log_parameters,

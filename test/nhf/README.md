@@ -16,7 +16,6 @@ python -m nwm_routing -V5 -f retro.yaml
 python ../generate_diagnostics.py conecuh_case/retro.yaml
 ```
 
-
 **Note** If you need to subset the hydrofabric from a larger area to a specific watershed, you can use subset_nhf.py.  Example below for Conecuh
 ```consol
 python ../subset_nhf.py --source-gpkg /path/to/big_nhf.gpkg" --out-gpkg domain/437343.gpkg --outlet-fp-id 437343
