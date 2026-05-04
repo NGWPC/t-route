@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from pprint import pformat
 from typing import Any
+import logging
 
 import numpy as np
 import pandas as pd
@@ -17,8 +18,7 @@ from troute.nhf_preprocess import (
     read_qlat_file,
 )
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+LOG = logging.getLogger("troute")
 
 
 __verbose__ = False

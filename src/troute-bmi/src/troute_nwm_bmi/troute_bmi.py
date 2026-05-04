@@ -1,17 +1,19 @@
 """Basic Model Interface implementation for NGEN t-route."""
 from __future__ import annotations
+import os
 import pickle
 import typing
 import numpy as np
 from bmipy import Bmi
+import logging
 
 from .troute_model import Model, BmiVars
+from nwm_routing.log_level_set import use_ewts_logger
 
 if typing.TYPE_CHECKING:
     from numpy.typing import NDArray
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+LOG = logging.getLogger("troute")
 
 _VAR_NAME_UNITS_MAP = {
     BmiVars.CATCHMENT_VALUE: ['streamflow_cms', 'm3 s-1'],
@@ -49,8 +51,8 @@ class BmiTroute(Bmi):
     _model: Model
 
     def __init__(self):
-        # This is required prior to the first log message is issued by t-route.
-        LOG.bind()
+        if os.getenv("NGEN_EWTS_LOGGING", "").lower() == "true":
+            use_ewts_logger()
         
         super().__init__()
         self._values: dict[str, NDArray] = {

@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import multiprocessing
 from datetime import datetime, timedelta
+import logging
 
 import os
 import pathlib
@@ -17,8 +18,7 @@ from troute.nhd_network_utilities_v02 import organize_independent_networks
 import troute.nhd_io as nhd_io 
 from .AbstractRouting import MCOnly, MCwithDiffusive, MCwithDiffusiveNatlXSectionNonRefactored, MCwithDiffusiveNatlXSectionRefactored
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+LOG = logging.getLogger("troute")
 
 class AbstractNetwork(ABC):
     """

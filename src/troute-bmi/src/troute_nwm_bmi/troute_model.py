@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 from copy import deepcopy
 from datetime import timedelta, datetime
+import logging
+
 from troute.config import Config
 
 from troute.NHDNetwork import NHDNetwork
@@ -21,8 +23,7 @@ import troute.hyfeature_network_utilities as hnu
 import nwm_routing.nwm_route as nwm_routing
 from nwm_routing.output import nwm_output_generator, remap_outputs
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+LOG = logging.getLogger("troute")
 
 if typing.TYPE_CHECKING:
     from numpy.typing import NDArray

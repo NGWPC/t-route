@@ -9,8 +9,7 @@ from itertools import chain
 from troute.nhd_network import reverse_network, reachable
 from troute.nhd_network_utilities_v02 import organize_independent_networks, build_refac_connections
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+LOG = logging.getLogger("troute")
 
 def read_diffusive_domain(domain_file):
     '''

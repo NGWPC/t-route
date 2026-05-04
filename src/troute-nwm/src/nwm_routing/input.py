@@ -7,9 +7,9 @@ import yaml
 import troute.nhd_io as nhd_io
 import troute.nhd_network_utilities_v02 as nnu
 from troute.config import Config
+from nwm_routing.log_level_set import log_level_set
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+LOG = logging.getLogger("troute")
 
 def _input_handler_v04(args):
     '''
@@ -58,6 +58,9 @@ def _input_handler_v04(args):
     hybrid_parameters = compute_parameters.get('hybrid_parameters')
     parity_parameters = output_parameters.get('wrf_hydro_parity_check')
     data_assimilation_parameters = compute_parameters.get('data_assimilation_parameters')
+
+    # configure python logger
+    log_level_set(log_parameters)
     
     return (
         log_parameters,

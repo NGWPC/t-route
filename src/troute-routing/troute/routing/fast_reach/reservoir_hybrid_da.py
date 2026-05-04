@@ -1,7 +1,6 @@
 import numpy as np
 import logging
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+LOG = logging.getLogger("troute")
 
 def _modify_for_projected_storage(
     inflow, 

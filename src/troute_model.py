@@ -2,14 +2,14 @@ import pandas as pd
 import numpy as np
 import yaml
 import time
+import logging
 
 from troute.config import Config
 import nwm_routing.nwm_route as tr
 
 from troute.network import bmi_array2df as a2df
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+LOG = logging.getLogger("troute")
 
 class troute_model():
 
