@@ -6,16 +6,20 @@
 #set root folder of github repo (should be named t-route)
 REPOROOT=`pwd`
 
-# Path to nwm-ewts python package source (development fallback)
-: "${EWTS_PY_ROOT:=$REPOROOT/../../../nwm-ewts/runtime/python/ewts}"
+########################################################################
+# Change/Verify these values when adopting this script into another org:
+#   GH_ORG, EWTS_GIT_REF
+########################################################################
+# EWTS GitHub source
+: "${GH_ORG:=NGWPC}"
+: "${EWTS_GIT_REF:=development}"
+: "${EWTS_GIT_URL:=https://github.com/${GH_ORG}/nwm-ewts.git}"
+: "${EWTS_PY_SUBDIR:=runtime/python/ewts}"
 
-# Preferred EWTS install prefix and wheel location
-: "${EWTS_PREFIX:=/tmp/ewts_install}"
-: "${EWTS_WHEEL_DIR:=$EWTS_PREFIX/python/dist}"
-
-echo "using EWTS_PY_ROOT=${EWTS_PY_ROOT}"
-echo "using EWTS_PREFIX=${EWTS_PREFIX}"
-echo "using EWTS_WHEEL_DIR=${EWTS_WHEEL_DIR}"
+echo "Installing EWTS from GitHub:"
+echo "  repo: ${EWTS_GIT_URL}"
+echo "  ref:  ${EWTS_GIT_REF}"
+echo "  dir:  ${EWTS_PY_SUBDIR}"
 
 #For each build step, you can set these to true to make it build
 #or set it to anything else (or unset) to skip that step
@@ -128,27 +132,12 @@ if [[ "$build_reservoir_kernel" == true ]]; then
 fi
 
 # Remove any old/stale ewts/troute_ewts from the environment to avoid shadowing
-pip uninstall -y ewts troute_ewts >/dev/null 2>&1 || true
+$PIP_CMD uninstall -y ewts troute_ewts >/dev/null 2>&1 || true
 
-# Prefer installed EWTS wheel; fall back to source tree for development
-EWTS_WHEEL=""
-if compgen -G "${EWTS_WHEEL_DIR}/ewts-*.whl" > /dev/null; then
-  EWTS_WHEEL=$(ls -1t "${EWTS_WHEEL_DIR}"/ewts-*.whl | head -n 1)
-fi
-
-if [[ -n "${EWTS_WHEEL}" ]]; then
-  echo "Installing EWTS from wheel: ${EWTS_WHEEL}"
-  pip install "${EWTS_WHEEL}" || exit
-else
-  echo "No EWTS wheel found in ${EWTS_WHEEL_DIR}"
-  echo "Falling back to source install from ${EWTS_PY_ROOT}"
-
-  if [[ ${WITH_EDITABLE} == true ]]; then
-    pip install --editable "${EWTS_PY_ROOT}" || exit
-  else
-    pip install "${EWTS_PY_ROOT}" || exit
-  fi
-fi
+# Install EWTS directly from GitHub
+$PIP_CMD install \
+    "ewts @ git+${EWTS_GIT_URL}@${EWTS_GIT_REF}#subdirectory=${EWTS_PY_SUBDIR}" \
+    || exit
 
 if [[ "$build_framework" == true ]]; then
   cd $REPOROOT/src/troute-network
