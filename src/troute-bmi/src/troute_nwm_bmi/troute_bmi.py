@@ -51,7 +51,7 @@ class BmiTroute(Bmi):
     _model: Model
 
     def __init__(self):
-        if os.getenv("NGEN_EWTS_LOGGING", "").lower() == "true":
+        if os.getenv("NGEN_EWTS_LOGGING", "").upper() == "ENABLED":
             use_ewts_logger()
         
         super().__init__()
