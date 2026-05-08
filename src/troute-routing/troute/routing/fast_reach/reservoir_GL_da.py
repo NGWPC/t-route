@@ -1,8 +1,8 @@
 import numpy as np
 from datetime import datetime, timedelta
 import logging
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+import logging
+LOG = logging.getLogger("TROUTE")
 
 def great_lakes_da(
     gage_obs,

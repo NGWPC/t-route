@@ -20,8 +20,8 @@ from datetime import datetime, timedelta
 
 from troute.nhd_network import reverse_dict
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+import logging
+LOG = logging.getLogger("TROUTE")
 
 def read_netcdf(geo_file_path):
     '''
