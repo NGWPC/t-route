@@ -16,6 +16,11 @@ dependencies = {file = ["requirements.txt"]}
 test = [
     "pytest==8.3.2",
     "bmipy==2.0.0",
+    "xarray[zarr]~=2024.7.0",
+    "zarr~=2.18.2",
+    "fsspec~=2025.10.0",
+    "dataretrieval~=1.1.2",
+    "s3fs~=2025.10.0"
 ]
 
 jupyter = [
@@ -24,5 +29,5 @@ jupyter = [
     "ipykernel>=6.29.0,<7.0.0",
     "jupyterlab>=3.6.7,<4.0.0",
     "xarray>=2024.1.1",
-    "matplotlib-inline>=0.1.6"
+    "matplotlib-inline>=0.1.6",
 ]

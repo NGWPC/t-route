@@ -19,8 +19,8 @@ from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data
 import netCDF4
 from troute.config import Config
 
-from troute_ewts import configure_logging
-LOG = configure_logging()
+import ewts
+LOG = ewts.get_logger(ewts.T_ROUTE_ID)
 
 class DAforcing_model():
 
@@ -28,6 +28,9 @@ class DAforcing_model():
         """
         
         """
+        # This is required prior to the first log message is issued by t-route.
+        LOG.bind()
+
         __slots__ = ['_data_assimilation_parameters', '_forcing_parameters', '_compute_parameters',
                      '_output_parameters', '_usgs_df', 'reservoir_usgs_df', 'reservoir_usace_df', 
                      '_rfc_timeseries_df', '_lastobs_df', '_t0', '_q0', '_waterbody_df', '_write_lite_restart',
@@ -57,7 +60,6 @@ class DAforcing_model():
                      '_waterbodyLR_Array'                    
                      ]
 
-
         if bmi_cfg_file:
             (compute_parameters,
              forcing_parameters,
@@ -79,6 +81,7 @@ class DAforcing_model():
             
             usgs_persistence = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_persistence_da', {}).get('reservoir_persistence_usgs', False)
             usace_persistence = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_persistence_da', {}).get('reservoir_persistence_usace', False)
+            usbr_persistence = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_persistence_da', {}).get('reservoir_persistence_usbr', False)
             rfc = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_rfc_da', {}).get('reservoir_rfc_forecasts', False)
 
             qc_threshold = data_assimilation_parameters.get('qc_threshold')
@@ -130,6 +133,14 @@ class DAforcing_model():
             # USACE Observations        
             if usace_persistence:
                 usace_timeslice_path = str(data_assimilation_parameters.get('usace_timeslices_folder'))
+                self._reservoir_usace_df = _read_timeslice_files(usace_timeslice_path, 
+                                                                 timeslice_dates,
+                                                                 qc_threshold,
+                                                                 900, #15 minutes
+                                                                 cpu_pool,)
+            
+            if usbr_persistence:
+                usace_timeslice_path = str(data_assimilation_parameters.get('usbr_timeslices_folder'))
                 self._reservoir_usace_df = _read_timeslice_files(usace_timeslice_path, 
                                                                  timeslice_dates,
                                                                  qc_threshold,

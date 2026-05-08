@@ -4,7 +4,8 @@ from typing import Any, Dict
 
 import pandas as pd
 import pytest
-from nwm_routing.__main__ import new_nwm_q0, nwm_route
+from nwm_routing.__main__ import new_nwm_q0
+from nwm_routing.nwm_route import nwm_route
 from nwm_routing.preprocess import nwm_forcing_preprocess
 from test import find_cwd, temporarily_change_dir
 
@@ -119,12 +120,16 @@ def test_nwm_route_execution(
             param_df,
             q0,
             qlats,
+            pd.DataFrame(), #empty dataframe for ET .. not supported here
+            0.0, # SSOUT not supported in run
             usgs_df,
             lastobs_df,
             reservoir_usgs_df,
             reservoir_usgs_param_df,
             reservoir_usace_df,
             reservoir_usace_param_df,
+            pd.DataFrame(), #empty dataframe for USBR data...not needed unless running via BMI
+            pd.DataFrame(), #empty dataframe for USBR data...not needed unless running via BMI
             pd.DataFrame(), #empty dataframe for RFC data...not needed unless running via BMI
             pd.DataFrame(), #empty dataframe for RFC param data...not needed unless running via BMI
             pd.DataFrame(), #empty dataframe for great lakes data...
