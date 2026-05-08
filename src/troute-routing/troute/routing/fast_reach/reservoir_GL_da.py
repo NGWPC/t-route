@@ -1,7 +1,6 @@
 import numpy as np
 from datetime import datetime, timedelta
 import logging
-import logging
 LOG = logging.getLogger("TROUTE")
 
 def great_lakes_da(

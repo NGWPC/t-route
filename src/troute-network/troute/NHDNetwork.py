@@ -12,7 +12,6 @@ import pyarrow.parquet as pq
 from troute.nhd_network import reverse_dict, extract_waterbody_connections, gage_mapping, extract_connections, replace_waterbodies_connections
 
 import logging
-import logging
 LOG = logging.getLogger("TROUTE")
 
 __showtiming__ = True #FIXME pass flag

@@ -9,7 +9,6 @@ import troute.nhd_network_utilities_v02 as nnu
 from troute.config import Config
 from nwm_routing.log_level_set import log_level_set
 
-import logging
 LOG = logging.getLogger("TROUTE")
 
 def _input_handler_v04(args):

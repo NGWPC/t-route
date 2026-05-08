@@ -14,7 +14,6 @@ import pyarrow.parquet as pq
 
 import troute.nhd_io as nhd_io
 
-import logging
 LOG = logging.getLogger("TROUTE")
 
 def build_da_sets(da_params, run_sets, t0):

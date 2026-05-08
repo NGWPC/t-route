@@ -31,7 +31,6 @@ import troute.nhd_network_utilities_v02 as nnu
 import troute.hyfeature_network_utilities as hnu
 import sys
 
-import logging
 LOG = logging.getLogger("TROUTE")
 
 '''

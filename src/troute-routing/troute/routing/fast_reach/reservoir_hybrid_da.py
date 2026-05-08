@@ -1,6 +1,5 @@
 import numpy as np
 import logging
-import logging
 LOG = logging.getLogger("TROUTE")
 
 def _modify_for_projected_storage(

@@ -11,7 +11,6 @@ import re
 import time
 import logging
 
-import logging
 LOG = logging.getLogger("TROUTE")
 
 from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data
