@@ -1,10 +1,8 @@
 #!/bin/bash
+set -e
 
-#TODO add options for clean/noclean, make/nomake, cython/nocython
-#TODO include instuctions on blowing away entire package for fresh install e.g. rm -r ~/venvs/mesh/lib/python3.6/site-packages/troute/*
-
-#set root folder of github repo (should be named t-route)
-REPOROOT=`pwd`
+# This script install EWTS for running t-route in ngen then  
+# calls the compiler.sh to install remaining dependencies
 
 ########################################################################
 # Change/Verify these values when adopting this script into another org:
@@ -21,43 +19,14 @@ echo "  repo: ${EWTS_GIT_URL}"
 echo "  ref:  ${EWTS_GIT_REF}"
 echo "  dir:  ${EWTS_PY_SUBDIR}"
 
-#For each build step, you can set these to true to make it build
-#or set it to anything else (or unset) to skip that step
-build_mc_kernel=true
-build_diffusive_tulane_kernel=true
-build_reservoir_kernel=true
-build_framework=true
-build_routing=true
-build_config=true
-build_nwm=true
-build_bmi=true
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ -z "$F90" ]
-then
-    export F90="gfortran"
-    echo "using F90=${F90}"
-fi
-
-if [ -z "$CC" ]
-then
-    export CC="gcc"
-    echo "using CC=${CC}"
-fi
-
-# Parse command line arguments
-WITH_EDITABLE=true
-USE_UV=false
+# Parse only BMI/EWTS-specific args here.
+# Pass all standard compiler.sh args through unchanged.
+PASSTHROUGH_ARGS=()
 
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        no-e)
-            WITH_EDITABLE=false
-            shift
-            ;;
-        --uv)
-            USE_UV=true
-            shift
-            ;;
+    case "$1" in
         --gh-org)
             GH_ORG="$2"
             if [[ -z "$2" ]]; then
@@ -76,132 +45,34 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         *)
-            echo "Unknown option: $1"
-            echo "Usage: $0 [no-e] [--uv]"
-            echo "  no-e: Install packages without editable mode"
-            echo "  --uv: Use uv pip instead of pip"
-            exit 1
+            PASSTHROUGH_ARGS+=("$1")
+            shift
             ;;
     esac
 done
 
-# set pip command based on UV flag
+# Use uv pip if --uv is present in the arguments
+USE_UV=false
+for arg in "${PASSTHROUGH_ARGS[@]}"; do
+    if [[ "$arg" == "--uv" ]]; then
+        USE_UV=true
+        break
+    fi
+done
+
 if [[ "$USE_UV" == true ]]; then
     PIP_CMD="uv pip"
-    echo "Using uv pip for package installation"
+    echo "Using uv pip for EWTS installation"
 else
     PIP_CMD="pip"
-    echo "Using standard pip for package installation"
-fi
-
-#if you have custom static library paths, uncomment below and export them
-#export LIBRARY_PATH=<paths>:$LIBRARY_PATH
-#if you have custom dynamic library paths, uncomment below and export them
-#export LD_LIBRARY_PATHS=<paths>:$LD_LIBRARY_PATHS
-
-if [ -z "$NETCDF" ]
-then
-    export NETCDFINC=/usr/include/openmpi-x86_64/
-    # set alternative NETCDF variable include path, for example for WSL
-    # (Windows Subsystems for Linux).
-    #
-    # EXAMPLE USAGE: export NETCDFALTERNATIVE=$HOME/.conda/envs/py39/include/
-    # (before ./compiler.sh)
-    if [ -n "$NETCDFALTERNATIVE" ]
-    then
-        echo "using alternative NETCDF inc ${NETCDFALTERNATIVE}"
-        export NETCDFINC=$NETCDFALTERNATIVE
-    fi
-else
-    export NETCDFINC="${NETCDF}"
-fi
-echo "using NETCDFINC=${NETCDFINC}"
-
-
-if  [[ "$build_mc_kernel" == true ]]; then
-  #building reach and resevoir kernel files .o
-  cd $REPOROOT/src/kernel/muskingum/
-  make clean
-  make  || exit
-  make install || exit
-fi
-
-if  [[ "$build_diffusive_tulane_kernel" == true ]]; then
-  #building reach and resevoir kernel files .o
-  cd $REPOROOT/src/kernel/diffusive/
-  make clean
-  make diffusive.o
-  make pydiffusive.o
-  make chxsec_lookuptable.o
-  make pychxsec_lookuptable.o
-  make install || exit
-fi
-
-if [[ "$build_reservoir_kernel" == true ]]; then
-    cd $REPOROOT/src/kernel/reservoir/
-    make clean
-    #make NETCDFINC=`nc-config --includedir` || exit
-    #make binding_lp.a
-    #make install_lp || exit
-    make
-    make install_lp || exit
-    make install_rfc || exit
+    echo "Using standard pip for EWTS installation"
 fi
 
 # Remove any old/stale ewts/troute_ewts from the environment to avoid shadowing
 $PIP_CMD uninstall -y ewts troute_ewts >/dev/null 2>&1 || true
 
-# Install EWTS directly from GitHub
 $PIP_CMD install \
-    "ewts @ git+${EWTS_GIT_URL}@${EWTS_GIT_REF}#subdirectory=${EWTS_PY_SUBDIR}" \
-    || exit
+    "ewts @ git+${EWTS_GIT_URL}@${EWTS_GIT_REF}#subdirectory=${EWTS_PY_SUBDIR}"
 
-if [[ "$build_framework" == true ]]; then
-  cd $REPOROOT/src/troute-network
-  if [[ ${WITH_EDITABLE} == true ]]; then
-    pip install --no-build-isolation --config-setting='--build-option=--use-cython' --editable . --config-setting='editable_mode=compat' || exit
-  else
-    pip install --no-build-isolation --config-setting='--build-option=--use-cython' . || exit
-  fi
-fi
-
-if [[ "$build_routing" == true ]]; then
-    #updates troute package with the execution script
-    cd $REPOROOT/src/troute-routing
-    rm -rf build
-    
-    if [[ ${WITH_EDITABLE} == true ]]; then
-        $PIP_CMD install --no-build-isolation --config-setting='--build-option=--use-cython' --editable . --config-setting='editable_mode=compat' || exit
-    else
-        $PIP_CMD install --no-build-isolation --config-setting='--build-option=--use-cython' . || exit
-    fi
-fi
-
-if [[ "$build_config" == true ]]; then
-    #updates troute package with the execution script
-    cd $REPOROOT/src/troute-config
-    if [[ ${WITH_EDITABLE} == true ]]; then
-        $PIP_CMD install --editable . || exit
-    else
-        $PIP_CMD install . || exit
-    fi
-fi
-
-if [[ "$build_nwm" == true ]]; then
-    #updates troute package with the execution script
-    cd $REPOROOT/src/troute-nwm
-    if [[ ${WITH_EDITABLE} == true ]]; then
-        $PIP_CMD install --editable . || exit
-    else
-        $PIP_CMD install . || exit
-    fi
-fi
-
-if [[ "$build_bmi" == true ]]; then
-  cd $REPOROOT/src/troute-bmi
-  if [[ ${WITH_EDITABLE} == true ]]; then
-    pip install --editable . || exit
-  else
-    pip install . || exit
-  fi
-fi
+# Now run the original standalone compiler script for everything else
+exec "${SCRIPT_DIR}/compiler.sh" "${PASSTHROUGH_ARGS[@]}"
