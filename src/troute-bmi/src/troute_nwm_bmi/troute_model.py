@@ -21,8 +21,8 @@ import troute.hyfeature_network_utilities as hnu
 import nwm_routing.nwm_route as nwm_routing
 from nwm_routing.output import nwm_output_generator, remap_outputs
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+import logging
+LOG = logging.getLogger("TROUTE")
 
 if typing.TYPE_CHECKING:
     from numpy.typing import NDArray

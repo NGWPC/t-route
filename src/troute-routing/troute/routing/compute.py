@@ -17,8 +17,7 @@ import troute.routing.diffusive_utils_v02 as diff_utils
 from troute.routing.fast_reach import diffusive
 
 import logging
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+LOG = logging.getLogger("TROUTE")
 
 if TYPE_CHECKING:
     from typing import Annotated
