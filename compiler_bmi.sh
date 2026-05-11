@@ -6,6 +6,21 @@
 #set root folder of github repo (should be named t-route)
 REPOROOT=`pwd`
 
+########################################################################
+# Change/Verify these values when adopting this script into another org:
+#   GH_ORG, EWTS_GIT_REF
+########################################################################
+# EWTS GitHub source
+: "${GH_ORG:=NGWPC}"
+: "${EWTS_GIT_REF:=development}"
+: "${EWTS_GIT_URL:=https://github.com/${GH_ORG}/nwm-ewts.git}"
+: "${EWTS_PY_SUBDIR:=runtime/python/ewts}"
+
+echo "Installing EWTS from GitHub:"
+echo "  repo: ${EWTS_GIT_URL}"
+echo "  ref:  ${EWTS_GIT_REF}"
+echo "  dir:  ${EWTS_PY_SUBDIR}"
+
 #For each build step, you can set these to true to make it build
 #or set it to anything else (or unset) to skip that step
 build_mc_kernel=true
@@ -42,6 +57,23 @@ while [[ $# -gt 0 ]]; do
         --uv)
             USE_UV=true
             shift
+            ;;
+        --gh-org)
+            GH_ORG="$2"
+            if [[ -z "$2" ]]; then
+                echo "Error: --gh-org requires a value"
+                exit 1
+            fi
+            EWTS_GIT_URL="https://github.com/${GH_ORG}/nwm-ewts.git"
+            shift 2
+            ;;
+        --ewts-ref)
+            EWTS_GIT_REF="$2"
+            if [[ -z "$2" ]]; then
+                echo "Error: --ewts-ref requires a value"
+                exit 1
+            fi
+            shift 2
             ;;
         *)
             echo "Unknown option: $1"
@@ -86,14 +118,12 @@ fi
 echo "using NETCDFINC=${NETCDFINC}"
 
 
-
-if [[ "$build_mc_kernel" == true ]]; then
-    #building reach and resevoir kernel files .o
-    cd $REPOROOT/src/kernel/muskingum/
-    make clean
-    make || exit
-    make install || exit
-
+if  [[ "$build_mc_kernel" == true ]]; then
+  #building reach and resevoir kernel files .o
+  cd $REPOROOT/src/kernel/muskingum/
+  make clean
+  make  || exit
+  make install || exit
 fi
 
 if  [[ "$build_diffusive_tulane_kernel" == true ]]; then
@@ -119,27 +149,12 @@ if [[ "$build_reservoir_kernel" == true ]]; then
 fi
 
 # Remove any old/stale ewts/troute_ewts from the environment to avoid shadowing
-pip uninstall -y ewts troute_ewts >/dev/null 2>&1 || true
+$PIP_CMD uninstall -y ewts troute_ewts >/dev/null 2>&1 || true
 
-# Prefer installed EWTS wheel; fall back to source tree for development
-EWTS_WHEEL=""
-if compgen -G "${EWTS_WHEEL_DIR}/ewts-*.whl" > /dev/null; then
-  EWTS_WHEEL=$(ls -1t "${EWTS_WHEEL_DIR}"/ewts-*.whl | head -n 1)
-fi
-
-if [[ -n "${EWTS_WHEEL}" ]]; then
-  echo "Installing EWTS from wheel: ${EWTS_WHEEL}"
-  pip install "${EWTS_WHEEL}" || exit
-else
-  echo "No EWTS wheel found in ${EWTS_WHEEL_DIR}"
-  echo "Falling back to source install from ${EWTS_PY_ROOT}"
-
-  if [[ ${WITH_EDITABLE} == true ]]; then
-    pip install --editable "${EWTS_PY_ROOT}" || exit
-  else
-    pip install "${EWTS_PY_ROOT}" || exit
-  fi
-fi
+# Install EWTS directly from GitHub
+$PIP_CMD install \
+    "ewts @ git+${EWTS_GIT_URL}@${EWTS_GIT_REF}#subdirectory=${EWTS_PY_SUBDIR}" \
+    || exit
 
 if [[ "$build_framework" == true ]]; then
   cd $REPOROOT/src/troute-network
