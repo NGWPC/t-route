@@ -6,21 +6,6 @@
 #set root folder of github repo (should be named t-route)
 REPOROOT=`pwd`
 
-########################################################################
-# Change/Verify these values when adopting this script into another org:
-#   GH_ORG, EWTS_GIT_REF
-########################################################################
-# EWTS GitHub source
-: "${GH_ORG:=NGWPC}"
-: "${EWTS_GIT_REF:=development}"
-: "${EWTS_GIT_URL:=https://github.com/${GH_ORG}/nwm-ewts.git}"
-: "${EWTS_PY_SUBDIR:=runtime/python/ewts}"
-
-echo "Installing EWTS from GitHub:"
-echo "  repo: ${EWTS_GIT_URL}"
-echo "  ref:  ${EWTS_GIT_REF}"
-echo "  dir:  ${EWTS_PY_SUBDIR}"
-
 #For each build step, you can set these to true to make it build
 #or set it to anything else (or unset) to skip that step
 build_mc_kernel=true
@@ -130,14 +115,6 @@ if [[ "$build_reservoir_kernel" == true ]]; then
     make install_lp || exit
     make install_rfc || exit
 fi
-
-# Remove any old/stale ewts/troute_ewts from the environment to avoid shadowing
-$PIP_CMD uninstall -y ewts troute_ewts >/dev/null 2>&1 || true
-
-# Install EWTS directly from GitHub
-$PIP_CMD install \
-    "ewts @ git+${EWTS_GIT_URL}@${EWTS_GIT_REF}#subdirectory=${EWTS_PY_SUBDIR}" \
-    || exit
 
 if [[ "$build_framework" == true ]]; then
   cd $REPOROOT/src/troute-network

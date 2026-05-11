@@ -8,8 +8,9 @@ import nwm_routing.nwm_route as tr
 
 from troute.network import bmi_array2df as a2df
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+import logging
+LOGGER_NAME = "TROUTE"
+LOG = logging.getLogger(LOGGER_NAME)
 
 class troute_model():
 

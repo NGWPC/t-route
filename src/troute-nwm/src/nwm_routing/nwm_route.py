@@ -4,8 +4,8 @@ from typing import Literal
 
 from troute.routing.compute import compute_nhd_routing_v02, compute_diffusive_routing, compute_log_mc, compute_log_diff
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+import logging
+LOG = logging.getLogger("TROUTE")
 
 def nwm_route(
     downstream_connections,

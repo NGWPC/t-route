@@ -4,14 +4,17 @@ import pickle
 import typing
 import numpy as np
 from bmipy import Bmi
+import logging
+
+from ewts.helper import getenv_any
+from ewts.logger import configure_existing_logger
 
 from .troute_model import Model, BmiVars
 
 if typing.TYPE_CHECKING:
     from numpy.typing import NDArray
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+LOG = logging.getLogger("TROUTE")
 
 _VAR_NAME_UNITS_MAP = {
     BmiVars.CATCHMENT_VALUE: ['streamflow_cms', 'm3 s-1'],
@@ -49,9 +52,10 @@ class BmiTroute(Bmi):
     _model: Model
 
     def __init__(self):
-        # This is required prior to the first log message is issued by t-route.
-        LOG.bind()
-        
+        val = getenv_any("EWTS_USE_NGEN_BRIDGE", "").strip().lower()
+        if val in {"1", "true", "yes", "on"}:
+            configure_existing_logger(LOG)
+
         super().__init__()
         self._values: dict[str, NDArray] = {
             BmiVars.NGEN_DT: np.array([-1], dtype=np.intc),

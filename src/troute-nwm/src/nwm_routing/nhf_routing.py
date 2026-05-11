@@ -15,8 +15,8 @@ from troute.DataAssimilation import DataAssimilation
 import troute.nhd_network_utilities_v02 as nnu
 import troute.hyfeature_network_utilities as hnu
 
-import ewts
-LOG = ewts.get_logger(ewts.T_ROUTE_ID)
+import logging
+LOG = logging.getLogger("TROUTE")
 
 def nhf_routing(argv):
 
