@@ -123,6 +123,7 @@ def make_config_yaml(config_path: str, hydrofabric_path: str, qlat_input_folder:
         "network_topology_parameters": {
             "supernetwork_parameters": {
                 "geo_file_path": hydrofabric_path,
+                "network_type": "NHF"
             },
             "waterbody_parameters": {
                 "break_network_at_waterbodies": True,
