@@ -301,18 +301,23 @@ class NHFPreprocessMixin:
             self._waterbody_df = self.waterbody_dataframe.set_index(lake_id_field).drop_duplicates().sort_index()
 
             # Validate
-            assert (self._waterbody_df["OrificeE"] < self._waterbody_df["WeirE"]).all(), "Some orifice elevations are higher than weir elevations, which does not match the conceptual model of the level pool scheme."
-            assert (self._waterbody_df["WeirE"] < self._waterbody_df["LkMxE"]).all(), "Some weir elevations are higher than lake max elevations, which does not match the conceptual model of the level pool scheme."
+            rows = self._waterbody_df[self._waterbody_df["OrificeE"] > self._waterbody_df["WeirE"]]
+            if len(rows) > 0:
+                ids = rows[lake_id_field].values
+                raise ValueError(f"Orifice elevation must be less than or equal to weir elevation.  This was not the case at {ids}")
+            rows = self._waterbody_df[self._waterbody_df["WeirE"] > self._waterbody_df["LkMxE"]]
+            if len(rows) > 0:
+                ids = rows[lake_id_field].values
+                raise ValueError(f"Weir elevation must be less than or equal to maximum lake elevation.  This was not the case at {ids}")
             # Drop any waterbodies that do not have parameters
             self._waterbody_df = self.waterbody_dataframe.dropna()
 
-            # Check if there are any lake_ids that are also segment_ids. If so, add a large value
-            # to the lake_ids to create synthetic IDs and avoid conflicts.
+            # Add a large value to the lake_ids to create synthetic IDs and avoid conflicts.
             max_df_id = max(self.dataframe.index) + 1 if not self.dataframe.index.empty else 0
             self._waterbody_df.index = np.arange(len(self._waterbody_df)) + max_df_id
             self._waterbody_df = self._waterbody_df.rename_axis(lake_id_field)
             self._waterbody_df["fp_id"] = self._waterbody_df["fp_id"].astype(int)
-            self._duplicate_ids_df = {}  # Relic from how hyfeatures and NHD handled this.
+            self._duplicate_ids_df = pd.DataFrame()  # Relic from how hyfeatures and NHD handled this. We add relationship to _fp_outlet_crosswalk 
 
             self._refactor_reservoirs(lake_id_field)
 
@@ -408,13 +413,14 @@ class NHFPreprocessMixin:
 
         """
         # Until this is implemented in NHF, spoof here
-        lake_overlaps = self._waterbody_df[["fp_id"]].reset_index().copy()
+        lake_overlaps = self.waterbody_dataframe[["fp_id"]].reset_index().copy()
 
         max_node_id = self.dataframe.index.max()
         lookup = np.arange(max_node_id + 1)
         df_rows = []
         index_vals = []
-        for outlet_fp, wb_group in self._waterbody_df.groupby("fp_id"):
+        downstream_groups = self.dataframe.groupby("downstream").groups
+        for outlet_fp, wb_group in self.waterbody_dataframe.groupby("fp_id"):
             # Until this is implemented in NHF, spoof here
             wb_group["lake_order"] = np.arange(len(wb_group))
             wb_group = wb_group.sort_values("lake_order")
@@ -422,31 +428,31 @@ class NHFPreprocessMixin:
             # Get all flowpaths associated with the waterbody(ies)
             all_fp = lake_overlaps[lake_overlaps[lake_id_field].isin(wb_group.index.values)]
             all_links = self.dataframe[self.dataframe["fp_id"].isin(all_fp["fp_id"])].reset_index()
-            ds = set(all_links["downstream"]).difference(all_links["up_node_id"]).pop()
-            us = set(all_links["up_node_id"]).difference(all_links["downstream"]).pop()
+            ds_set = set(all_links["downstream"]).difference(all_links["up_node_id"])
+            us_set = set(all_links["up_node_id"]).difference(all_links["downstream"])
+            if len(ds_set) != 1 or len(us_set) != 1:
+                raise ValueError(f"Expected exactly one inlet/outlet for waterbody {outlet_fp}, got {len(us_set)} inlets and {len(ds_set)} outlets")
+            ds, us = ds_set.pop(), us_set.pop()
 
             # Remove references to those links
-            self._dataframe = self._dataframe.drop(all_links["up_node_id"])                
+            self.dataframe = self.dataframe.drop(all_links["up_node_id"])                
             if self._connections is not None:
                 for i in all_links["up_node_id"]:
                     # Remove connection
                     self._connections.pop(i)
-            else:
-                self.connections
             self.zero_nodes = list(set(self.zero_nodes).difference(all_links["up_node_id"].values))
 
             # Modify connections to use waterbodies instead
             for i in wb_group.index.values:
-                self._connections[i] = [ds]
+                self.connections[i] = [ds]
                 ds = i
-            for i in self.dataframe[self.dataframe["downstream"] == us].index:
-                self._connections[i] = [ds]
+            for i in downstream_groups.get(us, []):
+                self.connections[i] = [ds]
 
             # Add synthetic headwater reach
-            self.vfp_nex_ids
             headwater = all_links[all_links["fp_id"] == outlet_fp].iloc[0]
             head_id = int(headwater["up_node_id"])
-            self._connections[head_id] = [ds]
+            self.connections[head_id] = [ds]
             headwater["downstream"] = ds
             row = headwater.drop(labels="up_node_id").to_dict()
             df_rows.append(row)
@@ -458,7 +464,6 @@ class NHFPreprocessMixin:
                 lookup[i] = head_id
 
             # Remap outflow from waterbody to fps
-            # self._fp_outlet_crosswalk[wb_group.index[0]] = []
             for i in all_links["up_node_id"]:
                 if i in self._fp_outlet_crosswalk:
                     self._fp_outlet_crosswalk[wb_group.index[0]].extend(self._fp_outlet_crosswalk[i])
@@ -466,12 +471,12 @@ class NHFPreprocessMixin:
 
         self.vfp_nex_ids = lookup[self.vfp_nex_ids]
         self._link_lake_crosswalk = None  # Handled by _fp_outlet_crosswalk
-        self._waterbody_connections = {i: i for i in self._waterbody_df.index}
+        self.waterbody_connections = {i: i for i in self.waterbody_dataframe.index}
 
         row_df = pd.DataFrame(df_rows, index=index_vals)
-        row_df.index.name = self._dataframe.index.name
-        row_df = row_df.astype(self._dataframe.dtypes.to_dict())
-        self._dataframe = pd.concat([self._dataframe, row_df])
+        row_df.index.name = self.dataframe.index.name
+        row_df = row_df.astype(self.dataframe.dtypes.to_dict())
+        self.dataframe = pd.concat([self.dataframe, row_df])
 
 
     def preprocess_data_assimilation(

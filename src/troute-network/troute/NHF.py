@@ -158,6 +158,10 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         """
         return self._waterbody_connections
 
+    @waterbody_connections.setter
+    def waterbody_connections(self, val):
+        self._waterbody_connections = val
+
     @property
     def gages(self):
         """
