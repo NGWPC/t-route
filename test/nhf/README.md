@@ -306,8 +306,17 @@ This is a small set of reaches with a gage where two lakes fall on the same flow
 ```console
 mkdir test/nhf/lake_creek
 cd test/nhf/lake_creek
-python ../subset_nhf.py --source-gpkg /path/to/your.gpkg --out-gpkg domain/nhf.gpkg --outlet-fp-id 1799208
+python ../subset_nhf.py --source-gpkg /hydrofabric/nhf_1.1.3.gpkg --out-gpkg domain/nhf.gpkg --outlet-fp-id 1799208
 python ../make_forcing.py --start-time "1987-03-20 00:00" --end-time "1987-03-30 00:00" --case-id lake_creek --hf-file nhf.gpkg --run-id retro
 python -m nwm_routing -V5 -f retro.yaml
 python ../generate_diagnostics.py --file retro.yaml 
+```
+## Running the Great Lakes Test
+
+The great lakes test uses data assimilation to force discharges out of the great lakes with no inflows.  The test script checks whether outflows at all reaches are similar to the forced values after some stabilization time.
+
+
+```console
+cd test/nhf/great_lakes
+python run_test.py
 ```
