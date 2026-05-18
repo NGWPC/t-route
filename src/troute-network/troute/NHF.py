@@ -169,9 +169,6 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         """
         return self._gages
 
-    @property
-    def great_lakes_climatology_df(self):
-        return pd.DataFrame()
 
     @property
     def waterbody_null(self):

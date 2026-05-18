@@ -294,6 +294,10 @@ class AbstractNetwork(ABC):
     @property
     def waterbody_dataframe(self):
         return self._waterbody_df
+
+    @waterbody_dataframe.setter
+    def waterbody_dataframe(self, val):
+        self._waterbody_df = val
     
     @property
     def waterbody_types_dataframe(self):

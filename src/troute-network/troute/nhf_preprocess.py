@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import pyogrio
+from troute.rfc_lake_gage_crosswalk import get_great_lakes_climatology
 import xarray as xr
 from joblib import Parallel, delayed
 
@@ -300,6 +301,9 @@ class NHFPreprocessMixin:
             self._waterbody_df[lake_id_field] = self._waterbody_df[lake_id_field].astype(int)
             self._waterbody_df = self.waterbody_dataframe.set_index(lake_id_field).drop_duplicates().sort_index()
 
+            # Extract Great Lakes
+            gl_df = self.waterbody_dataframe[self.waterbody_dataframe.index.isin([4800002, 4800004, 4800006, 4800007])].copy()
+
             # Validate
             rows = self._waterbody_df[self._waterbody_df["OrificeE"] > self._waterbody_df["WeirE"]]
             if len(rows) > 0:
@@ -309,6 +313,7 @@ class NHFPreprocessMixin:
             if len(rows) > 0:
                 ids = rows[lake_id_field].values
                 raise ValueError(f"Weir elevation must be less than or equal to maximum lake elevation.  This was not the case at {ids}")
+
             # Drop any waterbodies that do not have parameters
             self._waterbody_df = self.waterbody_dataframe.dropna()
 
@@ -316,9 +321,21 @@ class NHFPreprocessMixin:
             max_df_id = max(self.dataframe.index) + 1 if not self.dataframe.index.empty else 0
             self._waterbody_df.index = np.arange(len(self._waterbody_df)) + max_df_id
             self._waterbody_df = self._waterbody_df.rename_axis(lake_id_field)
-            self._waterbody_df["fp_id"] = self._waterbody_df["fp_id"].astype(int)
             self._duplicate_ids_df = pd.DataFrame()  # Relic from how hyfeatures and NHD handled this. We add relationship to _fp_outlet_crosswalk 
 
+            # Add the Great Lakes to the connections dictionary and waterbody dataframe
+            # NOTE: This dataset never appears to be used.  Newer versions of T-Route CLI get great lakes flows 
+            # exclusively from data assimilation. Consider removing in future.
+            if not gl_df.empty:
+                self.waterbody_dataframe = pd.concat([self.waterbody_dataframe, gl_df])
+                self._gl_climatology_df = get_great_lakes_climatology()
+            else:
+                self._gl_climatology_df = pd.DataFrame()
+
+            # Clean fp_id type
+            self._waterbody_df["fp_id"] = self._waterbody_df["fp_id"].astype(int)
+
+            # Condense flowpaths in a reservoir to single level pool node
             self._refactor_reservoirs(lake_id_field)
 
             # Add lat, lon, and crs columns for LAKEOUT files:
@@ -326,37 +343,14 @@ class NHFPreprocessMixin:
             if lakeout:
                 raise NotImplementedError("The lakeout feature has not been developed for NHF.")
 
-            # # Add the Great Lakes to the connections dictionary and waterbody dataframe
-            # nexus["WBOut_id"] = nexus["hl_uri"].str.extract(r"WBOut-(\d+)").astype(float)
-            # great_lakes_df = nexus[nexus["WBOut_id"].isin([4800002, 4800004, 4800006, 4800007])][["WBOut_id", "toid"]]
-            # if not great_lakes_df.empty:
-            #     great_lakes_df["toid"] = great_lakes_df["toid"].str.extract(r"wb-(\d+)").astype(float)
-            #     great_lakes_df = great_lakes_df.astype(int)
-            #     great_lakes_df["toid"] = great_lakes_df["toid"].apply(lambda x: [x])
-            #     gl_dict = great_lakes_df.set_index("WBOut_id")["toid"].to_dict()
-            #     self._connections.update(gl_dict)
-
-            #     gl_wbody_df = pd.DataFrame(
-            #         data=np.ones([len(gl_dict), self.waterbody_dataframe.shape[1]]),
-            #         index=gl_dict.keys(),
-            #         columns=self.waterbody_dataframe.columns,
-            #     )
-            #     gl_wbody_df.index.name = self.waterbody_dataframe.index.name
-
-            #     self._waterbody_df = pd.concat([self.waterbody_dataframe, gl_wbody_df]).sort_index()
-
-            #     self._gl_climatology_df = get_great_lakes_climatology()
-
-            # else:
-            #     gl_dict = {}
-            #     self._gl_climatology_df = pd.DataFrame()
+            
 
             self._waterbody_types_df = pd.DataFrame(
                 data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
             ).sort_index()
 
-            # # Add Great Lakes waterbody type (6)
-            # self._waterbody_types_df.loc[gl_dict.keys(), "reservoir_type"] = 6
+            # Add Great Lakes waterbody type (6)
+            self._waterbody_types_df.loc[gl_df.index, "reservoir_type"] = 6
 
             self._waterbody_type_specified = True
 
@@ -633,8 +627,9 @@ class NHFPreprocessMixin:
         #     self._waterbody_types_df.loc[self._rfc_lake_gage_crosswalk.index, "reservoir_type"] = 4
         # else:
         #     self._rfc_lake_gage_crosswalk = pd.DataFrame()
+
         self._gages = {}
-        self._usgs_lake_gage_crosswalk = pd.DataFrame()
+        self._usgs_lake_gage_crosswalk = pd.DataFrame({"usgs_lake_id": [4800002, 4800004],"usgs_gage_id": ["04127885", "04159130"]})
         self._usace_lake_gage_crosswalk = pd.DataFrame()
         self._usbr_lake_gage_crosswalk = pd.DataFrame()
         self._rfc_lake_gage_crosswalk = pd.DataFrame()
