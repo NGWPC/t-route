@@ -805,7 +805,7 @@ def compute_nhd_routing_v02(
 
                     qlat_sub = qlats.loc[param_df_sub.index]
                     q0_sub = q0.loc[param_df_sub.index]
-                    eloss_sub = eloss_df.loc[param_df_sub.index]
+                    eloss_sub = eloss_df.reindex(param_df_sub.index).fillna(0.0)
                                         
                     param_df_sub = param_df_sub.reindex(
                         param_df_sub.index.tolist() + lake_segs
@@ -1158,7 +1158,8 @@ def compute_nhd_routing_v02(
 
                     qlat_sub = qlat_sub.reindex(param_df_sub.index)
                     q0_sub = q0_sub.reindex(param_df_sub.index)
-                    
+                    eloss_sub = eloss_df.reindex(param_df_sub.index).fillna(0.0)
+
                     # prepare reservoir DA data
                     (reservoir_usgs_df_sub, 
                      reservoir_usgs_df_time,
@@ -1399,7 +1400,8 @@ def compute_nhd_routing_v02(
 
                 qlat_sub = qlat_sub.reindex(param_df_sub.index)
                 q0_sub = q0_sub.reindex(param_df_sub.index)
-                
+                eloss_sub = eloss_df.reindex(param_df_sub.index).fillna(0.0)
+
                 # prepare reservoir DA data
                 (reservoir_usgs_df_sub, 
                  reservoir_usgs_df_time,
@@ -1602,6 +1604,7 @@ def compute_nhd_routing_v02(
 
             qlat_sub = qlat_sub.reindex(param_df_sub.index)
             q0_sub = q0_sub.reindex(param_df_sub.index)
+            eloss_sub = eloss_df.reindex(param_df_sub.index).fillna(0.0)
             
             # prepare reservoir DA data
             (reservoir_usgs_df_sub, 
@@ -1814,6 +1817,7 @@ def compute_nhd_routing_v02(
 
             qlat_sub = qlat_sub.reindex(np.setdiff1d(param_df_sub.index, offnetwork_upstreams))
             q0_sub = q0_sub.reindex(param_df_sub.index)
+            eloss_sub = eloss_df.reindex(param_df_sub.index).fillna(0.0)
             
             # prepare reservoir DA data
             (reservoir_usgs_df_sub, 
