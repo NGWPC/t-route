@@ -6,6 +6,8 @@ from typing import Union
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pyogrio
+import pyogrio.errors
 import xarray as xr
 import yaml
 from dataretrieval import nwis
@@ -53,7 +55,10 @@ def create_forcing_dataset(t_start: str, t_end: str, forcing_dir: str, hydrofabr
 
     # Generate reference outputs if requested
     if generate_reference_data and reference_dir is not None:
-        gages = gpd.read_file(hydrofabric_path, sql="SELECT * FROM gages WHERE status = 'USGS-active'", ignore_geometry=True)
+        try:
+            gages = gpd.read_file(hydrofabric_path, sql="SELECT * FROM gages WHERE status = 'USGS-active'", ignore_geometry=True)
+        except pyogrio.errors.DataLayerError:
+            return
         data_vars = {}
         fp_ids = []
         site_nos = []
