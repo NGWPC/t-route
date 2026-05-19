@@ -45,9 +45,16 @@ def _format_qlat_start_time(qlat_start_time):
 
 def _build_reach_type_list(reach_list, wbodies_segs):
 
+    # No waterbody break segments (e.g. NHF stubs waterbodies): every reach is
+    # type 0 — skip the per-reach set work entirely.
+    if not wbodies_segs:
+        return [(reaches, 0) for reaches in reach_list]
+
+    # set.isdisjoint() short-circuits at the first shared element and builds no
+    # intermediate set, unlike `set(reaches) & wbodies_segs`.
     reach_type_list = [
-                1 if (set(reaches) & wbodies_segs) else 0 for reaches in reach_list
-            ]
+        0 if wbodies_segs.isdisjoint(reaches) else 1 for reaches in reach_list
+    ]
 
     return list(zip(reach_list, reach_type_list))
 
