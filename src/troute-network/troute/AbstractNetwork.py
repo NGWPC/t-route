@@ -483,6 +483,10 @@ class AbstractNetwork(ABC):
     @property
     def great_lakes_climatology_df(self):
         return self._gl_climatology_df
+
+    @great_lakes_climatology_df.setter
+    def great_lakes_climatology_df(self, val):
+        self._gl_climatology_df = val
     
     @property
     def canadian_gage_df(self):

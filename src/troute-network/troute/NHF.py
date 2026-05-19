@@ -88,12 +88,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             # NHF always reads topology from .gpkg files, even in BMI mode.
             # The ngen framework provides only qlat data via BMI; network
             # geometry comes from the geopackage specified in supernetwork_parameters.
-            nhf = read_geo_file(
-                self.supernetwork_parameters,
-                self.waterbody_parameters,
-                self.compute_parameters,
-                self.compute_parameters.get("cpu_pool", 1),
-            )
+            nhf = read_geo_file(self.supernetwork_parameters,self.compute_parameters.get("cpu_pool", 1))
 
             # Handle different key column names between flowpaths and flowpath_attributes
             flowpaths = nhf["flowpaths"]

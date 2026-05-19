@@ -131,28 +131,10 @@ def read_ngen_waterbody_type_df(parm_file, lake_index_field="wb-id", lake_id_mas
     return df
 
 
-def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_parameters, cpu_pool):
+def read_geo_file(supernetwork_parameters, cpu_pool):
     geo_file_path = supernetwork_parameters["geo_file_path"]
     file_type = Path(geo_file_path).suffix
     if file_type == ".gpkg":
-
-        # TODO enable lakes to be read into the routing solution here
-        # if waterbody_parameters.get("break_network_at_waterbodies", False):
-        #     layers_to_read.extend(["lakes", "nexus"])
-
-        # data_assimilation_parameters = compute_parameters.get("data_assimilation_parameters", {})
-        # if any(
-        #     [
-        #         data_assimilation_parameters.get("streamflow_da", {}).get("streamflow_nudging", False),
-        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usgs", False),
-        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usace", False),
-        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usbr", False),
-        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_rfc_da", {}).get("reservoir_rfc_forecasts", False),
-        #     ]
-        # ):
-        #     layers_to_read.append("network")
-
-        # Layers whose geometry we need to preserve for discretization
 
         def read_layer(lyr):
             try:
@@ -328,9 +310,9 @@ class NHFPreprocessMixin:
             # exclusively from data assimilation. Consider removing in future.
             if not gl_df.empty:
                 self.waterbody_dataframe = pd.concat([self.waterbody_dataframe, gl_df])
-                self._gl_climatology_df = get_great_lakes_climatology()
+                self.great_lakes_climatology_df = get_great_lakes_climatology()
             else:
-                self._gl_climatology_df = pd.DataFrame()
+                self.great_lakes_climatology_df = pd.DataFrame()
 
             # Clean fp_id type
             self._waterbody_df["fp_id"] = self._waterbody_df["fp_id"].astype(int)
@@ -376,6 +358,7 @@ class NHFPreprocessMixin:
             self._waterbody_type_specified = False
             self._link_lake_crosswalk = None
             self._duplicate_ids_df = pd.DataFrame()
+            self.great_lakes_climatology_df = pd.DataFrame()
 
 
     
