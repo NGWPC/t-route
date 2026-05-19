@@ -149,7 +149,7 @@ def discretize_flowpaths(
         )
 
     """
-    cur_node_id = virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID].max() + 1
+    cur_node_id = int(np.nanmax(virtual_flowpaths[[FIELD_DN_VIRTUAL_NEX_ID, FIELD_UP_VIRTUAL_NEX_ID]].values) + 1)
 
     ##############################################
     ### TEMPORARY PATCH ###  See looped headwaters
