@@ -90,10 +90,16 @@ cdef void compute_reach_kernel(float qup, float quc, int nreach, const float[:,:
     cdef reach.QVD *out = &rv
 
     cdef:
-        float dt, qlat, dx, bw, tw, twcc, n, ncc, cs, s0, qdp, velp, depthp
+        float dt, qlat, qdpp, dx, bw, tw, twcc, n, ncc, cs, s0, qdp, velp, depthp
         int i
 
     for i in range(nreach):
+        # Guard the pre-existing -Wmaybe-uninitialized on qlat/qdpp: the
+        # qlat_add_loc if/elif/elif chain has no else. A no-op for
+        # qlat_add_loc in {0,1,2} (immediately overwritten); deterministic
+        # otherwise.
+        qlat = 0
+        qdpp = 0
         if qlat_add_loc == 0:
             qlat = 0
             qup += input_buf[i, 0]
