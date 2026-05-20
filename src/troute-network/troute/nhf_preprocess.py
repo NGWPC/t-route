@@ -7,6 +7,43 @@ import pyogrio
 import xarray as xr
 from joblib import Parallel, delayed
 
+# Channel-parameter columns of `flowpaths` consumed by the Muskingum-Cunge
+# kernel. Non-finite (NaN/Inf) values in any of these would propagate
+# into NaN routing output; guard against them at load time and fail loud.
+_FLOWPATHS_CHANNEL_COLS = (
+    "length_km", "n", "slope", "topwdth", "btmwdth",
+    "topwdthcc", "ncc", "chslp", "musx", "musk", "mainstem_lp",
+)
+_BAD_FPID_PREVIEW_LIMIT = 10
+
+
+def _validate_flowpaths_channel_params(flowpaths):
+    """Raise if any MC-kernel channel parameter is non-finite (NaN/Inf)."""
+    if flowpaths is None or flowpaths.empty:
+        return
+    cols = [c for c in _FLOWPATHS_CHANNEL_COLS if c in flowpaths.columns]
+    if not cols:
+        return
+    arr = flowpaths[cols].to_numpy(dtype=float, copy=False, na_value=np.nan)
+    bad_per_col = ~np.isfinite(arr)
+    if not bad_per_col.any():
+        return
+    bad_row_mask = bad_per_col.any(axis=1)
+    bad_count = int(bad_row_mask.sum())
+    per_col = {c: int(bad_per_col[:, i].sum())
+               for i, c in enumerate(cols) if bad_per_col[:, i].any()}
+    bad_fp_ids = (flowpaths.loc[bad_row_mask, "fp_id"].tolist()
+                  if "fp_id" in flowpaths.columns else [])
+    preview = bad_fp_ids[:_BAD_FPID_PREVIEW_LIMIT]
+    more = ("" if len(bad_fp_ids) <= _BAD_FPID_PREVIEW_LIMIT
+            else f" (and {len(bad_fp_ids) - _BAD_FPID_PREVIEW_LIMIT} more)")
+    raise ValueError(
+        f"flowpaths contains {bad_count} of {len(flowpaths)} segments with "
+        f"non-finite (NaN/Inf) channel parameter(s); the Muskingum-Cunge "
+        f"kernel requires finite values. Affected columns: {per_col}. "
+        f"Affected fp_ids{more}: {preview}"
+    )
+
 # Only read relevant areas of NHF to cut down on processing time and memory footprint.
 LAYERS_TO_READ = [
     {
@@ -174,6 +211,7 @@ def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_paramet
     else:
         raise RuntimeError("Unsupported file type: {}".format(file_type))
 
+    _validate_flowpaths_channel_params(table_dict.get("flowpaths"))
     return table_dict
 
 

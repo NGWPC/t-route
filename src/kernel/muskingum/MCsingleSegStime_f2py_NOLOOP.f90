@@ -1,6 +1,7 @@
 module muskingcunge_module
 
     use precis
+    use, intrinsic :: ieee_arithmetic, only: ieee_is_nan
     implicit none
 
 contains
@@ -61,9 +62,18 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
     endif
 
     !print *, bfd
-    if (n .le. 0.0_prec .or. s0 .le. 0.0_prec .or. z .le. 0.0_prec .or. bw .le. 0.0_prec) then
-        !print*, "Error in channel coefficients -> Muskingum cunge", n, s0, z, bw
-        !call hydro_stop("In MUSKINGCUNGE() - Error in channel coefficients")
+    ! Guard against invalid channel parameters (non-positive or NaN). NaN
+    ! inputs would otherwise propagate through sqrt(s0) into NaN velocity,
+    ! and `.le. 0.0_prec` alone is false for NaN under IEEE 754, so an
+    ! explicit ieee_is_nan check is required. Fail loud rather than
+    ! silently producing zeroed or NaN-tainted output.
+    if (n  .le. 0.0_prec .or. ieee_is_nan(n)  .or. &
+        s0 .le. 0.0_prec .or. ieee_is_nan(s0) .or. &
+        z  .le. 0.0_prec .or. ieee_is_nan(z)  .or. &
+        bw .le. 0.0_prec .or. ieee_is_nan(bw)) then
+        write(*,*) "ERROR: muskingcungenwm received invalid channel parameter " // &
+            "(NaN or non-positive). n=", n, " s0=", s0, " z=", z, " bw=", bw
+        error stop "muskingcungenwm: invalid channel parameter (NaN or non-positive)"
     end if
 
     depthc = max(depthp, 0.0_prec)
