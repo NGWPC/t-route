@@ -353,8 +353,13 @@ def split_at_waterbodies_and_junctions(waterbody_nodes, network, path, node):
     (bool): False if segment is a network break point, True otherwise
     
     '''
-    if (path[-1] in waterbody_nodes) ^ (node in waterbody_nodes):
-        return False  # force a path split if entering or exiting a waterbody
+    prev_in_wb = path[-1] in waterbody_nodes
+    curr_in_wb = node in waterbody_nodes
+    if curr_in_wb:
+        # mc_reach.pyx only models the first waterbody in a reach.  Therefore, we must break any time you enter a waterbody
+        return False  # Force a path split if entering a waterbody
+    if prev_in_wb and not curr_in_wb:
+        return False  # force a path split if exiting a waterbody
     else:
         return len(network[node]) == 1
 

@@ -107,6 +107,15 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
         print("  no waterbodies layer, skipping")
         wb = None
 
+    # lakes: by fp_id
+    if "lakes" in layers:
+        lk = gpd.read_file(gpkg_path, layer="lakes")
+        lk = lk[lk["fp_id"].isin(fp_set)]
+        print(f"  lakes: {len(lk)}")
+    else:
+        print("  no lakes layer, skipping")
+        lk = None
+
     # Gages: by fp_id
     if "gages" in layers:
         gages = gpd.read_file(gpkg_path, layer="gages")
@@ -125,6 +134,7 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
         "virtual_nexus": vnex,
         "hydrolocations": hydroloc,
         "waterbodies": wb,
+        "lakes": lk,
         "gages": gages,
     }
 

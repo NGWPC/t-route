@@ -1064,6 +1064,7 @@ def _read_timeslice_file(f):
         stationId = np.apply_along_axis(''.join, 1, stns.astype(str))
         time_str = np.apply_along_axis(''.join, 1, t.astype(str))
         stationId = np.char.strip(stationId)
+        stationId = np.char.rstrip(stationId, "n")
         
         timeslice_observations = (pd.DataFrame({
                                     'stationId' : stationId,
@@ -1180,6 +1181,7 @@ def get_obs_from_timeslices(
       
     # Link <> gage crosswalk data
     df = crosswalk_df.reset_index()
+    df = df.drop(columns="index", errors="ignore")
     df[crosswalk_gage_field] = np.asarray(df[crosswalk_gage_field]).astype('<U15')
     df = df.set_index(crosswalk_gage_field)
     df.index = df.index.str.strip()

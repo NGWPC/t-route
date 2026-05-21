@@ -30,7 +30,7 @@ class AbstractNetwork(ABC):
                 "_canadian_gage_link_df",
                 "_independent_networks", "_reaches_by_tw", "_flowpath_dict",
                 "_reverse_network", "_q0", "_t0", "_link_lake_crosswalk",
-                "_usgs_lake_gage_crosswalk", "_usace_lake_gage_crosswalk", "_rfc_lake_gage_crosswalk",
+                "_usgs_lake_gage_crosswalk", "_usace_lake_gage_crosswalk", "_usbr_lake_gage_crosswalk", "_rfc_lake_gage_crosswalk",
                 "_qlateral", "_eloss", "_use_et_channel_loss", "_break_segments", "_segment_index", "_coastal_boundary_depth_df",
                 "supernetwork_parameters", "waterbody_parameters","data_assimilation_parameters",
                 "restart_parameters", "compute_parameters", "forcing_parameters",
@@ -142,7 +142,6 @@ class AbstractNetwork(ABC):
             "lateral inflow DataFrame creation complete in %s seconds." \
                 % (time.time() - start_time)
                 )
-        self.assemble_coastal_coupling_data()
 
         #---------------------------------------------------------------------------
         # Assemble catchment ET data for channel loss
@@ -295,6 +294,10 @@ class AbstractNetwork(ABC):
     @property
     def waterbody_dataframe(self):
         return self._waterbody_df
+
+    @waterbody_dataframe.setter
+    def waterbody_dataframe(self, val):
+        self._waterbody_df = val
     
     @property
     def waterbody_types_dataframe(self):
@@ -415,6 +418,11 @@ class AbstractNetwork(ABC):
     def waterbody_connections(self):
         pass
 
+    @waterbody_connections.setter
+    @abstractmethod
+    def waterbody_connections(self, v):
+        pass
+
     @property
     @abstractmethod
     def waterbody_null(self):
@@ -428,6 +436,10 @@ class AbstractNetwork(ABC):
     @property
     def dataframe(self):
         return self._dataframe
+
+    @dataframe.setter
+    def dataframe(self, val):
+        self._dataframe = val
     
     @property
     def nexus_dict(self):
@@ -471,6 +483,10 @@ class AbstractNetwork(ABC):
     @property
     def great_lakes_climatology_df(self):
         return self._gl_climatology_df
+
+    @great_lakes_climatology_df.setter
+    def great_lakes_climatology_df(self, val):
+        self._gl_climatology_df = val
     
     @property
     def canadian_gage_df(self):
@@ -664,7 +680,9 @@ class AbstractNetwork(ABC):
                 else:
                     # TODO: Consider adding option to read cold state from route-link file
                     waterbodies_initial_ds_flow_const = 0.0
-                    waterbodies_initial_depth_const = -1e9
+                    # NOTE: Changing initial depth from -1e9 to OrificeE because it improves routing behavior when
+                    # inital state is unknown. Unsure of broader impacts.
+                    waterbodies_initial_depth_const = self.waterbody_dataframe["OrificeE"]
                     # Set initial states from cold-state
                     waterbodies_initial_states_df = pd.DataFrame(
                         0,
@@ -696,7 +714,9 @@ class AbstractNetwork(ABC):
                 else:
                     # TODO: Consider adding option to read cold state from route-link file
                     waterbodies_initial_ds_flow_const = 0.0
-                    waterbodies_initial_depth_const = -1e9
+                    # NOTE: Changing initial depth from -1e9 to OrificeE because it improves routing behavior when
+                    # inital state is unknown. Unsure of broader impacts.
+                    waterbodies_initial_depth_const = self.waterbody_dataframe["OrificeE"]
                     # Set initial states from cold-state
                     waterbodies_initial_states_df = pd.DataFrame(
                         0,

@@ -8,17 +8,15 @@ End-to-end tests are more open-ended. The `make_forcing.py` script may be used t
 
 ```consol
 cd test/nhf/conecuh_case/
-
-python ../make_forcing.py --start-time "2009-12-12 00:00" --end-time "2009-12-29 00:00" --case-id conecuh_case --hf-file 437343.gpkg --run-id retro
-
+python ../subset_nhf.py --source-gpkg /path/to/your.gpkg --out-gpkg domain/nhf.gpkg --outlet-fp-id 5262980
+python ../make_forcing.py --start-time "2009-12-12 00:00" --end-time "2009-12-29 00:00" --case-id conecuh_case --hf-file nhf.gpkg --run-id retro
 python -m nwm_routing -V5 -f retro.yaml
-
-python ../generate_diagnostics.py conecuh_case/retro.yaml
+python ../generate_diagnostics.py -f retro.yaml
 ```
 
-**Note** If you need to subset the hydrofabric from a larger area to a specific watershed, you can use subset_nhf.py.  Example below for Conecuh
+**Note** If you want to run an NHF test via BMI, you can run the command below. (Broken right now.)
 ```consol
-python ../subset_nhf.py --source-gpkg /path/to/big_nhf.gpkg" --out-gpkg domain/437343.gpkg --outlet-fp-id 437343
+python ../run_bmi.py --config-file retro.yaml
 ```
 
 ## `make_forcing.py` Details
@@ -265,15 +263,60 @@ The histogram of this ratio can be used to determine how well the NHF discretiza
 ![Reach Length Ratio Histogram](diagnostic_example_images/dx_ratio_distribution.png)
 
 
-## Running the CONUS case
+## Running the CONUS Case
 
 To run t-route on NHF at the CONUS scale, use the example workflow below. This test runs t-route for a portion of the 2022 US summer floods over all of CONUS.
 
 ```console
+mkdir test/nhf/conus
 cd test/nhf/conus
-mkdir domain
 ln -s /path/to/your/nhf.gpkg domain/nhf.gpkg
 python ../make_forcing.py --start-time "2022-07-25 00:00" --end-time "2022-07-26 12:00" --case-id conus --hf-file nhf.gpkg --run-id retro
 python -m nwm_routing -V5 -f retro.yaml
+python ../generate_diagnostics.py -f retro.yaml 
+```
+
+## Running the Patuxent Reservoir Case
+
+This is a simple, well-gauged site for verifying level-pool model validity.
+
+```console
+mkdir test/nhf/patuxent
+cd test/nhf/patuxent
+python ../subset_nhf.py --source-gpkg /path/to/your.gpkg --out-gpkg domain/nhf.gpkg --outlet-fp-id 215809
+python ../make_forcing.py --start-time "2011-09-05 00:00" --end-time "2011-09-15 00:00" --case-id patuxent --hf-file nhf.gpkg --run-id retro
+python -m nwm_routing -V5 -f retro.yaml
 python ../generate_diagnostics.py --file retro.yaml 
+```
+
+## Running the Hot Brook Lake Case
+
+This is a small set of reaches where two lakes fall on the same flowpath.
+
+```console
+cd test/nhf/hot_brook
+python -m nwm_routing -V5 -f synthetic_pulse.yaml
+python review.py
+```
+
+## Running the Lake Creek Case
+
+This is a small set of reaches with a gage where two lakes fall on the same flowpath.  I suspect that the gauge results will match closer to retrospective when we implement water level hot starts.
+
+```console
+mkdir test/nhf/lake_creek
+cd test/nhf/lake_creek
+python ../subset_nhf.py --source-gpkg /hydrofabric/nhf_1.1.3.gpkg --out-gpkg domain/nhf.gpkg --outlet-fp-id 1799208
+python ../make_forcing.py --start-time "1987-03-20 00:00" --end-time "1987-03-30 00:00" --case-id lake_creek --hf-file nhf.gpkg --run-id retro
+python -m nwm_routing -V5 -f retro.yaml
+python ../generate_diagnostics.py --file retro.yaml 
+```
+## Running the Great Lakes Test
+
+The great lakes test uses data assimilation to force discharges out of the great lakes with no inflows.  The test script checks whether outflows at all reaches are similar to the forced values after some stabilization time.
+
+
+```console
+cd test/nhf/great_lakes
+python run_test.py
 ```

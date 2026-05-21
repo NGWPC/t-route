@@ -31,6 +31,7 @@ FIELD_DN_VIRTUAL_NEX_ID = "dn_virtual_nex_id"
 FIELD_UP_VIRTUAL_NEX_ID = "up_virtual_nex_id"
 FIELD_LENGTH = "length_km"
 FIELD_LENGTH_CONVERSION = 1000
+FIELD_VFP_ORDER = "segment_order"
 CHANNEL_PARAMS = [
     "n",
     "mainstem_lp",
@@ -61,6 +62,7 @@ class LinkArrays:
     dn_node_id: np.ndarray
     up_node_id: np.ndarray
     length: np.ndarray
+    segment_order: np.ndarray
 
     @classmethod
     def from_df(cls, df: pd.DataFrame):
@@ -70,6 +72,7 @@ class LinkArrays:
             df[FIELD_DN_VIRTUAL_NEX_ID].to_numpy().astype(int),
             df[FIELD_UP_VIRTUAL_NEX_ID].to_numpy().astype(int),
             df[FIELD_LENGTH].to_numpy() * FIELD_LENGTH_CONVERSION,
+            df[FIELD_VFP_ORDER].to_numpy().astype(float)
         )
 
     def get_short_mask(self, discretization_len_m: float) -> np.ndarray:
@@ -91,6 +94,7 @@ class LinkArrays:
         self.dn_node_id = self.dn_node_id[mask]
         self.up_node_id = self.up_node_id[mask]
         self.length = self.length[mask]
+        self.segment_order = self.segment_order[mask]
 
     def remove(self, ind: int) -> None:
         """Remove a specific index from all arrays."""
@@ -98,6 +102,7 @@ class LinkArrays:
         self.dn_node_id = np.delete(self.dn_node_id, ind)
         self.up_node_id = np.delete(self.up_node_id, ind)
         self.length = np.delete(self.length, ind)
+        self.segment_order = np.delete(self.segment_order, ind)
 
 ### MAIN FUNCTION ###
 
@@ -144,7 +149,7 @@ def discretize_flowpaths(
         )
 
     """
-    cur_node_id = virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID].max() + 1
+    cur_node_id = int(np.nanmax(virtual_flowpaths[[FIELD_DN_VIRTUAL_NEX_ID, FIELD_UP_VIRTUAL_NEX_ID]].values) + 1)
 
     ##############################################
     ### TEMPORARY PATCH ###  See looped headwaters
@@ -238,10 +243,16 @@ def export_links_and_nodes(
         dn_node_ids.extend(tmp_links[1:] + [dn_node])
         link_geometries.extend(link_geoms)
         node_geometries.extend(node_geoms)
+    
+    idx_lookup = np.argsort(links.up_node_id)
+    sorted_ups = links.up_node_id[idx_lookup]
+    link_idxs = np.searchsorted(sorted_ups, up_node_ids)
+    fp_ids = links.fp_id[idx_lookup[link_idxs]]
+    segment_order = links.segment_order[idx_lookup[link_idxs]]
 
     # Export geopackage
     gpd.GeoDataFrame(
-        {"up_node_id": up_node_ids, "dn_node_id": dn_node_ids},
+        {"up_node_id": up_node_ids, "dn_node_id": dn_node_ids, "fp_id": fp_ids, "segment_order": segment_order},
         geometry=link_geometries,
         crs=virtual_flowpaths.crs,
     ).to_file(export_links_nodes_gpkg_path, layer="links")
@@ -269,7 +280,7 @@ def _load_initial_links(
     return LinkArrays.from_df(
         pd.merge(
             tmp_vfp,
-            reference_flowpaths[[FIELD_FP_ID, FIELD_VIRTUAL_FP_ID]].drop_duplicates(),
+            reference_flowpaths[[FIELD_FP_ID, FIELD_VIRTUAL_FP_ID, FIELD_VFP_ORDER]].drop_duplicates(),
             on=FIELD_VIRTUAL_FP_ID,
         )
     )
@@ -378,6 +389,7 @@ def _discretize_links(
     subdiv_dn_node = []
     subdiv_up_node = []
     subdiv_length = []
+    subdiv_order = []
 
     # Split long links into equal-length segments and insert new intermediate node IDs
     for idx in long_idx:
@@ -387,18 +399,21 @@ def _discretize_links(
         node_ids = np.concatenate(
             ([links.up_node_id[idx]], new_node_ids, [links.dn_node_id[idx]])
         )
-
+        new_orders = links.segment_order[idx] + np.linspace(0, 1, n, endpoint=False)
+        
         cur_node_id += n - 1
 
         subdiv_up_node.append(node_ids[:-1])
         subdiv_dn_node.append(node_ids[1:])
         subdiv_fp_id.append(np.full(n, links.fp_id[idx]))
         subdiv_length.append(np.full(n, new_len))
+        subdiv_order.append(new_orders)
 
     subdiv_fp_id = np.concatenate(subdiv_fp_id)
     subdiv_dn_node = np.concatenate(subdiv_dn_node)
     subdiv_up_node = np.concatenate(subdiv_up_node)
     subdiv_length = np.concatenate(subdiv_length)
+    subdiv_order = np.concatenate(subdiv_order)
 
     # mask out original long links
     keep_mask = ~long_mask
@@ -406,8 +421,9 @@ def _discretize_links(
     length = np.concatenate([links.length[keep_mask], subdiv_length])
     up_node_id = np.concatenate([links.up_node_id[keep_mask], subdiv_up_node])
     dn_node_id = np.concatenate([links.dn_node_id[keep_mask], subdiv_dn_node])
+    segment_order = np.concatenate([links.segment_order[keep_mask], subdiv_order])
 
-    return LinkArrays(link_fp_id, dn_node_id, up_node_id, length)
+    return LinkArrays(link_fp_id, dn_node_id, up_node_id, length, segment_order)
 
 def _format_link_df(links: LinkArrays, flowpaths: pd.DataFrame) -> pd.DataFrame:
     """Conform to AbstractNetwork format and build mapping from link id to fp_id."""
