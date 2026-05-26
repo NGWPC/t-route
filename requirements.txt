@@ -13,4 +13,3 @@ joblib
 deprecated
 pyarrow<12.0
 geopandas
-ewts @ git+https://github.com/ngwpc/nwm-ewts.git#subdirectory=runtime/python/ewts
