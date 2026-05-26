@@ -36,16 +36,6 @@ class BmiVars:
     NGEN_DT = "ngen_dt"
     UPSTREAM_ID = "upstream_id"
 
-    CHANNEL_WATER_ID = "channel_water__id"
-    CHANNEL_WATER_RATE = "channel_exit_water_x-section__volume_flow_rate"
-    CHANNEL_WATER_SPEED = "channel_water_flow__speed"
-    CHANNEL_WATER_DEPTH = "channel_water__mean_depth"
-
-    LAKE_WATER_ID = "lake_water__id"
-    LAKE_WATER_INCOMING = "lake_water~incoming__volume_flow_rate"
-    LAKE_WATER_OUTGOING = "lake_water~outgoing__volume_flow_rate"
-    LAKE_WATER_ELEVATION = "lake_surface__elevation"
-
 
 class Model:
     dt: int
