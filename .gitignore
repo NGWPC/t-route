@@ -80,4 +80,22 @@ bower_components/
 src/vendor/
 dist/
 
+# Build dirs #
+##############
 build/
+uv.lock
+output/
+
+# .vscode files #
+#################
+.vscode/
+
+# UV lock #
+###########
+uv.lock
+
+# data #
+########
+data/
+output/
+*.gif
