@@ -6,15 +6,23 @@ import numpy as np
 from bmipy import Bmi
 import logging
 
-from ewts.helper import getenv_any
-from ewts.logger import configure_existing_logger
-
 from .troute_model import Model, BmiVars
 
 if typing.TYPE_CHECKING:
     from numpy.typing import NDArray
 
 LOG = logging.getLogger("TROUTE")
+
+try:
+    from ewts.helper import getenv_any
+    from ewts.logger import configure_existing_logger
+    TROUTE_USE_EWTS = True
+except ImportError:
+    TROUTE_USE_EWTS = False
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)s - %(funcName)s]: %(message)s',
+    )
 
 _VAR_NAME_UNITS_MAP = {
     BmiVars.CATCHMENT_VALUE: ['streamflow_cms', 'm3 s-1'],
@@ -52,9 +60,12 @@ class BmiTroute(Bmi):
     _model: Model
 
     def __init__(self):
-        val = getenv_any("EWTS_USE_NGEN_BRIDGE", "").strip().lower()
-        if val in {"1", "true", "yes", "on"}:
-            configure_existing_logger(LOG)
+        if TROUTE_USE_EWTS:
+            val = getenv_any("EWTS_USE_NGEN_BRIDGE", "").strip().lower()
+            if val in {"1", "true", "yes", "on"}:
+                configure_existing_logger(LOG)
+            else:
+                LOG.warning("EWTS installed but EWTS_USE_NGEN_BRIDGE not on. Falling back to default logging.")
 
         super().__init__()
         self._values: dict[str, NDArray] = {
