@@ -1,0 +1,7 @@
+# The benchmark dataset and outputs are large and machine-local.
+# Regenerate the dataset with `python benchmark/prep_data.py`.
+data/
+golden/
+results/
+__pycache__/
+*.pyc
