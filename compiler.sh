@@ -118,29 +118,6 @@ if [[ "$build_reservoir_kernel" == true ]]; then
     make install_rfc || exit
 fi
 
-# Remove any old/stale ewts/troute_ewts from the environment to avoid shadowing
-pip uninstall -y ewts troute_ewts >/dev/null 2>&1 || true
-
-# Prefer installed EWTS wheel; fall back to source tree for development
-EWTS_WHEEL=""
-if compgen -G "${EWTS_WHEEL_DIR}/ewts-*.whl" > /dev/null; then
-  EWTS_WHEEL=$(ls -1t "${EWTS_WHEEL_DIR}"/ewts-*.whl | head -n 1)
-fi
-
-if [[ -n "${EWTS_WHEEL}" ]]; then
-  echo "Installing EWTS from wheel: ${EWTS_WHEEL}"
-  pip install "${EWTS_WHEEL}" || exit
-else
-  echo "No EWTS wheel found in ${EWTS_WHEEL_DIR}"
-  echo "Falling back to source install from ${EWTS_PY_ROOT}"
-
-  if [[ ${WITH_EDITABLE} == true ]]; then
-    pip install --editable "${EWTS_PY_ROOT}" || exit
-  else
-    pip install "${EWTS_PY_ROOT}" || exit
-  fi
-fi
-
 if [[ "$build_framework" == true ]]; then
   cd $REPOROOT/src/troute-network
   if [[ ${WITH_EDITABLE} == true ]]; then
