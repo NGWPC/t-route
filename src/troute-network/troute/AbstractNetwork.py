@@ -24,12 +24,13 @@ class AbstractNetwork(ABC):
     """
     
     """
-    __slots__ = ["_dataframe", "_waterbody_connections", "_gages",  
-                "_terminal_codes", "_connections", "_waterbody_df", 
+    __slots__ = ["_dataframe", "_waterbody_connections", "_gages",
+                "_terminal_codes", "_connections", "_waterbody_df",
                 "_waterbody_types_df", "_waterbody_type_specified", "_link_gage_df",
                 "_canadian_gage_link_df",
                 "_independent_networks", "_reaches_by_tw", "_flowpath_dict",
-                "_reverse_network", "_q0", "_t0", "_link_lake_crosswalk",
+                "_reverse_network",
+                "_q0", "_t0", "_link_lake_crosswalk",
                 "_usgs_lake_gage_crosswalk", "_usace_lake_gage_crosswalk", "_usbr_lake_gage_crosswalk", "_rfc_lake_gage_crosswalk",
                 "_qlateral", "_eloss", "_use_et_channel_loss", "_break_segments", "_segment_index", "_coastal_boundary_depth_df",
                 "supernetwork_parameters", "waterbody_parameters","data_assimilation_parameters",
@@ -247,7 +248,7 @@ class AbstractNetwork(ABC):
     @property
     def reverse_network(self):
         """
-        
+
         """
         if self._reverse_network is None:
             self._reverse_network = reverse_network(self.connections)
@@ -286,7 +287,9 @@ class AbstractNetwork(ABC):
                         split_at_waterbodies_and_junctions, self.network_break_segments, net
                     )
                 else:
-                    path_func = partial(split_at_junction, net)
+                    # Fast path: dfs_decomposition's path_func=None inlines the
+                    # equivalent of ``partial(split_at_junction, net)``.
+                    path_func = None
 
                 self._reaches_by_tw[tw] = dfs_decomposition(net, path_func)
         return self._reaches_by_tw
