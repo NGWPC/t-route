@@ -3,31 +3,57 @@ FROM rockylinux:9.2 AS rocky-base
 
 WORKDIR "/t-route/"
 
-# Install system dependencies
-RUN yum install -y epel-release
+# Install system dependencies. EPEL provides netcdf-* and gdal; gdal-devel
+# lives in the CRB (CodeReady Builder) repo which is disabled by default
+# on Rocky Linux 9.
+RUN yum install -y epel-release dnf-plugins-core \
+    && yum config-manager --set-enabled crb
 RUN yum install -y netcdf netcdf-fortran netcdf-fortran-devel netcdf-openmpi
 RUN yum install -y git cmake python python-devel pip
+# GDAL is needed at install time on arm64: troute-network requires fiona,
+# which has no pre-built aarch64 wheel for python 3.9 and falls back to
+# building from source. fiona/_transform.cpp also needs a C++ compiler
+# (cc1plus -- shipped in gcc-c++, not the base gcc that gdal-devel pulls).
+RUN yum install -y gdal gdal-devel gcc-c++
 
-# ???
-RUN ln -s /usr/lib64/gfortran/modules/netcdf.mod /usr/include/openmpi-x86_64/netcdf.mod
+# Expose the gfortran netcdf module to the openmpi include path that
+# t-route's compiler.sh looks at. The arch-suffixed dir name comes from
+# rocky's netcdf-openmpi package (openmpi-aarch64 on arm64,
+# openmpi-x86_64 on x86_64), so resolve it at build time.
+RUN ln -s /usr/lib64/gfortran/modules/netcdf.mod \
+          "/usr/include/openmpi-$(uname -m)/netcdf.mod"
 
 # Setup virtual environment
 ENV VIRTUAL_ENV=/opt/venv
 RUN python3 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# Install non-t-route dependencies
+# Install non-t-route dependencies. matplotlib + psutil are extra deps
+# the benchmark/ harness needs (chart generation + RSS sampler); the
+# rest are runtime deps for nwm_routing itself.
 COPY requirements.txt .
-RUN python -m pip install -r requirements.txt
+RUN python -m pip install -r requirements.txt \
+    && python -m pip install matplotlib psutil
 
 ### DEV IMAGE ###
 FROM rocky-base AS dev
 
-# Install t-route
+# Install t-route. The [jupyter] extra pulls contextily -> rasterio,
+# which needs GDAL system libraries to build from source on arm64;
+# skip those extras here -- the benchmark doesn't need them, and a
+# downstream user wanting notebooks can `pip install .[jupyter]` after
+# `yum install gdal-devel` themselves.
+#
+# TROUTE_NATIVE controls whether the MC Fortran kernel is built with
+# host-specific arch flags (-mcpu=native / -march=native). Default 0
+# produces a portable binary safe to move between CPUs; pass
+# ``--build-arg TROUTE_NATIVE=1`` for a benchmark image tied to the
+# build host's CPU (gains a few % wall on the kernel, loses portability).
+ARG TROUTE_NATIVE=0
+ENV TROUTE_NATIVE=${TROUTE_NATIVE}
 COPY pyproject.toml compiler.sh ./
 COPY src /t-route/src
-RUN python -m pip install .[jupyter,test]
-RUN ls -R /t-route/
+RUN python -m pip install .[test]
 RUN ./compiler.sh
 
 # Optional expose 800 if not using devcontainer
