@@ -148,7 +148,7 @@ def nwm_route(
         waterbody_type_specified,
         subnetwork_list,
         flowveldepth_interorder,
-        from_files = from_files,
+        from_files=from_files,
         qlat_add_loc=qlat_add_loc,
     )
     LOG.debug("MC computation complete in %s seconds." % (time.time() - start_time_mc))
