@@ -15,8 +15,8 @@ script, run once:
      dataset self-contained.
 
 Usage:
-    python benchmark/prep_conus.py
-    python benchmark/prep_conus.py --src /path/to/nhf.gpkg --force
+    python benchmark/prep_conus.py --src /path/to/nhf_1.1.4.gpkg
+    python benchmark/prep_conus.py --src /path/to/nhf_1.1.4.gpkg --force
 """
 from __future__ import annotations
 
@@ -34,7 +34,6 @@ import numpy as np
 BENCH_DIR = Path(__file__).resolve().parent
 CONUS_DIR = BENCH_DIR / "data" / "conus"
 MANIFEST = CONUS_DIR / "MANIFEST.json"
-DEFAULT_SRC = Path("/Volumes/data/hydrography/nhf_1.1.4.gpkg")
 
 try:  # pragma: no cover
     from troute.nhf_preprocess import _FLOWPATHS_CHANNEL_COLS as CHANNEL_COLS
@@ -57,9 +56,19 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def clone_and_clean(src: Path, dst: Path) -> tuple[dict, list[int]]:
+def clone_and_clean(
+    src: Path, dst: Path,
+) -> tuple[dict[str, int], list[int], int]:
     """Verbatim-copy the geopackage, drop triggers, repair non-finite
-    channel parameters in `flowpaths`. Returns (repaired counts, fp_ids)."""
+    channel parameters in `flowpaths`.
+
+    Returns:
+        repaired:       per-column count of non-finite rows replaced by the
+                        column's finite median ({col_name: row_count}).
+        fp_ids:         every flowpaths.fp_id, in source order.
+        lakes_emptied:  number of rows deleted from the lakes layer (0 if
+                        the geopackage had no lakes layer).
+    """
     print(f"  copying {src.stat().st_size / 1e9:.1f} GB geopackage ...")
     shutil.copyfile(src, dst)
 
@@ -135,8 +144,8 @@ def build_forcing(fp_ids: list[int], dst_dir: Path, hours: int,
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--src", type=Path, default=DEFAULT_SRC,
-                    help=f"source CONUS geopackage (default: {DEFAULT_SRC})")
+    ap.add_argument("--src", type=Path, required=True,
+                    help="source CONUS geopackage (NHF v1.1.4 .gpkg)")
     ap.add_argument("--forcing-hours", type=int, default=2,
                     help="hourly forcing files to generate (default 2; "
                          "nts = hours * 12)")

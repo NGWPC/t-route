@@ -65,9 +65,22 @@ def replay_once(calls: list[dict], fn) -> tuple[float, list]:
     return time.perf_counter() - t0, results
 
 
-def compare(fresh_results: list, calls: list[dict]) -> tuple[list, float, int]:
-    """Compare the replayed flowveldepth output to the harvested baseline."""
-    lines, worst_rel, new_nan_total = [], 0.0, 0
+def compare(
+    fresh_results: list, calls: list[dict],
+) -> tuple[list[str], float, int]:
+    """Compare the replayed flowveldepth output to the harvested baseline.
+
+    Returns:
+        lines:           per-call drift summary strings, one per replayed
+                         call, ready to print.
+        worst_rel:       max sampled relative drift across all calls
+                         (NaN values count as 0).
+        new_nan_total:   total NaN+Inf entries observed in the replayed
+                         output that were finite in the baseline.
+    """
+    lines: list[str] = []
+    worst_rel = 0.0
+    new_nan_total = 0
     for ci, (res, call) in enumerate(zip(fresh_results, calls)):
         f = summarize_result(res)[FLOWVELDEPTH_IDX]
         b = call["result_summary"][FLOWVELDEPTH_IDX]
