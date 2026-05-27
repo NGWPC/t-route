@@ -1,6 +1,6 @@
 """Tests for ``troute.nhf_preprocess``.
 
-Covers ``_validate_flowpaths_channel_params`` — the load-time guard that
+Covers ``_validate_flowpaths_channel_params``, the load-time guard that
 rejects ``flowpaths`` containing non-finite (NaN/Inf) channel parameters
 which would otherwise propagate into NaN routing output via ``sqrt(s0)``
 in the Muskingum-Cunge kernel.
@@ -13,6 +13,7 @@ import pytest
 from troute.nhf_preprocess import (
     _BAD_FPID_PREVIEW_LIMIT,
     _FLOWPATHS_CHANNEL_COLS,
+    _groupby_to_list_dict,
     _validate_flowpaths_channel_params,
 )
 
@@ -154,3 +155,61 @@ def test_validator_works_with_partial_channel_columns():
     msg = str(excinfo.value)
     assert "'slope': 1" in msg
     assert "20" in msg
+
+
+# ----- _groupby_to_list_dict (Step N2 helper) ------------------------------
+# These tests exist to guarantee parity with the pandas idiom
+#   df.groupby(key)[val].apply(list).to_dict()
+# that this helper replaces. Anything pandas does (NaN-key handling, key
+# unboxing, empty-frame behavior) the helper must match for the
+# crosswalk_nex_flowpath_poi callers in nhf_preprocess to stay correct.
+
+
+def _pandas_reference(df, key, val):
+    """The legacy pandas idiom the helper replaces."""
+    return df.groupby(key)[val].apply(list).to_dict()
+
+
+def test_groupby_helper_matches_pandas_basic_int_keys():
+    df = pd.DataFrame({"k": [10, 20, 10, 30, 20], "v": [1, 2, 3, 4, 5]})
+    out = _groupby_to_list_dict(df, "k", "v")
+    assert out == _pandas_reference(df, "k", "v")
+    # And the keys are python ints, not numpy scalars.
+    assert all(type(k) is int for k in out)
+
+
+def test_groupby_helper_matches_pandas_with_nan_keys():
+    # Pandas' default groupby drops NaN keys; the numpy helper must too.
+    df = pd.DataFrame({
+        "k": [10.0, np.nan, 10.0, 20.0, np.nan, 30.0],
+        "v": [1, 2, 3, 4, 5, 6],
+    })
+    out = _groupby_to_list_dict(df, "k", "v")
+    ref = _pandas_reference(df, "k", "v")
+    assert out == ref
+    # Explicitly: no NaN key in the output.
+    assert not any(isinstance(k, float) and pd.isna(k) for k in out)
+
+
+def test_groupby_helper_matches_pandas_all_nan_keys():
+    df = pd.DataFrame({
+        "k": [np.nan, np.nan, np.nan],
+        "v": [1, 2, 3],
+    })
+    out = _groupby_to_list_dict(df, "k", "v")
+    assert out == {}
+    assert out == _pandas_reference(df, "k", "v")
+
+
+def test_groupby_helper_matches_pandas_object_keys():
+    df = pd.DataFrame({
+        "k": ["a", "b", "a", "c"],
+        "v": [1, 2, 3, 4],
+    })
+    out = _groupby_to_list_dict(df, "k", "v")
+    assert out == _pandas_reference(df, "k", "v")
+
+
+def test_groupby_helper_empty_frame():
+    df = pd.DataFrame({"k": [], "v": []}, dtype=float)
+    assert _groupby_to_list_dict(df, "k", "v") == {}
