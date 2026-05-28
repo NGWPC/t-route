@@ -19,10 +19,6 @@ try:
     TROUTE_USE_EWTS = True
 except ImportError:
     TROUTE_USE_EWTS = False
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)s - %(funcName)s]: %(message)s',
-    )
 
 _VAR_NAME_UNITS_MAP = {
     BmiVars.CATCHMENT_VALUE: ['streamflow_cms', 'm3 s-1'],
@@ -55,6 +51,19 @@ _INPUT_VAR_NAMES = [
     BmiVars.NGEN_DT,
 ]
 
+def _configure_stdout_logging():
+    LOG.setLevel(logging.INFO)
+
+    if not LOG.handlers:
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - "
+            "[%(filename)s:%(lineno)s - %(funcName)s]: %(message)s"
+        ))
+        LOG.addHandler(handler)
+
+    LOG.propagate = False
 
 class BmiTroute(Bmi):
     _model: Model
@@ -65,7 +74,10 @@ class BmiTroute(Bmi):
             if val in {"1", "true", "yes", "on"}:
                 configure_existing_logger(LOG)
             else:
-                LOG.warning("EWTS installed but EWTS_USE_NGEN_BRIDGE not on. Falling back to default logging.")
+                _configure_stdout_logging()
+                LOG.warning("EWTS importable but EWTS_USE_NGEN_BRIDGE not on. Falling back to default logging.")
+        else:
+            _configure_stdout_logging()
 
         super().__init__()
         self._values: dict[str, NDArray] = {
