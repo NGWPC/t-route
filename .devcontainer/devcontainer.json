@@ -8,8 +8,14 @@
 	"runArgs": ["--ulimit", "nofile=10000:10000"],
 	"workspaceFolder": "/t-route",
 	"workspaceMount": "source=${localWorkspaceFolder},target=/t-route,type=bind",
+	// Optional /hydrofabric mount. Required for the benchmark workflow,
+	// harmless otherwise. Source defaults to an empty placeholder dir
+	// committed to the repo so the container starts without a hydrofabric
+	// dataset on the host. To enable benchmarks in VS Code, export
+	// TROUTE_HYDROFABRIC_DIR=/abs/path/to/hydrofabric in your shell BEFORE
+	// launching VS Code. See .devcontainer/no-hydrofabric/README.md.
 	"mounts": [
-		"source=/path/to/hydrofabric,target=/hydrofabric,type=bind"
+		"source=${localEnv:TROUTE_HYDROFABRIC_DIR:${localWorkspaceFolder}/.devcontainer/no-hydrofabric},target=/hydrofabric,type=bind"
 	],
 	"customizations": {
 	"vscode": {

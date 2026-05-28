@@ -222,13 +222,33 @@ commit the new PNGs in `figures/`.
 
 ### VS Code Dev Containers workflow
 
-If you prefer Dev Containers in VS Code, open the repository with
-the Dev Containers extension and add the `/hydrofabric` host bind
-to `.devcontainer/devcontainer.json`. Set `MALLOC_ARENA_MAX=2` in
-the `containerEnv` block of the same file so every terminal in
-the container has it. From an integrated terminal the bench
-commands are the same except you drop the outer `docker run`
-shell, since you are already inside the container.
+The repo's `.devcontainer/devcontainer.json` resolves the
+`/hydrofabric` bind-mount source from the host environment variable
+`TROUTE_HYDROFABRIC_DIR`, falling back to an empty placeholder
+directory at `.devcontainer/no-hydrofabric/` so the container
+starts cleanly for non-benchmark users.
+
+To run benchmarks from inside VS Code:
+
+1. Export the env var in your shell **before** launching VS Code so
+   it gets inherited:
+   ```bash
+   export TROUTE_HYDROFABRIC_DIR=/absolute/path/to/your/hydrofabric/dir
+   code /path/to/t-route
+   ```
+2. "Reopen in Container" picks up the mount automatically; the
+   geopackage is then visible at `/hydrofabric` inside the
+   container.
+3. Set `MALLOC_ARENA_MAX=2` in your shell or in the `containerEnv`
+   block of `devcontainer.json` so every terminal in the container
+   inherits it.
+4. From an integrated terminal the bench commands are the same as
+   above except you drop the outer `docker run` shell, since you
+   are already inside the container.
+
+If `TROUTE_HYDROFABRIC_DIR` is unset, the container still starts
+with an empty `/hydrofabric` directory; only the benchmark prep
+scripts will complain.
 
 ## Notes
 
