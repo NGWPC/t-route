@@ -223,10 +223,11 @@ commit the new PNGs in `figures/`.
 ### VS Code Dev Containers workflow
 
 The repo's `.devcontainer/devcontainer.json` resolves the
-`/hydrofabric` bind-mount source from the host environment variable
-`TROUTE_HYDROFABRIC_DIR`, falling back to an empty placeholder
-directory at `.devcontainer/no-hydrofabric/` so the container
-starts cleanly for non-benchmark users.
+`/hydrofabric` bind-mount source from the host environment
+variable `TROUTE_HYDROFABRIC_DIR`, falling back to
+`/tmp/troute-no-hydrofabric` (which the devcontainer's
+`initializeCommand` creates on the host before container start)
+so the container starts cleanly for non-benchmark users.
 
 To run benchmarks from inside VS Code:
 
@@ -247,8 +248,8 @@ To run benchmarks from inside VS Code:
    are already inside the container.
 
 If `TROUTE_HYDROFABRIC_DIR` is unset, the container still starts
-with an empty `/hydrofabric` directory; only the benchmark prep
-scripts will complain.
+with `/hydrofabric` mapped to the empty `/tmp/troute-no-hydrofabric`
+directory; only the benchmark prep scripts will complain.
 
 ## Notes
 
