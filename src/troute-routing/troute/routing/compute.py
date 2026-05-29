@@ -1561,9 +1561,9 @@ def compute_nhd_routing_v02(
     )
 
     if subnetwork_list == [None, None, None]:
-        execution_plan = None
-    results, execution_plan = compute_routing(config, topology, reach_data, waterbody_data, forcing_data, assimilation_data, execution_plan)
-    return results, execution_plan
+        subnetwork_list = None
+    results, subnetwork_list = compute_routing(config, topology, reach_data, waterbody_data, forcing_data, assimilation_data, subnetwork_list)
+    return results, subnetwork_list
 
 
 def compute_nhd_routing_v02_old(
