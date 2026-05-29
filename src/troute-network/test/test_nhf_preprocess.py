@@ -1,9 +1,13 @@
 """Tests for ``troute.nhf_preprocess``.
 
-Covers ``_validate_flowpaths_channel_params``, the load-time guard that
-rejects ``flowpaths`` containing non-finite (NaN/Inf) channel parameters
-which would otherwise propagate into NaN routing output via ``sqrt(s0)``
-in the Muskingum-Cunge kernel.
+Covers:
+  * ``_validate_flowpaths_channel_params`` -- the load-time guard that
+    rejects ``flowpaths`` containing non-finite (NaN/Inf) channel parameters
+    which would otherwise propagate into NaN routing output via ``sqrt(s0)``
+    in the Muskingum-Cunge kernel.
+  * ``_validate_required_columns`` -- the load-time guard that rejects input
+    geopackages missing columns the NHF build requires (e.g. ``segment_order``
+    in ``reference_flowpaths``), replacing cryptic downstream ``KeyError``s.
 """
 
 import numpy as np
@@ -13,8 +17,10 @@ import pytest
 from troute.nhf_preprocess import (
     _BAD_FPID_PREVIEW_LIMIT,
     _FLOWPATHS_CHANNEL_COLS,
+    LAYERS_TO_READ,
     _groupby_to_list_dict,
     _validate_flowpaths_channel_params,
+    _validate_required_columns,
 )
 
 
@@ -155,6 +161,139 @@ def test_validator_works_with_partial_channel_columns():
     msg = str(excinfo.value)
     assert "'slope': 1" in msg
     assert "20" in msg
+
+
+# ----- _validate_required_columns ------------------------------------------
+# Guards that the input geopackage carries every column the NHF build needs.
+# The reported production failure was a missing ``segment_order`` column in
+# ``reference_flowpaths`` surfacing as ``KeyError: ['segment_order'] not in
+# index`` deep inside discretization.
+
+
+def _required_for(layer):
+    """Mirror the validator's rule for a layer's required column set."""
+    required = layer.get("required_columns")
+    if required is None and isinstance(layer["columns"], list):
+        required = layer["columns"]
+    return list(required) if required else []
+
+
+def _make_valid_table_dict():
+    """Build a table_dict satisfying every layer's required columns.
+
+    Required layers get a (zero-row) DataFrame carrying exactly their required
+    columns; non-required layers (lakes, gages, ...) get bare empty frames, as
+    they would when absent from a geopackage.
+    """
+    table_dict = {}
+    for layer in LAYERS_TO_READ:
+        required = _required_for(layer)
+        if required:
+            table_dict[layer["name"]] = pd.DataFrame(columns=required)
+        else:
+            table_dict[layer["name"]] = pd.DataFrame()
+    return table_dict
+
+
+def _layers_with_requirements():
+    return [layer for layer in LAYERS_TO_READ if _required_for(layer)]
+
+
+def test_required_columns_valid_dataset_passes():
+    _validate_required_columns(_make_valid_table_dict())
+
+
+def test_required_columns_reference_flowpaths_spec_includes_segment_order():
+    # Guard the spec itself: the layer that caused the production bug must
+    # declare segment_order as required.
+    rf = next(l for l in LAYERS_TO_READ if l["name"] == "reference_flowpaths")
+    assert "segment_order" in _required_for(rf)
+
+
+def test_required_columns_missing_segment_order_raises():
+    # The exact production failure: reference_flowpaths without segment_order.
+    td = _make_valid_table_dict()
+    td["reference_flowpaths"] = td["reference_flowpaths"].drop(columns=["segment_order"])
+    with pytest.raises(ValueError) as excinfo:
+        _validate_required_columns(td)
+    msg = str(excinfo.value)
+    assert "reference_flowpaths" in msg
+    assert "segment_order" in msg
+    # Message should be actionable about hydrofabric versioning.
+    assert "hydrofabric" in msg
+
+
+def test_required_columns_missing_flowpaths_col_raises():
+    # flowpaths requirements are derived from its explicit `columns` list.
+    td = _make_valid_table_dict()
+    assert "n" in td["flowpaths"].columns  # sanity
+    td["flowpaths"] = td["flowpaths"].drop(columns=["n"])
+    with pytest.raises(ValueError) as excinfo:
+        _validate_required_columns(td)
+    msg = str(excinfo.value)
+    assert "flowpaths" in msg
+    assert "'n'" in msg
+
+
+def test_required_columns_aggregates_across_layers():
+    # Multiple layers missing columns -> a single error listing all of them.
+    td = _make_valid_table_dict()
+    td["reference_flowpaths"] = td["reference_flowpaths"].drop(columns=["segment_order"])
+    td["virtual_flowpaths"] = td["virtual_flowpaths"].drop(columns=["dn_virtual_nex_id"])
+    with pytest.raises(ValueError) as excinfo:
+        _validate_required_columns(td)
+    msg = str(excinfo.value)
+    assert "reference_flowpaths" in msg and "segment_order" in msg
+    assert "virtual_flowpaths" in msg and "dn_virtual_nex_id" in msg
+
+
+def test_required_columns_optional_empty_layers_do_not_raise():
+    # lakes/gages/hydrolocations/virtual_nexus are used conditionally and may
+    # be legitimately empty/absent; they must not trigger validation.
+    td = _make_valid_table_dict()
+    for name in ("lakes", "gages", "hydrolocations", "virtual_nexus"):
+        assert td[name].empty
+    _validate_required_columns(td)  # must not raise
+
+
+def test_required_columns_absent_layer_reports_full_required_set():
+    # A layer entirely missing from the geopackage is replaced upstream with a
+    # bare empty DataFrame (no columns) -> its full required set is reported.
+    td = _make_valid_table_dict()
+    td["reference_flowpaths"] = pd.DataFrame()  # simulate missing layer
+    with pytest.raises(ValueError) as excinfo:
+        _validate_required_columns(td)
+    msg = str(excinfo.value)
+    for col in _required_for(
+        next(l for l in LAYERS_TO_READ if l["name"] == "reference_flowpaths")
+    ):
+        assert col in msg
+
+
+def test_required_columns_none_layer_reports_full_required_set():
+    # Defensive: a layer key absent from the dict entirely (None) is treated as
+    # missing all its required columns rather than crashing.
+    td = _make_valid_table_dict()
+    td["reference_flowpaths"] = None
+    with pytest.raises(ValueError) as excinfo:
+        _validate_required_columns(td)
+    assert "reference_flowpaths" in str(excinfo.value)
+
+
+def test_required_columns_zero_row_layer_with_schema_passes():
+    # A present-but-empty layer still carries its schema columns, so a 0-row
+    # frame with the right columns must pass (distinct from an absent layer).
+    td = _make_valid_table_dict()
+    for layer in _layers_with_requirements():
+        assert td[layer["name"]].empty  # zero rows...
+    _validate_required_columns(td)  # ...but columns present -> passes
+
+
+def test_required_columns_extra_columns_are_ignored():
+    # Datasets carrying additional columns beyond the required set are fine.
+    td = _make_valid_table_dict()
+    td["reference_flowpaths"]["some_extra_col"] = pd.Series(dtype=float)
+    _validate_required_columns(td)
 
 
 # ----- _groupby_to_list_dict (Step N2 helper) ------------------------------

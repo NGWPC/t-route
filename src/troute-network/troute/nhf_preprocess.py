@@ -46,6 +46,52 @@ def _validate_flowpaths_channel_params(flowpaths):
         f"Affected fp_ids{more}: {preview}"
     )
 
+def _validate_required_columns(table_dict):
+    """Raise if any layer is missing columns the NHF build requires.
+
+    A layer's required columns come from its ``required_columns`` entry when
+    present, otherwise from its explicit ``columns`` request list (every column
+    we ask for from those layers is consumed downstream). Layers loaded with
+    ``columns=None`` and no ``required_columns`` (e.g. lakes, gages,
+    hydrolocations) are used conditionally and may be legitimately empty, so
+    they are not validated here.
+
+    Failing here -- at load time, with the full list of missing columns across
+    all layers -- replaces cryptic ``KeyError``s raised deep inside
+    discretization/crosswalk steps (e.g. ``['segment_order'] not in index``).
+
+    Note: a layer present but with zero rows still carries its schema, so its
+    columns validate normally; a layer entirely absent from the geopackage was
+    replaced upstream with an empty ``DataFrame()`` carrying no columns, so its
+    full required set is correctly reported as missing.
+    """
+    missing_by_layer = {}
+    for layer in LAYERS_TO_READ:
+        required = layer.get("required_columns")
+        if required is None and isinstance(layer["columns"], list):
+            required = layer["columns"]
+        if not required:
+            continue
+        df = table_dict.get(layer["name"])
+        if df is None:
+            missing_by_layer[layer["name"]] = list(required)
+            continue
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            missing_by_layer[layer["name"]] = missing
+    if missing_by_layer:
+        details = "; ".join(
+            f"{name}: {cols}" for name, cols in missing_by_layer.items()
+        )
+        raise ValueError(
+            "Input geopackage is missing required column(s) needed by the NHF "
+            f"network build -> {details}. This usually means the hydrofabric "
+            "predates the current schema (for example, older datasets lack the "
+            "'segment_order' column in 'reference_flowpaths'); regenerate or "
+            "update the dataset to a compatible hydrofabric version."
+        )
+
+
 # Only read relevant areas of NHF to cut down on processing time and memory footprint.
 LAYERS_TO_READ = [
     {
@@ -69,6 +115,11 @@ LAYERS_TO_READ = [
     {
         "name": "reference_flowpaths",
         "columns": None,  # Loads all
+        # Subset of columns the NHF build consumes unconditionally (the rest of
+        # the layer is loaded but optional). `segment_order` in particular is a
+        # newer hydrofabric field; older datasets lack it and fail deep in
+        # discretization with a cryptic pandas KeyError.
+        "required_columns": ["fp_id", "virtual_fp_id", "segment_order", "div_id"],
         "ignore_geometry": True
     },
     {
@@ -195,6 +246,7 @@ def read_geo_file(supernetwork_parameters, cpu_pool):
     else:
         raise RuntimeError("Unsupported file type: {}".format(file_type))
 
+    _validate_required_columns(table_dict)
     _validate_flowpaths_channel_params(table_dict.get("flowpaths"))
     return table_dict
 
