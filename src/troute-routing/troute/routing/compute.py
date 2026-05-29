@@ -1,8 +1,35 @@
+"""
+Routing terminology
+-------------------
+
+reach
+    A directed river segment used as the fundamental routing unit.
+network
+    A connected collection of reaches draining to a common terminal reach.
+terminal_reach
+    The downstream-most reach in a network.
+network_partition
+    A connected subset of a network.
+dependency_level
+    A topological execution tier. Partitions within a level may be routed
+    concurrently once all upstream levels are complete.
+reach_chain
+    A contiguous sequence of reaches without internal junctions/tributaries.
+compute_batch
+    A collection of independent reach chains executed simultaneously.
+routing_execution_plan
+    A dependency-ordered collection of compute batches used to execute
+    routing computations.
+"""
+
 from __future__ import annotations
+from ast import For
 from collections import defaultdict
+from dataclasses import asdict, dataclass, field
+import enum
 from itertools import chain
-from functools import partial
-from typing import Literal, TYPE_CHECKING, Iterable
+from functools import cached_property, partial
+from typing import Any, Callable, Literal, TYPE_CHECKING, Iterable, TypedDict, Union, get_args
 from joblib import delayed, Parallel
 from datetime import datetime, timedelta
 import time
@@ -24,12 +51,653 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+PARALLEL_COMPUTE_METHODS = Literal[
+    "by-subnetwork-jit-clustered",
+    "by-subnetwork-jit",
+    "by-network",
+    "serial",
+    "bmi"
+]
 _compute_func_map = defaultdict(
     compute_network_structured,
     {
         "V02-structured": compute_network_structured,
     },
 )
+_qlat_loc_map = {"top": 0, "middle": 1, "bottom": 2}
+
+### OBJECT DEFINITIONS ###
+
+ReachId = int  # A single routing link
+TailwaterId = ReachId  # The outlet of a RoutingPath or tree
+Partition = set[
+    ReachId
+]  # A connected subset of a tree grouped for dependency management and execution.
+RoutingPath = set[
+    ReachId
+]  # A contiguous sequence of reaches uninterrupted by confluences, waterbodies, or points of interest.
+OrderedRoutingPaths = list[
+    RoutingPath
+]  # A list of routing paths ordered such that upstream paths are run before any of their downstream dependent paths
+RoutingLevel = int  # A hierarchical rank within a tree where level 0 is the tailwater/root and increasing levels move upstream.
+Adjacency = dict[
+    ReachId, list[ReachId]
+]  # The connection between a reach and downstream reach(es)
+DownstreamGraph = dict[
+    ReachId, Adjacency
+]  # A representation of network connectivity for the full routing graph or a subgraph
+UpstreamAdjacency = dict[
+    ReachId, list[ReachId]
+]  # The connection between a reach and upstream reach(es)
+UpstreamGraph = dict[
+    ReachId, UpstreamAdjacency
+]  # A representation of network connectivity for the full routing graph or a subgraph
+Partitions = dict[
+    TailwaterId, DownstreamGraph
+]  # A connected subset of a tree grouped for dependency management and execution.
+
+
+class BoundaryCondition(TypedDict):
+    """A storage container for flow values between reaches in different RoutingLevels."""
+
+    results: np.ndarray
+    position_index: int
+
+
+@dataclass
+class ComputeConfig:
+    """Parameters to control routing compute call."""
+
+    nts: int
+    dt: float
+    qts_subdivisions: int
+    t0: datetime
+    ssout: float
+    data_assimilation_parameters: dict[str, Any]
+    waterbody_type_specified: bool
+    assume_short_ts: bool
+    return_courant: bool
+    from_files: bool
+    cpu_pool: int
+    parallel_compute_method: PARALLEL_COMPUTE_METHODS
+    qlat_add_loc: str
+    compute_func_name: str
+    subnetwork_target_size: int
+    backend: str = field(default_factory=lambda: "loky")
+
+    def __post_init__(self):
+        # Control serial execution by forcing single worker instead of a code change.
+        if self.parallel_compute_method == "serial":
+            self.cpu_pool = 1
+
+    @property
+    def compute_function(self) -> Callable:
+        """Callable routing function."""
+        return _compute_func_map[self.compute_func_name]
+
+    @property
+    def qlat_add_loc_c(self) -> int:
+        """Integer representing lateral flow addition location."""
+        return _qlat_loc_map[self.qlat_add_loc]
+
+    @property
+    def t0_str(self) -> str:
+        """String representation of t0 datetime."""
+        return self.t0.strftime("%Y-%m-%d_%H:%M:%S")
+
+    @property
+    def da_decay_coefficient(self) -> float:
+        return self.data_assimilation_parameters.get("da_decay_coefficient", 0)
+
+
+@dataclass
+class ComputationJob:
+    """A set of routing paths passed together to the routing kernel for execution."""
+
+    connections: UpstreamGraph
+    routing_paths: RoutingPath
+    waterbodies_df: pd.DataFrame
+    waterbodies_types_df: pd.DataFrame
+    river_df: pd.DataFrame
+    tailwaters: list[TailwaterId]
+    offnetwork_upstreams: set[ReachId]
+
+    @classmethod
+    def from_multijob(cls, jobs: list[ComputationJob]):
+        merged_connections: UpstreamGraph = {}
+        for job in jobs:
+            merged_connections.update(job.connections)
+        merged_routing_paths = list(
+            chain.from_iterable(job.routing_paths for job in jobs)
+        )
+        waterbodies_dfs = [
+            job.waterbodies_df for job in jobs if not job.waterbodies_df.empty
+        ]
+        merged_waterbodies_df = (
+            pd.concat(waterbodies_dfs)
+            .loc[lambda df: ~df.index.duplicated()]
+            .sort_index()
+            if waterbodies_dfs
+            else pd.DataFrame()
+        )
+        waterbodies_types_dfs = [
+            job.waterbodies_types_df
+            for job in jobs
+            if not job.waterbodies_types_df.empty
+        ]
+        merged_waterbodies_types_df = (
+            pd.concat(waterbodies_types_dfs)
+            .loc[lambda df: ~df.index.duplicated()]
+            .sort_index()
+            if waterbodies_types_dfs
+            else pd.DataFrame()
+        )
+        river_dfs = [job.river_df for job in jobs if not job.river_df.empty]
+        merged_river_df = (
+            pd.concat(river_dfs).loc[lambda df: ~df.index.duplicated()].sort_index()
+            if river_dfs
+            else pd.DataFrame()
+        )
+        merged_tailwaters = list(chain.from_iterable(job.tailwaters for job in jobs))
+        merged_offnetwork_upstreams: set[ReachId] = set().union(
+            *(job.offnetwork_upstreams for job in jobs)
+        )
+        return cls(
+            connections=merged_connections,
+            routing_paths=merged_routing_paths,
+            waterbodies_df=merged_waterbodies_df,
+            waterbodies_types_df=merged_waterbodies_types_df,
+            river_df=merged_river_df,
+            tailwaters=merged_tailwaters,
+            offnetwork_upstreams=merged_offnetwork_upstreams,
+        )
+
+    @property
+    def waterbody_reaches(self) -> list[ReachId]:
+        return list(self.waterbodies_df.index.values)
+
+    @property
+    def river_reaches(self) -> list[ReachId]:
+        return self.river_df.index.values
+
+    @cached_property
+    def reach_types(self) -> list[tuple[Any, int]]:
+        return _build_reach_type_list(self.routing_paths, self.waterbody_reaches)
+
+    @cached_property
+    def waterbody_types(self) -> list[tuple[Any, int]]:
+        pass
+
+    @property
+    def river_fields(self) -> np.ndarray:
+        return self.river_df.columns.values
+
+    @property
+    def river_values(self) -> np.ndarray:
+        return self.river_df.values
+
+    @property
+    def waterbody_values(self) -> np.ndarray:
+        return self.waterbodies_df.values
+
+
+@dataclass
+class NetworkTopology:
+    """Representation of the full directed graph representing all routing topology, potentially consisting of multiple disconnected trees (a forest) with tools to traverse and subset."""
+
+    connections: DownstreamGraph
+    reverse_connections: UpstreamGraph
+    paths_by_tailwater: dict[TailwaterId, RoutingPath]
+    connections_by_tw: dict[TailwaterId, DownstreamGraph]
+
+    @property
+    def tailwaters(self) -> list[TailwaterId]:
+        """Get all network tailwaters."""
+        return list(self.paths_by_tailwater.keys())
+
+
+@dataclass
+class ReachData:
+    """Concise package of river channel data."""
+
+    dataframe: pd.DataFrame
+
+    def generate_view(self, reaches: list[ReachId]) -> pd.DataFrame:
+        """Subset data to a set of reaches."""
+        if self.dataframe.empty:
+            return pd.DataFrame()
+        return self.dataframe.loc[
+            reaches, ["dt", "bw", "tw", "twcc", "dx", "n", "ncc", "cs", "s0", "alt"]
+        ]
+
+
+@dataclass
+class WaterbodyData:
+    """Concise package of waterbody data."""
+
+    dataframe: pd.DataFrame
+    types: pd.DataFrame
+
+    def generate_view(
+        self, reaches: list[ReachId]
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Subset data to a set of reaches."""
+        if self.dataframe.empty:
+            return pd.DataFrame(), pd.DataFrame()
+        return self.dataframe.loc[
+            reaches,
+            [
+                "LkArea",
+                "LkMxE",
+                "OrificeA",
+                "OrificeC",
+                "OrificeE",
+                "WeirC",
+                "WeirE",
+                "WeirL",
+                "ifd",
+                "qd0",
+                "h0",
+            ],
+        ], self.types.loc[reaches]
+
+
+@dataclass
+class ForcingData:
+    """Concise package of forcing data."""
+
+    qlats: pd.DataFrame
+    q0: pd.DataFrame
+    eloss: pd.DataFrame
+
+
+@dataclass
+class AssimilationData:
+    """Concise package of assimilation data."""
+
+    reservoir_usgs_df: pd.DataFrame
+    reservoir_usgs_param_df: pd.DataFrame
+    reservoir_usace_param_df: pd.DataFrame
+    reservoir_usace_df: pd.DataFrame
+    reservoir_usbr_df: pd.DataFrame
+    reservoir_usbr_param_df: pd.DataFrame
+    reservoir_rfc_df: pd.DataFrame
+    reservoir_rfc_param_df: pd.DataFrame
+    great_lakes_df: pd.DataFrame
+    great_lakes_param_df: pd.DataFrame
+    great_lakes_climatology_df: pd.DataFrame
+    usgs_df: pd.DataFrame
+    lastobs_df: pd.DataFrame
+
+
+@dataclass
+class ComputeInputs:
+    """Concise arguments for compute_network_structured."""
+
+    nsteps: int
+    dt: float
+    qts_subdivisions: int
+    reaches_wTypes: list[tuple[list[int], int]]
+    upstream_connections: dict[int, list[int]]
+    data_idx: NDArray[np.int64]
+    data_cols: NDArray[np.object_]
+    data_values: NDArray[np.float32]
+    initial_conditions: NDArray[np.float32]
+    qlat_values: NDArray[np.float32]
+    eloss_values: NDArray[np.float32]
+    ssout: float
+    lake_numbers_col: list[int]
+    wbody_cols: NDArray[np.float64]
+    data_assimilation_parameters: dict[str, Any]
+    reservoir_types: NDArray[np.int32]
+    reservoir_type_specified: bool
+    model_start_time: str
+    usgs_values: NDArray[np.float32]
+    usgs_positions: NDArray[np.int32]
+    usgs_positions_reach: NDArray[np.int32]
+    usgs_positions_gage: NDArray[np.int32]
+    lastobs_values_init: NDArray[np.float32]
+    time_since_lastobs_init: NDArray[np.float32]
+    da_decay_coefficient: float
+    reservoir_usgs_obs: NDArray[np.float32]
+    reservoir_usgs_wbody_idx: NDArray[np.int32]
+    reservoir_usgs_time: NDArray[np.float32]
+    reservoir_usgs_update_time: NDArray[np.float32]
+    reservoir_usgs_prev_persisted_flow: NDArray[np.float32]
+    reservoir_usgs_persistence_update_time: NDArray[np.float32]
+    reservoir_usgs_persistence_index: NDArray[np.float32]
+    reservoir_usace_obs: NDArray[np.float32]
+    reservoir_usace_wbody_idx: NDArray[np.int32]
+    reservoir_usace_time: NDArray[np.float32]
+    reservoir_usace_update_time: NDArray[np.float32]
+    reservoir_usace_prev_persisted_flow: NDArray[np.float32]
+    reservoir_usace_persistence_update_time: NDArray[np.float32]
+    reservoir_usace_persistence_index: NDArray[np.float32]
+    reservoir_usbr_obs: NDArray[np.float32]
+    reservoir_usbr_wbody_idx: NDArray[np.int32]
+    reservoir_usbr_time: NDArray[np.float32]
+    reservoir_usbr_update_time: NDArray[np.float32]
+    reservoir_usbr_prev_persisted_flow: NDArray[np.float32]
+    reservoir_usbr_persistence_update_time: NDArray[np.float32]
+    reservoir_usbr_persistence_index: NDArray[np.float32]
+    reservoir_rfc_obs: NDArray[np.float32]
+    reservoir_rfc_wbody_idx: NDArray[np.int32]
+    reservoir_rfc_totalCounts: NDArray[np.int32]
+    reservoir_rfc_file: list[str]
+    reservoir_rfc_use_forecast: NDArray[np.int32]
+    reservoir_rfc_timeseries_idx: NDArray[np.int32]
+    reservoir_rfc_update_time: NDArray[np.float32]
+    reservoir_rfc_da_timestep: NDArray[np.int32]
+    reservoir_rfc_persist_days: NDArray[np.int32]
+    great_lakes_idx: NDArray[np.int32]
+    great_lakes_times: NDArray[np.int32]
+    great_lakes_discharge: NDArray[np.float32]
+    great_lakes_param_idx: NDArray[np.int32]
+    great_lakes_param_prev_assim_flow: NDArray[np.float32]
+    great_lakes_param_prev_assim_times: NDArray[np.int32]
+    great_lakes_param_update_times: NDArray[np.int32]
+    great_lakes_climatology: NDArray[np.float32]
+    upstream_results: dict[int, Any] = field(default_factory=dict)
+    assume_short_ts: bool = False
+    return_courant: bool = False
+    da_check_gage: int = -1
+    from_files: bool = True
+    qlat_add_loc: int = 1
+
+
+@dataclass
+class BoundaryConditionStore:
+    """Boundary condition between networks."""
+
+    bcs: dict[ReachId, BoundaryCondition]
+
+    def generate_view(self, reaches: list[ReachId]) -> dict[ReachId, BoundaryCondition]:
+        # TODO: add a view cache
+        return {
+            reach_id: bc for reach_id, bc in self.bcs.items() if reach_id in reaches
+        }
+
+    def update(self, reach_id: ReachId, results: np.ndarray) -> None:
+        self.bcs[reach_id]["results"] = results
+
+    def clear_data(self) -> None:
+        for i in self.bcs.values():
+            i["results"] = None
+
+
+class ExecutionPlan:
+    """An ordered mapping of computation batches and their dependency relationships used to orchestrate network execution."""
+
+    def __init__(
+        self,
+        parallel_compute_method: PARALLEL_COMPUTE_METHODS,
+        topology: NetworkTopology,
+        reach_data: ReachData,
+        waterbody_data: WaterbodyData,
+        assimilation_data: AssimilationData,
+        subnetwork_target_size: int,
+    ):
+        # Validation
+        parallel_options = get_args(PARALLEL_COMPUTE_METHODS)
+        if parallel_compute_method not in parallel_options:
+            opts = " ".join(parallel_options)
+            raise ValueError(
+                f"parallel compute method should be one of {opts} but got {parallel_compute_method}"
+            )
+
+        # Initialization
+        self.batches: dict[RoutingLevel, list[ComputationJob]] = {}
+        if parallel_compute_method == "by-subnetwork-jit-clustered":
+            self._init_clustered_partition_plan(
+                topology,
+                reach_data,
+                waterbody_data,
+                assimilation_data,
+                subnetwork_target_size,
+            )
+        elif parallel_compute_method == "by-subnetwork-jit":
+            self._init_partitioned_plan(
+                topology,
+                reach_data,
+                waterbody_data,
+                assimilation_data,
+                subnetwork_target_size,
+            )
+        elif parallel_compute_method in ["serial", "by-network", "bmi"]:
+            self._init_treewise_plan(topology, reach_data, waterbody_data)
+        self._init_boundary_conditions()
+
+    def _build_compute_job(
+        self,
+        reaches: OrderedRoutingPaths,
+        graph: UpstreamGraph,
+        waterbody_data: WaterbodyData,
+        reach_data: ReachData,
+        tailwaters: list[TailwaterId],
+    ) -> ComputationJob:
+        # Flatten ordered chains to reach ids
+        flat_reaches = set(chain.from_iterable(reaches))
+
+        # Get offnetwork upstreams
+        all_upstreams = set().union(*(graph.get(seg, ()) for seg in flat_reaches))
+        offnetwork_upstreams = all_upstreams - flat_reaches
+
+        # Get data for offnetwork upstreams too
+        flat_reaches |= offnetwork_upstreams
+        flat_reaches = sorted(flat_reaches)
+
+        # subset waterbodies
+        lake_reaches = sorted(
+            list(waterbody_data.dataframe.index.intersection(flat_reaches))
+        )
+        waterbodies_df, waterbodies_types_df = waterbody_data.generate_view(
+            lake_reaches
+        )
+
+        # subset reaches
+        river_reaches = sorted(
+            list(reach_data.dataframe.index.intersection(flat_reaches))
+        )
+        river_df = reach_data.generate_view(river_reaches)
+
+        # Create subnetwork instance
+        return ComputationJob(
+            graph,
+            reaches,
+            waterbodies_df,
+            waterbodies_types_df,
+            river_df,
+            tailwaters,
+            offnetwork_upstreams,
+        )
+
+    def _init_treewise_plan(
+        self,
+        topology: NetworkTopology,
+        reach_data: ReachData,
+        waterbody_data: WaterbodyData,
+    ) -> None:
+        self.batches = {0: []}
+        for i in topology.tailwaters:
+            job = self._build_compute_job(
+                topology.paths_by_tailwater[i],
+                topology.connections_by_tw[i],
+                waterbody_data,
+                reach_data,
+                [i],
+            )
+            self.batches[0].append(job)
+
+    def _init_partitioned_plan(
+        self,
+        topology: NetworkTopology,
+        reach_data: ReachData,
+        waterbody_data: WaterbodyData,
+        assimilation_data: AssimilationData,
+        subnetwork_target_size: int,
+    ) -> None:
+        # Break whole networks into partitions
+        partitions_by_tailwater: dict[
+            TailwaterId, dict[RoutingLevel, dict[TailwaterId, Partition]]
+        ] = nhd_network.build_subnetworks(
+            topology.connections, topology.reverse_connections, subnetwork_target_size
+        )
+
+        # Dissolve partitions on routing level
+        partitions_by_routing_level = self._reorganize_partitions(
+            partitions_by_tailwater
+        )
+
+        # Break network at points of interest (gages, waterbodies, and/or junctions)
+        # and order such that any upstream deps run first.
+        computable_routing_paths = self._clean_compute_jobs(
+            partitions_by_routing_level, topology, waterbody_data, assimilation_data
+        )
+
+        for routing_level, partitions in computable_routing_paths.items():
+            self.batches[routing_level] = []
+            for tw, partition in partitions.items():
+                sub_connections = {
+                    k: topology.reverse_connections[k]
+                    for k in partitions_by_routing_level[routing_level][tw]
+                }
+                subnetwork = self._build_compute_job(
+                    partition, sub_connections, waterbody_data, reach_data, [tw]
+                )
+                self.batches[routing_level].append(subnetwork)
+
+    def _reorganize_partitions(
+        self,
+        partitions_by_tailwater: dict[
+            TailwaterId, dict[RoutingLevel, dict[TailwaterId, Partition]]
+        ],
+    ) -> dict[RoutingLevel, dict[TailwaterId, Partition]]:
+        partitions_by_level = defaultdict(dict)
+        for tmp_partitions_by_level in partitions_by_tailwater.values():
+            for level, partition in tmp_partitions_by_level.items():
+                partitions_by_level[level].update(partition)
+        return dict(partitions_by_level)
+
+    def _clean_compute_jobs(
+        self,
+        partitions_by_level: dict[RoutingLevel, dict[TailwaterId, Partition]],
+        topology: NetworkTopology,
+        waterbody_data: WaterbodyData,
+        assimilation_data: AssimilationData,
+    ) -> dict[RoutingLevel, dict[TailwaterId, OrderedRoutingPaths]]:
+        computable_routing_paths = defaultdict(dict)
+        for level, partitions in partitions_by_level.items():
+            for partition_tailwater, partition in partitions.items():
+                rconn_subn = {
+                    k: topology.reverse_connections[k]
+                    for k in partition
+                    if k in topology.reverse_connections
+                }
+                if (
+                    not waterbody_data.dataframe.empty
+                    and not assimilation_data.usgs_df.empty
+                ):
+                    path_func = partial(
+                        nhd_network.split_at_gages_waterbodies_and_junctions,
+                        set(assimilation_data.usgs_df.index.values),
+                        set(waterbody_data.dataframe.index.values),
+                        rconn_subn,
+                    )
+
+                elif (
+                    waterbody_data.dataframe.empty
+                    and not assimilation_data.usgs_df.empty
+                ):
+                    path_func = partial(
+                        nhd_network.split_at_gages_and_junctions,
+                        set(assimilation_data.usgs_df.index.values),
+                        rconn_subn,
+                    )
+
+                elif (
+                    not waterbody_data.dataframe.empty
+                    and assimilation_data.usgs_df.empty
+                ):
+                    path_func = partial(
+                        nhd_network.split_at_waterbodies_and_junctions,
+                        set(waterbody_data.dataframe.index.values),
+                        rconn_subn,
+                    )
+
+                else:
+                    path_func = partial(nhd_network.split_at_junction, rconn_subn)
+                computable_routing_paths[level][partition_tailwater] = (
+                    nhd_network.dfs_decomposition(rconn_subn, path_func)
+                )
+        return dict(computable_routing_paths)
+
+    def _init_clustered_partition_plan(
+        self,
+        topology: NetworkTopology,
+        reach_data: ReachData,
+        waterbody_data: WaterbodyData,
+        assimilation_data: AssimilationData,
+        subnetwork_target_size: int,
+    ) -> None:
+        cluster_threshold = 0.65  # When a job has a total segment count 65% of the target size, compute it
+        # Otherwise, keep adding reaches.
+
+        self._init_partitioned_plan(
+            topology,
+            reach_data,
+            waterbody_data,
+            assimilation_data,
+            subnetwork_target_size,
+        )
+        for routing_level, batch in self.batches.items():
+            new_batch = []
+            jobs = []
+            reach_count = 0
+            reach_limit = subnetwork_target_size * cluster_threshold
+            for job in batch:
+                jobs.append(job)
+                reach_count += len(list(chain.from_iterable(job.routing_paths)))
+                if reach_count > reach_limit:
+                    new_batch.append(ComputationJob.from_multijob(jobs))
+                    jobs = []
+                    reach_count = 0
+            if len(jobs) > 0:
+                new_batch.append(ComputationJob.from_multijob(jobs))
+            self.batches[routing_level] = new_batch
+
+    def _init_boundary_conditions(self) -> None:
+        partial_boundary_conditions = defaultdict(dict)
+        for batch in self.batches.values():
+            for job in batch:
+                for upstream_reach in job.offnetwork_upstreams:
+                    position_index = job.river_df.index.get_loc(upstream_reach)
+                    partial_boundary_conditions[upstream_reach]["position_index"] = (
+                        position_index
+                    )
+        self.boundary_conditions = BoundaryConditionStore(
+            dict(partial_boundary_conditions)
+        )
+
+    def update_boundary_conditions(
+        self, results: dict, routing_level: RoutingLevel
+    ) -> None:
+        for job_ind, job in enumerate(self.batches[routing_level]):
+            for tailwater in job.tailwaters:
+                tw_result_ind = results[job_ind][0].tolist().index(tailwater)
+                tw_results = results[job_ind][1][tw_result_ind]
+                self.boundary_conditions.update(tailwater, tw_results)
+
+    def export_job_list(self) -> None:
+        """Useful for debugging."""
+        out_dict = {"reach_id": [], "batch": [], "job_num": []}
+        for routing_level, batch in self.batches.items():
+            for job_ind, job in enumerate(batch):
+                for routing_path in job.routing_paths:
+                    for reach in routing_path:
+                        out_dict["reach_id"].append(reach)
+                        out_dict["batch"].append(routing_level)
+                        out_dict["job_num"].append(job_ind)
+        pd.DataFrame(out_dict).to_parquet("parallelization.parquet")
 
 
 def _format_qlat_start_time(qlat_start_time):
@@ -46,7 +714,7 @@ def _format_qlat_start_time(qlat_start_time):
 def _build_reach_type_list(reach_list, wbodies_segs):
 
     reach_type_list = [
-                1 if (set(reaches) & wbodies_segs) else 0 for reaches in reach_list
+                1 if (set(reaches) & set(wbodies_segs)) else 0 for reaches in reach_list
             ]
 
     return list(zip(reach_list, reach_type_list))
@@ -549,10 +1217,327 @@ def compute_log_diff(
             LOG.info(outPutStr)  
             preRunLog.write("-----\n")   
 
-        preRunLog.write("\n")  
+        preRunLog.write("\n")
+
+
+def build_compute_package(
+    job: ComputationJob,
+    forcing: ForcingData,
+    assimilation_data: AssimilationData,
+    config: ComputeConfig,
+    interorder_boundaries: dict[ReachId, BoundaryCondition],
+) -> ComputeInputs:
+
+    qlat_sub = forcing.qlats.loc[
+        job.river_reaches
+    ]  # TODO: debug these to make sure we get forcing we want with respect to channels vs lakes
+    q0_sub = forcing.q0.loc[job.river_reaches]
+    eloss_sub = forcing.eloss.loc[job.river_reaches]
+
+    usgs_df_sub, lastobs_df_sub, da_positions_list_byseg = _prep_da_dataframes(
+        assimilation_data.usgs_df, assimilation_data.lastobs_df, job.river_reaches
+    )
+    da_positions_list_byreach, da_positions_list_bygage = _prep_da_positions_byreach(
+        job.routing_paths, lastobs_df_sub.index
+    )
+
+    # prepare reservoir DA data
+    (
+        reservoir_usgs_df_sub,
+        reservoir_usgs_df_time,
+        reservoir_usgs_update_time,
+        reservoir_usgs_prev_persisted_flow,
+        reservoir_usgs_persistence_update_time,
+        reservoir_usgs_persistence_index,
+        reservoir_usace_df_sub,
+        reservoir_usace_df_time,
+        reservoir_usace_update_time,
+        reservoir_usace_prev_persisted_flow,
+        reservoir_usace_persistence_update_time,
+        reservoir_usace_persistence_index,
+        reservoir_usbr_df_sub,
+        reservoir_usbr_df_time,
+        reservoir_usbr_update_time,
+        reservoir_usbr_prev_persisted_flow,
+        reservoir_usbr_persistence_update_time,
+        reservoir_usbr_persistence_index,
+        reservoir_rfc_df_sub,
+        reservoir_rfc_totalCounts,
+        reservoir_rfc_file,
+        reservoir_rfc_use_forecast,
+        reservoir_rfc_timeseries_idx,
+        reservoir_rfc_update_time,
+        reservoir_rfc_da_timestep,
+        reservoir_rfc_persist_days,
+        gl_df_sub,
+        gl_parm_lake_id_sub,
+        gl_param_flows_sub,
+        gl_param_time_sub,
+        gl_param_update_time_sub,
+        gl_climatology_df_sub,
+        waterbody_types_df_sub,
+    ) = _prep_reservoir_da_dataframes(
+        assimilation_data.reservoir_usgs_df,
+        assimilation_data.reservoir_usgs_param_df,
+        assimilation_data.reservoir_usace_df,
+        assimilation_data.reservoir_usace_param_df,
+        assimilation_data.reservoir_usbr_df,
+        assimilation_data.reservoir_usbr_param_df,
+        assimilation_data.reservoir_rfc_df,
+        assimilation_data.reservoir_rfc_param_df,
+        assimilation_data.great_lakes_df,
+        assimilation_data.great_lakes_param_df,
+        assimilation_data.great_lakes_climatology_df,
+        job.waterbodies_types_df,
+        config.t0,
+        config.from_files,
+    )
+
+    return ComputeInputs(
+        nsteps=config.nts,
+        dt=config.dt,
+        qts_subdivisions=config.qts_subdivisions,
+        reaches_wTypes=job.reach_types,
+        upstream_connections=job.connections,
+        data_idx=job.river_reaches,
+        data_cols=job.river_fields,
+        data_values=job.river_values,
+        initial_conditions=q0_sub.values.astype("float32"),
+        qlat_values=qlat_sub.values.astype("float32"),
+        eloss_values=eloss_sub.values.astype("float32"),
+        ssout=config.ssout,
+        lake_numbers_col=job.waterbody_reaches,
+        wbody_cols=job.waterbodies_df.values,
+        data_assimilation_parameters=config.data_assimilation_parameters,
+        reservoir_types=job.waterbody_types,
+        reservoir_type_specified=config.waterbody_type_specified,
+        model_start_time=config.t0_str,
+        usgs_values=usgs_df_sub.values.astype("float32"),
+        usgs_positions=np.array(da_positions_list_byseg, dtype="int32"),
+        usgs_positions_reach=np.array(da_positions_list_byreach, dtype="int32"),
+        usgs_positions_gage=np.array(da_positions_list_bygage, dtype="int32"),
+        lastobs_values_init=lastobs_df_sub.get(
+            "lastobs_discharge",
+            pd.Series(index=lastobs_df_sub.index, name="Null", dtype="float32"),
+        ).values.astype("float32"),
+        time_since_lastobs_init=lastobs_df_sub.get(
+            "time_since_lastobs",
+            pd.Series(index=lastobs_df_sub.index, name="Null", dtype="float32"),
+        ).values.astype("float32"),
+        da_decay_coefficient=config.da_decay_coefficient,
+        # USGS Hybrid Reservoir DA data
+        reservoir_usgs_obs=reservoir_usgs_df_sub.values.astype("float32"),
+        reservoir_usgs_wbody_idx=reservoir_usgs_df_sub.index.values.astype("int32"),
+        reservoir_usgs_time=reservoir_usgs_df_time.astype("float32"),
+        reservoir_usgs_update_time=reservoir_usgs_update_time.astype("float32"),
+        reservoir_usgs_prev_persisted_flow=reservoir_usgs_prev_persisted_flow.astype(
+            "float32"
+        ),
+        reservoir_usgs_persistence_update_time=reservoir_usgs_persistence_update_time.astype(
+            "float32"
+        ),
+        reservoir_usgs_persistence_index=reservoir_usgs_persistence_index.astype(
+            "float32"
+        ),
+        # USACE Hybrid Reservoir DA data
+        reservoir_usace_obs=reservoir_usace_df_sub.values.astype("float32"),
+        reservoir_usace_wbody_idx=reservoir_usace_df_sub.index.values.astype("int32"),
+        reservoir_usace_time=reservoir_usace_df_time.astype("float32"),
+        reservoir_usace_update_time=reservoir_usace_update_time.astype("float32"),
+        reservoir_usace_prev_persisted_flow=reservoir_usace_prev_persisted_flow.astype(
+            "float32"
+        ),
+        reservoir_usace_persistence_update_time=reservoir_usace_persistence_update_time.astype(
+            "float32"
+        ),
+        reservoir_usace_persistence_index=reservoir_usace_persistence_index.astype(
+            "float32"
+        ),
+        # USBR Hybrid Reservoir DA data
+        reservoir_usbr_obs=reservoir_usbr_df_sub.values.astype("float32"),
+        reservoir_usbr_wbody_idx=reservoir_usbr_df_sub.index.values.astype("int32"),
+        reservoir_usbr_time=reservoir_usbr_df_time.astype("float32"),
+        reservoir_usbr_update_time=reservoir_usbr_update_time.astype("float32"),
+        reservoir_usbr_prev_persisted_flow=reservoir_usbr_prev_persisted_flow.astype(
+            "float32"
+        ),
+        reservoir_usbr_persistence_update_time=reservoir_usbr_persistence_update_time.astype(
+            "float32"
+        ),
+        reservoir_usbr_persistence_index=reservoir_usbr_persistence_index.astype(
+            "float32"
+        ),
+        # RFC Reservoir DA data
+        reservoir_rfc_obs=reservoir_rfc_df_sub.values.astype("float32"),
+        reservoir_rfc_wbody_idx=reservoir_rfc_df_sub.index.values.astype("int32"),
+        reservoir_rfc_totalCounts=reservoir_rfc_totalCounts.astype("int32"),
+        reservoir_rfc_file=reservoir_rfc_file,
+        reservoir_rfc_use_forecast=reservoir_rfc_use_forecast.astype("int32"),
+        reservoir_rfc_timeseries_idx=reservoir_rfc_timeseries_idx.astype("int32"),
+        reservoir_rfc_update_time=reservoir_rfc_update_time.astype("float32"),
+        reservoir_rfc_da_timestep=reservoir_rfc_da_timestep.astype("int32"),
+        reservoir_rfc_persist_days=reservoir_rfc_persist_days.astype("int32"),
+        # Great Lakes DA data
+        great_lakes_idx=gl_df_sub.lake_id.values.astype("int32"),
+        great_lakes_times=gl_df_sub.time.values.astype("int32"),
+        great_lakes_discharge=gl_df_sub.Discharge.values.astype("float32"),
+        great_lakes_param_idx=gl_parm_lake_id_sub.astype("int32"),
+        great_lakes_param_prev_assim_flow=gl_param_flows_sub.astype("float32"),
+        great_lakes_param_prev_assim_times=gl_param_time_sub.astype("int32"),
+        great_lakes_param_update_times=gl_param_update_time_sub.astype("int32"),
+        great_lakes_climatology=gl_climatology_df_sub.values.astype("float32"),
+        upstream_results=interorder_boundaries,
+        assume_short_ts=config.assume_short_ts,
+        return_courant=config.return_courant,
+        from_files=config.from_files,
+    )
+
+
+def compute_routing(
+    config: ComputeConfig,
+    topology: NetworkTopology,
+    reach_data: ReachData,
+    waterbody_data: WaterbodyData,
+    forcing_data: ForcingData,
+    assimilation_data: AssimilationData,
+    execution_plan: Union[ExecutionPlan, None],
+):
+    if execution_plan is None:
+        execution_plan = ExecutionPlan(
+            config.parallel_compute_method,
+            topology,
+            reach_data,
+            waterbody_data,
+            assimilation_data,
+            config.subnetwork_target_size,
+        )
+
+    # Execute routing
+    results = []
+    with Parallel(n_jobs=config.cpu_pool, backend=config.backend) as parallel:
+        # Iterate over groups that depend on upstream data (routing levels)
+        for routing_level in sorted(execution_plan.batches.keys(), reverse=True):
+            computation_batch = execution_plan.batches[routing_level]
+            jobs = []
+            # Iterate over fully parallel groups
+            for compute_job in computation_batch:
+                bcs = execution_plan.boundary_conditions.generate_view(
+                    compute_job.offnetwork_upstreams
+                )
+                package = build_compute_package(
+                    compute_job, forcing_data, assimilation_data, config, bcs
+                )
+
+                jobs.append(delayed(config.compute_function)(**asdict(package)))
+
+            # Compute and collect results
+            level_results = parallel(jobs)
+            results.extend(level_results)
+            if routing_level > 0:
+                execution_plan.update_boundary_conditions(level_results, routing_level)
+
+    # Clear boundary condition data to save some memory
+    execution_plan.boundary_conditions.clear_data()
+
+    # Format and return
+    return RoutingResultsCollection(results), execution_plan
 
 
 def compute_nhd_routing_v02(
+    connections,
+    rconn,
+    wbody_conn,
+    reaches_bytw,
+    compute_func_name,
+    parallel_compute_method,
+    subnetwork_target_size,
+    cpu_pool,
+    t0,
+    dt,
+    nts,
+    qts_subdivisions,
+    independent_networks,
+    param_df,
+    q0,
+    qlats,
+    eloss_df,
+    ssout,
+    usgs_df,
+    lastobs_df,
+    reservoir_usgs_df,
+    reservoir_usgs_param_df,
+    reservoir_usace_df,
+    reservoir_usace_param_df,
+    reservoir_usbr_df,
+    reservoir_usbr_param_df,
+    reservoir_rfc_df,
+    reservoir_rfc_param_df,
+    great_lakes_df,
+    great_lakes_param_df,
+    great_lakes_climatology_df,
+    da_parameter_dict,
+    assume_short_ts,
+    return_courant,
+    waterbodies_df,
+    data_assimilation_parameters,
+    waterbody_types_df,
+    waterbody_type_specified,
+    subnetwork_list,
+    flowveldepth_interorder = {},
+    from_files = True,
+    qlat_add_loc: Literal["top", "middle", "bottom"] = "middle",
+):
+    param_df["dt"] = dt
+    param_df = param_df.astype("float32")
+    config = ComputeConfig(
+        nts=nts,
+        dt=dt,
+        qts_subdivisions=qts_subdivisions,
+        t0=t0,
+        ssout=ssout,
+        data_assimilation_parameters=da_parameter_dict,
+        waterbody_type_specified=waterbody_type_specified,
+        assume_short_ts=assume_short_ts,
+        return_courant=return_courant,
+        from_files=from_files,
+        cpu_pool=cpu_pool,
+        parallel_compute_method=parallel_compute_method,
+        qlat_add_loc=qlat_add_loc,
+        compute_func_name=compute_func_name,
+        subnetwork_target_size=subnetwork_target_size
+    )
+    topology = NetworkTopology(
+        connections = connections,
+        reverse_connections=rconn,
+        paths_by_tailwater=reaches_bytw,
+        connections_by_tw=independent_networks,
+    )
+    reach_data = ReachData(param_df)
+    waterbody_data = WaterbodyData(waterbodies_df, waterbody_types_df)
+    forcing_data = ForcingData(qlats, q0, eloss_df)
+    assimilation_data = AssimilationData(
+        reservoir_usgs_df = reservoir_usgs_df,
+        reservoir_usgs_param_df = reservoir_usgs_param_df,
+        reservoir_usace_param_df = reservoir_usace_param_df,
+        reservoir_usace_df = reservoir_usace_df,
+        reservoir_usbr_df = reservoir_usbr_df,
+        reservoir_usbr_param_df = reservoir_usbr_param_df,
+        reservoir_rfc_df = reservoir_rfc_df,
+        reservoir_rfc_param_df = reservoir_rfc_param_df,
+        great_lakes_df = great_lakes_df,
+        great_lakes_param_df = great_lakes_param_df,
+        great_lakes_climatology_df = great_lakes_climatology_df,
+        usgs_df = usgs_df,
+        lastobs_df = lastobs_df,
+    )
+
+    if subnetwork_list == [None, None, None]:
+        execution_plan = None
+    results, execution_plan = compute_routing(config, topology, reach_data, waterbody_data, forcing_data, assimilation_data, execution_plan)
+    return results, execution_plan
+
+
+def compute_nhd_routing_v02_old(
     connections,
     rconn,
     wbody_conn,
@@ -603,14 +1588,8 @@ def compute_nhd_routing_v02(
     
     start_time = time.time()
     compute_func = _compute_func_map[compute_func_name]
-    if qlat_add_loc == "top":
-        qlat_add_loc_c = 0
-    elif qlat_add_loc == "middle":
-        qlat_add_loc_c = 1
-    elif qlat_add_loc == "bottom":
-        qlat_add_loc_c = 2
-    else:
-        raise ValueError(f"qlat_add_loc was {qlat_add_loc}, but must be one of 'top', 'middle', or 'bottom'")
+    qlat_add_loc_c = _qlat_loc_map[qlat_add_loc]
+
     if parallel_compute_method == "by-subnetwork-jit-clustered":
         
         # Create subnetwork objects if they have not already been created
@@ -1148,6 +2127,7 @@ def compute_nhd_routing_v02(
 
                     qlat_sub = qlats.loc[param_df_sub.index]
                     q0_sub = q0.loc[param_df_sub.index]
+                    eloss_sub = eloss_df.loc[param_df_sub.index]
 
                     param_df_sub = param_df_sub.reindex(
                         param_df_sub.index.tolist() + lake_segs
@@ -1592,6 +2572,7 @@ def compute_nhd_routing_v02(
             # q0_sub = q0.loc[common_segs].sort_index()
             qlat_sub = qlats.loc[param_df_sub.index]
             q0_sub = q0.loc[param_df_sub.index]
+            eloss_sub = eloss_df.loc[param_df_sub.index]
 
             param_df_sub = param_df_sub.reindex(
                 param_df_sub.index.tolist() + lake_segs
