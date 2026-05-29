@@ -32,7 +32,7 @@ execution_plan
 from __future__ import annotations
 from ast import For
 from collections import defaultdict
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 import enum
 from itertools import chain
 from functools import cached_property, partial
@@ -1456,7 +1456,7 @@ def compute_routing(
                     compute_job, forcing_data, assimilation_data, config, bcs
                 )
 
-                jobs.append(delayed(config.compute_function)(**asdict(package)))
+                jobs.append(delayed(config.compute_function)(**vars(package)))
 
             # Compute and collect results
             level_results = parallel(jobs)
