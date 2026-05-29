@@ -5,21 +5,28 @@ Routing terminology
 reach
     A directed river segment used as the fundamental routing unit.
 network
-    A connected collection of reaches draining to a common terminal reach.
-terminal_reach
-    The downstream-most reach in a network.
-network_partition
-    A connected subset of a network.
-dependency_level
-    A topological execution tier. Partitions within a level may be routed
-    concurrently once all upstream levels are complete.
-reach_chain
-    A contiguous sequence of reaches without internal junctions/tributaries.
-compute_batch
-    A collection of independent reach chains executed simultaneously.
-routing_execution_plan
-    A dependency-ordered collection of compute batches used to execute
-    routing computations.
+    The full directed graph representing all routing topology, potentially
+    consisting of multiple disconnected trees (a forest).
+tree
+    An individual drainage network with a single downstream tailwater/root.
+tailwater
+    The downstream root node of a tree that defines the outlet boundary condition.
+partition
+    A connected subset of a tree grouped for dependency management and execution.
+routing_level
+    A hierarchical rank within a tree where level 0 is the tailwater/root and
+    increasing levels move upstream.
+routing_path
+    A contiguous sequence of reaches uninterrupted by confluences, waterbodies,
+    or points of interest.
+computation_job
+    A set of routing paths passed together to the routing kernel for execution.
+computation_batch
+    A collection of computation jobs that share the same routing level and can
+    be executed concurrently.
+execution_plan
+    An ordered mapping of computation batches and their dependency relationships
+    used to orchestrate network execution.
 """
 
 from __future__ import annotations
@@ -147,6 +154,7 @@ class ComputeConfig:
 
     @property
     def da_decay_coefficient(self) -> float:
+        """Data Assimilation decay coefficient for streamflow nudging."""
         return self.data_assimilation_parameters.get("da_decay_coefficient", 0)
 
 
@@ -163,7 +171,8 @@ class ComputationJob:
     offnetwork_upstreams: set[ReachId]
 
     @classmethod
-    def from_multijob(cls, jobs: list[ComputationJob]):
+    def from_multijob(cls, jobs: list[ComputationJob]) -> ComputationJob:
+        """Merge multiple computation jobs into a single job, sorting data indices for binary search compatibility."""
         merged_connections: UpstreamGraph = {}
         for job in jobs:
             merged_connections.update(job.connections)
@@ -214,30 +223,37 @@ class ComputationJob:
 
     @property
     def waterbody_reaches(self) -> list[ReachId]:
+        """Reach IDs for all waterbodies in this job."""
         return list(self.waterbodies_df.index.values)
 
     @property
-    def river_reaches(self) -> list[ReachId]:
+    def river_reaches(self) -> NDArray[np.int64]:
+        """Reach IDs for all river segments in this job."""
         return self.river_df.index.values
 
     @cached_property
     def reach_types(self) -> list[tuple[Any, int]]:
+        """Routing paths paired with their reach-type flag (1 = waterbody, 0 = river, etc)."""
         return _build_reach_type_list(self.routing_paths, self.waterbody_reaches)
 
     @cached_property
-    def waterbody_types(self) -> list[tuple[Any, int]]:
-        pass
+    def waterbody_types(self) -> np.ndarray:
+        """Waterbody type codes."""
+        return self.waterbodies_types_df.values.astype("int32")
 
     @property
     def river_fields(self) -> np.ndarray:
+        """Column names of the river parameter DataFrame."""
         return self.river_df.columns.values
 
     @property
     def river_values(self) -> np.ndarray:
+        """River parameter values as a 2-D array."""
         return self.river_df.values
 
     @property
     def waterbody_values(self) -> np.ndarray:
+        """Waterbody parameter values as a 2-D array."""
         return self.waterbodies_df.values
 
 
@@ -412,15 +428,18 @@ class BoundaryConditionStore:
     bcs: dict[ReachId, BoundaryCondition]
 
     def generate_view(self, reaches: list[ReachId]) -> dict[ReachId, BoundaryCondition]:
+        """Return boundary conditions for the specified upstream reaches."""
         # TODO: add a view cache
         return {
             reach_id: bc for reach_id, bc in self.bcs.items() if reach_id in reaches
         }
 
     def update(self, reach_id: ReachId, results: np.ndarray) -> None:
+        """Store routing results for a tailwater to be used as an upstream boundary condition at the next routing level."""
         self.bcs[reach_id]["results"] = results
 
     def clear_data(self) -> None:
+        """Release stored results arrays to free memory after all routing levels complete."""
         for i in self.bcs.values():
             i["results"] = None
 
@@ -475,6 +494,7 @@ class ExecutionPlan:
         reach_data: ReachData,
         tailwaters: list[TailwaterId],
     ) -> ComputationJob:
+        """Build a ComputationJob for a set of ordered routing paths, including data for any off-network upstream reaches."""
         # Flatten ordered chains to reach ids
         flat_reaches = set(chain.from_iterable(reaches))
 
@@ -517,6 +537,7 @@ class ExecutionPlan:
         reach_data: ReachData,
         waterbody_data: WaterbodyData,
     ) -> None:
+        """Build a single-level execution plan with one computation job per tree."""
         self.batches = {0: []}
         for i in topology.tailwaters:
             job = self._build_compute_job(
@@ -536,6 +557,7 @@ class ExecutionPlan:
         assimilation_data: AssimilationData,
         subnetwork_target_size: int,
     ) -> None:
+        """Build a multi-level execution plan by partitioning each tree into subnetworks by routing level."""
         # Break whole networks into partitions
         partitions_by_tailwater: dict[
             TailwaterId, dict[RoutingLevel, dict[TailwaterId, Partition]]
@@ -572,6 +594,7 @@ class ExecutionPlan:
             TailwaterId, dict[RoutingLevel, dict[TailwaterId, Partition]]
         ],
     ) -> dict[RoutingLevel, dict[TailwaterId, Partition]]:
+        """Dissolve partitions on routing level."""
         partitions_by_level = defaultdict(dict)
         for tmp_partitions_by_level in partitions_by_tailwater.values():
             for level, partition in tmp_partitions_by_level.items():
@@ -585,6 +608,7 @@ class ExecutionPlan:
         waterbody_data: WaterbodyData,
         assimilation_data: AssimilationData,
     ) -> dict[RoutingLevel, dict[TailwaterId, OrderedRoutingPaths]]:
+        """Decompose each partition into ordered routing paths split at gages, waterbodies, and/or junctions."""
         computable_routing_paths = defaultdict(dict)
         for level, partitions in partitions_by_level.items():
             for partition_tailwater, partition in partitions.items():
@@ -639,6 +663,7 @@ class ExecutionPlan:
         assimilation_data: AssimilationData,
         subnetwork_target_size: int,
     ) -> None:
+        """Build a partitioned execution plan and cluster small adjacent jobs to reduce kernel-call overhead."""
         cluster_threshold = 0.65  # When a job has a total segment count 65% of the target size, compute it
         # Otherwise, keep adding reaches.
 
@@ -666,6 +691,7 @@ class ExecutionPlan:
             self.batches[routing_level] = new_batch
 
     def _init_boundary_conditions(self) -> None:
+        """Pre-allocate boundary condition slots for every off-network upstream reach in the plan."""
         partial_boundary_conditions = defaultdict(dict)
         for batch in self.batches.values():
             for job in batch:
@@ -679,8 +705,9 @@ class ExecutionPlan:
         )
 
     def update_boundary_conditions(
-        self, results: dict, routing_level: RoutingLevel
+        self, results: list[tuple], routing_level: RoutingLevel
     ) -> None:
+        """Propagate tailwater results from a completed routing level into the boundary condition store."""
         for job_ind, job in enumerate(self.batches[routing_level]):
             for tailwater in job.tailwaters:
                 tw_result_ind = results[job_ind][0].tolist().index(tailwater)
@@ -1227,7 +1254,7 @@ def build_compute_package(
     config: ComputeConfig,
     interorder_boundaries: dict[ReachId, BoundaryCondition],
 ) -> ComputeInputs:
-
+    """Assemble a ComputeInputs package for a computation job by subsetting all forcing and DA data to the job's reaches."""
     qlat_sub = forcing.qlats.loc[
         job.river_reaches
     ]  # TODO: debug these to make sure we get forcing we want with respect to channels vs lakes
@@ -1401,7 +1428,8 @@ def compute_routing(
     forcing_data: ForcingData,
     assimilation_data: AssimilationData,
     execution_plan: Union[ExecutionPlan, None],
-):
+) -> tuple[RoutingResultsCollection, ExecutionPlan]:
+    """Execute all computation batches in dependency order and return results alongside the reusable execution plan."""
     if execution_plan is None:
         execution_plan = ExecutionPlan(
             config.parallel_compute_method,
@@ -1444,49 +1472,50 @@ def compute_routing(
 
 
 def compute_nhd_routing_v02(
-    connections,
-    rconn,
-    wbody_conn,
-    reaches_bytw,
-    compute_func_name,
-    parallel_compute_method,
-    subnetwork_target_size,
-    cpu_pool,
-    t0,
-    dt,
-    nts,
-    qts_subdivisions,
-    independent_networks,
-    param_df,
-    q0,
-    qlats,
-    eloss_df,
-    ssout,
-    usgs_df,
-    lastobs_df,
-    reservoir_usgs_df,
-    reservoir_usgs_param_df,
-    reservoir_usace_df,
-    reservoir_usace_param_df,
-    reservoir_usbr_df,
-    reservoir_usbr_param_df,
-    reservoir_rfc_df,
-    reservoir_rfc_param_df,
-    great_lakes_df,
-    great_lakes_param_df,
-    great_lakes_climatology_df,
-    da_parameter_dict,
-    assume_short_ts,
-    return_courant,
-    waterbodies_df,
-    data_assimilation_parameters,
-    waterbody_types_df,
-    waterbody_type_specified,
-    subnetwork_list,
-    flowveldepth_interorder = {},
-    from_files = True,
+    connections: DownstreamGraph,
+    rconn: UpstreamGraph,
+    wbody_conn: dict,
+    reaches_bytw: dict[TailwaterId, OrderedRoutingPaths],
+    compute_func_name: str,
+    parallel_compute_method: PARALLEL_COMPUTE_METHODS,
+    subnetwork_target_size: int,
+    cpu_pool: int,
+    t0: datetime,
+    dt: float,
+    nts: int,
+    qts_subdivisions: int,
+    independent_networks: dict[TailwaterId, DownstreamGraph],
+    param_df: pd.DataFrame,
+    q0: pd.DataFrame,
+    qlats: pd.DataFrame,
+    eloss_df: pd.DataFrame,
+    ssout: float,
+    usgs_df: pd.DataFrame,
+    lastobs_df: pd.DataFrame,
+    reservoir_usgs_df: pd.DataFrame,
+    reservoir_usgs_param_df: pd.DataFrame,
+    reservoir_usace_df: pd.DataFrame,
+    reservoir_usace_param_df: pd.DataFrame,
+    reservoir_usbr_df: pd.DataFrame,
+    reservoir_usbr_param_df: pd.DataFrame,
+    reservoir_rfc_df: pd.DataFrame,
+    reservoir_rfc_param_df: pd.DataFrame,
+    great_lakes_df: pd.DataFrame,
+    great_lakes_param_df: pd.DataFrame,
+    great_lakes_climatology_df: pd.DataFrame,
+    da_parameter_dict: dict[str, Any],
+    assume_short_ts: bool,
+    return_courant: bool,
+    waterbodies_df: pd.DataFrame,
+    data_assimilation_parameters: dict[str, Any],
+    waterbody_types_df: pd.DataFrame,
+    waterbody_type_specified: bool,
+    subnetwork_list: Union[ExecutionPlan, list],
+    flowveldepth_interorder: dict = {},
+    from_files: bool = True,
     qlat_add_loc: Literal["top", "middle", "bottom"] = "middle",
-):
+) -> tuple[RoutingResultsCollection, ExecutionPlan]:
+    """Build typed routing objects from legacy flat arguments and delegate to compute_routing."""
     param_df["dt"] = dt
     param_df = param_df.astype("float32")
     config = ComputeConfig(
