@@ -125,7 +125,7 @@ def main() -> int:
 
     if not (DATA_DIR / "MANIFEST.json").exists():
         sys.exit("ERROR: benchmark dataset missing. Run: "
-                 "python benchmark/prep_data.py --src /path/to/nhf_1.1.4.gpkg")
+                 "python benchmark/prep_ohio_data.py --src /path/to/nhf_1.1.4.gpkg")
 
     arena_max = os.environ.get("MALLOC_ARENA_MAX")
     print(f"sweep: max_loop_size in {args.sweep}")

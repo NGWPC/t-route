@@ -57,6 +57,13 @@ def replay_once(calls: list[dict], fn) -> tuple[float, list]:
     Args are deep-copied before the timer starts so in-place mutation
     cannot leak between iterations; the copy cost is excluded from the
     measured time.
+
+    Note: because the deepcopy is excluded, the returned (measured) time can
+    diverge noticeably from the apparent wall time of this function when the
+    harvested arrays are large -- the copy can take longer than the kernel
+    replay itself. That is intentional: we want the pure kernel time, not the
+    setup cost. If you instrument this function's total wall time externally,
+    expect it to exceed the reported number.
     """
     fresh = [(copy.deepcopy(c["args"]), copy.deepcopy(c["kwargs"]))
              for c in calls]

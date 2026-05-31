@@ -15,13 +15,13 @@ synthesized-forcing CSVs from the same CONUS geopackage that
 
 Usage:
     # Once you have the NextGen Hydrofabric CONUS geopackage:
-    python benchmark/prep_data.py --src /path/to/nhf_1.1.4.gpkg
+    python benchmark/prep_ohio_data.py --src /path/to/nhf_1.1.4.gpkg
 
     # Carve a different tailwater (use any fp_id from the CONUS gpkg):
-    python benchmark/prep_data.py --src /path/to/nhf_1.1.4.gpkg --tailwater 1234567
+    python benchmark/prep_ohio_data.py --src /path/to/nhf_1.1.4.gpkg --tailwater 1234567
 
     # Rebuild even if data already prepared:
-    python benchmark/prep_data.py --src /path/to/nhf_1.1.4.gpkg --force
+    python benchmark/prep_ohio_data.py --src /path/to/nhf_1.1.4.gpkg --force
 
 The data set is gitignored; ``MANIFEST.json`` records sha256 checksums.
 

@@ -17,7 +17,7 @@ so they are reproducible on any host that runs Docker.
 | `bench_conus.py` | Tier C driver. Single CONUS run with `--profile {cprofile,pyspy,none}` for hot-path analysis. |
 | `bench_kernel.py` | Tier B microbenchmark. Replays harvested `compute_network_structured()` calls so the MC kernel can be timed in isolation, without the Python pipeline around it. |
 | `harvest_kernel_inputs.py` | Records the kernel inputs from a real Tier A run into `data/kernel_calls.pkl`, so the kernel bench can replay them deterministically. |
-| `prep_data.py`, `prep_conus.py` | Build the Tier A and Tier C input data from the NHF v1.1.4 CONUS geopackage. |
+| `prep_ohio_data.py`, `prep_conus.py` | Build the Tier A and Tier C input data from the NHF v1.1.4 CONUS geopackage. |
 | `sweep_max_loop_size.py` | Runs Tier A across a sweep of `max_loop_size` values, captures wall/CPU/RSS per point, writes `results/max_loop_size_sweep.json`. Backs the operational deployment recommendation on chunk sizing. |
 | `plot_max_loop_size.py` | Renders the sweep JSON to `figures/max_loop_size_sweep.png`. |
 | `data/`, `golden/` | Input geopackages and reference output netCDFs (gitignored; build locally). |
@@ -144,7 +144,7 @@ docker run --rm \
   -v "$(pwd)/benchmark:/t-route/benchmark" \
   troute-dev:bench \
   bash -c "cd /t-route && \
-    python benchmark/prep_data.py  --src /hydrofabric/nhf_1.1.4.gpkg && \
+    python benchmark/prep_ohio_data.py  --src /hydrofabric/nhf_1.1.4.gpkg && \
     python benchmark/prep_conus.py --src /hydrofabric/nhf_1.1.4.gpkg && \
     python benchmark/bench_e2e.py --save-golden && \
     python benchmark/harvest_kernel_inputs.py"
@@ -152,7 +152,7 @@ docker run --rm \
 
 What each step does:
 
-- `prep_data.py` carves the upstream subgraph of fp_id 1725641 (Ohio
+- `prep_ohio_data.py` carves the upstream subgraph of fp_id 1725641 (Ohio
   River basin, 11,327 flowpaths) and synthesizes 144 hourly forcing
   CSVs. Output: `benchmark/data/domain/nhf_subset_ohio.gpkg`.
 - `prep_conus.py` processes the full CONUS hydrofabric and

@@ -7,7 +7,7 @@ capturing wall time, CPU time, and peak RSS for each run via os.wait4.
 Reports min/median/mean/sd and compares the stream output against
 benchmark/golden/ for the correctness gate.
 
-Reproducible: fixed dataset (benchmark/data/, built by prep_data.py),
+Reproducible: fixed dataset (benchmark/data/, built by prep_ohio_data.py),
 fixed config (benchmark/nhf_subset_ohio.yaml), cpu_pool=1 (deterministic,
 kernel-dominated ~87%).
 
@@ -50,7 +50,7 @@ def resolved_config(output_dir: Path, nts: int | None) -> Path:
     """Render nhf_subset_ohio.yaml with absolute paths + an isolated output dir."""
     if not (DATA_DIR / "MANIFEST.json").exists():
         sys.exit("ERROR: benchmark dataset missing. Run: "
-                 "python benchmark/prep_data.py --src /path/to/nhf_1.1.4.gpkg")
+                 "python benchmark/prep_ohio_data.py --src /path/to/nhf_1.1.4.gpkg")
     cfg = yaml.safe_load(CONFIG.read_text())
     sp = cfg["network_topology_parameters"]["supernetwork_parameters"]
     sp["geo_file_path"] = str((BENCH_DIR / sp["geo_file_path"]).resolve())

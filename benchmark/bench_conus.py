@@ -90,7 +90,13 @@ class _MemSampler:
     def _loop(self) -> None:
         try:
             root = psutil.Process(self.root_pid)
-        except psutil.Error:
+        except psutil.Error as e:
+            # Could not attach to the root process at all -> peak RSS will be
+            # reported as 0. Warn loudly so the missing metric isn't mistaken
+            # for a real measurement.
+            print(f"WARNING: RSS monitor could not attach to pid "
+                  f"{self.root_pid} ({e}); peak RSS will not be logged.",
+                  file=sys.stderr)
             return
         while not self._stop.is_set():
             total = 0
@@ -99,6 +105,9 @@ class _MemSampler:
                     try:
                         total += p.memory_info().rss
                     except psutil.Error:
+                        # A child exited between enumeration and sampling --
+                        # benign and routine for a short-lived joblib worker;
+                        # skip it for this sample.
                         pass
             except psutil.Error:
                 pass

@@ -87,7 +87,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if not (DATA_DIR / "MANIFEST.json").exists():
-        sys.exit("ERROR: benchmark dataset missing. Run prep_data.py first.")
+        sys.exit("ERROR: benchmark dataset missing. Run prep_ohio_data.py first.")
 
     work = Path(tempfile.mkdtemp(prefix="harvest_"))
     out_dir = work / "out"
