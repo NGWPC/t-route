@@ -533,7 +533,7 @@ cpdef object compute_network_structured(
     cdef int id = 0
     
     cdef float qlat
-
+    
     while timestep < nsteps+1:
         qlat_ts_previous = (timestep-1) // qts_subdivisions
 
@@ -551,7 +551,7 @@ cpdef object compute_network_structured(
             if assume_short_ts:
                 upstream_flows = previous_upstream_flows
 
-            if r.type == compute_type.RESERVOIR_LP:
+            if r.type == compute_type.RESERVOIR_LP: 
                 
                 # Great Lake waterbody: doesn't actually route anything, default outflows
                 # are from climatology.
@@ -769,7 +769,7 @@ cpdef object compute_network_structured(
                         rfc_timeseries_idx[res_idx[0][0]] = new_timeseries_idx
                         
                     
-                    # populate flowveldepth array with levelpool or hybrid DA results
+                    # populate flowveldepth array with levelpool or hybrid DA results 
                     flowveldepth[r.id, timestep, 0] = reservoir_outflow
                     flowveldepth[r.id, timestep, 1] = 0.0
                     flowveldepth[r.id, timestep, 2] = reservoir_water_elevation
@@ -781,7 +781,7 @@ cpdef object compute_network_structured(
                 flowveldepth[r.id, timestep, 1] = 0.0
                 flowveldepth[r.id, timestep, 2] = reservoir_water_elevation
                 upstream_array[r.id, timestep, 0] = upstream_flows
-
+            
             else:
                 #Create compute reach kernel input buffer
 
