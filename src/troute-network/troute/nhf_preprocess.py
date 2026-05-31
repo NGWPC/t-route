@@ -47,14 +47,13 @@ def _validate_flowpaths_channel_params(flowpaths):
     )
 
 def _validate_required_columns(table_dict):
-    """Raise if any layer is missing columns the NHF build requires.
+    """Raise if any layer is missing a column the NHF build requested.
 
-    A layer's required columns come from its ``required_columns`` entry when
-    present, otherwise from its explicit ``columns`` request list (every column
-    we ask for from those layers is consumed downstream). Layers loaded with
-    ``columns=None`` and no ``required_columns`` (e.g. lakes, gages,
-    hydrolocations) are used conditionally and may be legitimately empty, so
-    they are not validated here.
+    A layer's required columns are exactly its explicit ``columns`` request --
+    we only ask for columns the build consumes downstream, so every requested
+    column must be present. Layers loaded with ``columns=None`` (lakes, gages,
+    hydrolocations, virtual_nexus) are used conditionally and may be
+    legitimately empty or absent, so they are not validated here.
 
     Failing here -- at load time, with the full list of missing columns across
     all layers -- replaces cryptic ``KeyError``s raised deep inside
@@ -63,14 +62,12 @@ def _validate_required_columns(table_dict):
     Note: a layer present but with zero rows still carries its schema, so its
     columns validate normally; a layer entirely absent from the geopackage was
     replaced upstream with an empty ``DataFrame()`` carrying no columns, so its
-    full required set is correctly reported as missing.
+    full requested set is correctly reported as missing.
     """
     missing_by_layer = {}
     for layer in LAYERS_TO_READ:
-        required = layer.get("required_columns")
-        if required is None and isinstance(layer["columns"], list):
-            required = layer["columns"]
-        if not required:
+        required = layer["columns"]
+        if not isinstance(required, list):
             continue
         df = table_dict.get(layer["name"])
         if df is None:
@@ -114,12 +111,13 @@ LAYERS_TO_READ = [
     },
     {
         "name": "reference_flowpaths",
-        "columns": None,  # Loads all
-        # Subset of columns the NHF build consumes unconditionally (the rest of
-        # the layer is loaded but optional). `segment_order` in particular is a
-        # newer hydrofabric field; older datasets lack it and fail deep in
-        # discretization with a cryptic pandas KeyError.
-        "required_columns": ["fp_id", "virtual_fp_id", "segment_order", "div_id"],
+        # Load only the columns the NHF build consumes (was previously loaded
+        # in full). These double as the validation set -- `_validate_required_columns`
+        # checks that every requested column is present. `segment_order` in
+        # particular is a newer hydrofabric field; older datasets lack it and
+        # would otherwise fail deep in discretization with a cryptic pandas
+        # KeyError. `ref_fp_id` is the join key in crosswalk_nex_flowpath_poi.
+        "columns": ["ref_fp_id", "fp_id", "virtual_fp_id", "segment_order", "div_id"],
         "ignore_geometry": True
     },
     {

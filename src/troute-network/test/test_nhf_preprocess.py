@@ -171,11 +171,10 @@ def test_validator_works_with_partial_channel_columns():
 
 
 def _required_for(layer):
-    """Mirror the validator's rule for a layer's required column set."""
-    required = layer.get("required_columns")
-    if required is None and isinstance(layer["columns"], list):
-        required = layer["columns"]
-    return list(required) if required else []
+    """Mirror the validator's rule for a layer's required column set: a
+    layer's explicit ``columns`` list (None-columns layers are not validated)."""
+    cols = layer["columns"]
+    return list(cols) if isinstance(cols, list) else []
 
 
 def _make_valid_table_dict():
