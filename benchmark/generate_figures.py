@@ -5,9 +5,11 @@ Reads numbers from BASELINE/AFTER constants below (sourced from the
 benches recorded in benchmark/results/). Writes PNGs into
 benchmark/figures/.
 
-All numbers are devcontainer measurements (Rocky Linux 9, linux/arm64,
-docker/Dockerfile.dev). Baseline = ngwpc/development merge-base; After
-= tip of this branch.
+All numbers are devcontainer measurements (Rocky Linux 9, linux/arm64).
+Baseline = pre-#94 (commit 8d17710d, Python 3.9); After = tip of this
+branch on Python 3.11 (the production target). Memory is reported as
+PSS (true footprint). Sourced from the cooldown-gated three-way matrix
+in benchmark/results/ (baseline-* vs after-py311-*).
 
 Run inside the devcontainer:
     python benchmark/generate_figures.py
@@ -34,37 +36,37 @@ OUT.mkdir(exist_ok=True)
 # dominate the RSS measurements. See README "Memory measurement" section.
 # JSON sources: results/baseline-arena2-* and results/after-arena2-*.
 
-# CONUS (Tier C: 1.1 M flowpaths, 8 workers, 24 timesteps). Single clean run.
+# CONUS (Tier C: 1.1 M flowpaths, 8 workers, 24 timesteps). Single clean run
+# from the cooldown-gated matrix (results/baseline-C vs results/after-py311-C).
 CONUS = {
-    "wall_s":   {"before": 297.17, "after": 131.65},
-    "cpu_s":    {"before": 417.41, "after": 247.87},
-    "rss_gb":   {"before":  18.76, "after":  18.90},      # main process peak
-    "tree_gb":  {"before": 100.69, "after":  28.73},      # main + 8 workers
-    "util_x":   {"before":   1.40, "after":   1.88},
+    "wall_s":   {"before": 275.83, "after": 115.26},
+    "cpu_s":    {"before": 386.87, "after": 233.27},
+    "rss_gb":   {"before":  26.54, "after":  24.61},      # main process peak RSS
+    "tree_gb":  {"before":  29.90, "after":  27.79},      # main + 8 workers, PSS
+    "util_x":   {"before":   1.40, "after":   2.02},
 }
 
 # CONUS phase breakdown (t-route internal timing block; total is slightly
 # less than wall because process startup/teardown is excluded).
 CONUS_PHASES = {
-    "graph_s":   {"before":  82.92, "after":  54.15},
-    "routing_s": {"before": 168.16, "after":  44.17},
-    "output_s":  {"before":  30.12, "after":  23.31},
-    "forcing_s": {"before":   2.70, "after":   2.40},
+    "graph_s":   {"before":  80.11, "after":  53.98},
+    "routing_s": {"before": 169.48, "after":  40.82},
+    "output_s":  {"before":  15.57, "after":  12.20},
+    "forcing_s": {"before":   2.38, "after":   2.27},
 }
 
 # Tier A (nhf_subset_ohio: ~11,327 flowpaths, single worker, 1728 timesteps).
-# Median of 5 timed runs.
+# Median of 5 timed runs (results/baseline-A vs results/after-py311-A).
 TIER_A = {
-    "wall_s":   {"before": 56.88, "after": 46.66},
-    "cpu_s":    {"before": 57.85, "after": 47.61},
-    "rss_mb":   {"before": 2049,  "after": 1986},
+    "wall_s":   {"before": 54.83, "after": 46.30},
+    "cpu_s":    {"before": 55.81, "after": 47.25},
+    "rss_mb":   {"before": 2008,  "after": 2031},
 }
 
 # Tier B (MC kernel replay only). Median of 15 replays of ~1.05 M invocations
-# each. Allocator config doesn't affect this microbenchmark; values reused
-# from results/baseline-tierB.kernel.json and results/devcontainer-tierB.kernel.json.
+# each (results/baseline-B vs results/after-py311-B).
 TIER_B = {
-    "kernel_ms": {"before": 3726.85, "after": 2842.64},
+    "kernel_ms": {"before": 3161.18, "after": 2787.56},
 }
 
 
@@ -88,8 +90,8 @@ C_AFTER  = "#2a8acb"
 def _grouped_bars(ax, before_vals, after_vals, labels, ylabel, value_fmt="{:.1f}"):
     x = np.arange(len(labels))
     w = 0.36
-    ax.bar(x - w/2, before_vals, w, label="Baseline (pre-optimization)", color=C_BEFORE, edgecolor="black", linewidth=0.5)
-    ax.bar(x + w/2, after_vals,  w, label="After optimizations",          color=C_AFTER,  edgecolor="black", linewidth=0.5)
+    ax.bar(x - w/2, before_vals, w, label="Baseline (pre-#94)", color=C_BEFORE, edgecolor="black", linewidth=0.5)
+    ax.bar(x + w/2, after_vals,  w, label="After (this PR, py3.11)", color=C_AFTER,  edgecolor="black", linewidth=0.5)
     for i, (b, a) in enumerate(zip(before_vals, after_vals)):
         ax.text(i - w/2, b, value_fmt.format(b), ha="center", va="bottom", fontsize=9)
         ax.text(i + w/2, a, value_fmt.format(a), ha="center", va="bottom", fontsize=9, color=C_AFTER, fontweight="bold")
@@ -117,20 +119,20 @@ def chart_conus_summary():
     sp_cpu  = bef[1] / aft[1]
     ax.set_title(f"Wall: {sp_wall:.2f}x faster   |   CPU: {sp_cpu:.2f}x less")
 
-    # Peak RSS: main-process is flat at ~19 GB (graph construction sets the
-    # watermark), but peak tree-RSS across all 8 workers drops dramatically.
+    # Memory is essentially flat. Reported as PSS (proportional set size):
+    # shared copy-on-write / memmap pages are split across the processes that
+    # map them, so the tree total is the true physical footprint. (A naive RSS
+    # sum double-counts those pages and can exceed physical RAM, which would
+    # overstate the memory reduction.)
     ax = axes[1]
-    labels = ["Main proc", "Tree (main + 8 workers)"]
+    labels = ["Main proc RSS", "Tree PSS\n(main + 8 workers)"]
     bef = [CONUS["rss_gb"]["before"], CONUS["tree_gb"]["before"]]
     aft = [CONUS["rss_gb"]["after"],  CONUS["tree_gb"]["after"]]
     _grouped_bars(ax, bef, aft, labels, "GB", "{:.1f}")
-    # The tree-RSS baseline bar is tall enough that the default y-axis
-    # cap (max*1.18) crowds the legend. Stretch the cap and move the
-    # legend to give both the value label and the legend room.
     ax.set_ylim(0, max(max(bef), max(aft)) * 1.35)
     ax.legend(loc="upper left", framealpha=0.95)
     sp_tree = bef[1] / aft[1]
-    ax.set_title(f"Tree peak RSS: {sp_tree:.2f}x lower\n(main proc flat: graph build sets watermark)")
+    ax.set_title(f"Memory ~flat: tree PSS {sp_tree:.2f}x\n(true footprint ~28-30 GB either way)")
 
     # Parallel utilization
     ax = axes[2]
@@ -157,8 +159,8 @@ def chart_phase_attribution():
     fig, ax = plt.subplots(figsize=(9, 4.5))
 
     # CONUS phase breakdown (from the t-route internal timing block in
-    # benchmark/results/baseline-tierC.conus.json vs
-    # benchmark/results/devcontainer-tierC.conus.json).
+    # benchmark/results/baseline-C.conus.json vs
+    # benchmark/results/after-py311-C.conus.json).
     phases = ["Network graph\nconstruction", "Routing\ncomputations",
               "Output\nwriting", "Forcing array\nconstruction"]
     before = [CONUS_PHASES["graph_s"]["before"],
@@ -172,8 +174,8 @@ def chart_phase_attribution():
 
     x = np.arange(len(phases))
     w = 0.36
-    ax.bar(x - w/2, before, w, label="Baseline", color=C_BEFORE, edgecolor="black", linewidth=0.5)
-    ax.bar(x + w/2, after,  w, label="After",    color=C_AFTER,  edgecolor="black", linewidth=0.5)
+    ax.bar(x - w/2, before, w, label="Baseline (pre-#94)", color=C_BEFORE, edgecolor="black", linewidth=0.5)
+    ax.bar(x + w/2, after,  w, label="After (this PR, py3.11)", color=C_AFTER,  edgecolor="black", linewidth=0.5)
 
     for i, (b, a) in enumerate(zip(before, after)):
         ax.text(i - w/2, b, f"{b:.0f}", ha="center", va="bottom", fontsize=9)
@@ -241,13 +243,14 @@ def chart_tier_a():
 def chart_speedup_overview():
     fig, ax = plt.subplots(figsize=(10.5, 4.2))
 
-    # Headline ratios across the three tiers + tree-RSS memory metric
-    # (devcontainer measurements, MALLOC_ARENA_MAX=2).
+    # Headline ratios across the three tiers + tree-PSS memory metric
+    # (devcontainer measurements, MALLOC_ARENA_MAX=2). Memory is ~flat (~1.08x)
+    # and shown for honesty next to the real wall/CPU wins.
     metrics = ["Tier A wall\n(nhf_subset_ohio)",
                "Tier B kernel\n(MC replay)",
                "Tier C wall\n(CONUS)",
                "Tier C CPU\n(CONUS)",
-               "Tier C tree RSS\n(all 8 workers)"]
+               "Tier C tree PSS\n(all 8 workers)"]
     befores = [TIER_A["wall_s"]["before"], TIER_B["kernel_ms"]["before"],
                CONUS["wall_s"]["before"],  CONUS["cpu_s"]["before"],
                CONUS["tree_gb"]["before"]]

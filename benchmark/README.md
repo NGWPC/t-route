@@ -3,7 +3,7 @@
 This directory holds the performance harness for the routing pipeline:
 configs, bench drivers, golden output for correctness gates, and the
 PNGs that ship with `RESULTS.md`. All measurements are produced inside
-the project's devcontainer (`docker/Dockerfile.dev`, Rocky Linux 9)
+the project's DevContainer (`docker/Dockerfile.dev`, Rocky Linux 9)
 so they are reproducible on any host that runs Docker.
 
 ## What this folder contains
@@ -13,53 +13,66 @@ so they are reproducible on any host that runs Docker.
 | `RESULTS.md` | Executive summary plus per-change technical writeup with bar charts. **Start here.** |
 | `nhf_subset_ohio.yaml` | Tier A config: 1-day, ~11 k flowpaths, single worker. Used for correctness gates and kernel-dominated wall measurement. |
 | `conus.yaml` | Tier C config: full CONUS NHF (1.1 M flowpaths), 8 workers, 24 timesteps. Used for production-scale wall measurement. |
-| `bench_e2e.py` | Tier A driver. Runs the full `nwm_routing` CLI, measures wall/CPU/RSS, compares output to `golden/` (PASS / FAIL gate). |
+| `bench_e2e.py` | Tier A driver. Runs the full `nwm_routing` CLI, measures wall/CPU/RSS (resident set size), compares output to `golden/` (PASS / FAIL gate). |
 | `bench_conus.py` | Tier C driver. Single CONUS run with `--profile {cprofile,pyspy,none}` for hot-path analysis. |
 | `bench_kernel.py` | Tier B microbenchmark. Replays harvested `compute_network_structured()` calls so the MC kernel can be timed in isolation, without the Python pipeline around it. |
 | `harvest_kernel_inputs.py` | Records the kernel inputs from a real Tier A run into `data/kernel_calls.pkl`, so the kernel bench can replay them deterministically. |
-| `prep_ohio_data.py`, `prep_conus.py` | Build the Tier A and Tier C input data from the NHF v1.1.4 CONUS geopackage. |
+| `regression_check.sh` | **Pre-PR regression check.** Builds your working tree and a baseline ref (default `development`), runs the tiers on both, and flags performance/accuracy regressions. Exits non-zero on failure. See "Checking your changes for regressions" below. |
+| `compare_runs.py` | The baseline-vs-candidate comparison + gating step behind `regression_check.sh`; also runnable by hand on any two result tags. |
+| `run_matrix.sh`, `summarize_matrix.py` | Build and run the three-way study matrix (baseline / after-py39 / after-py311) and print the code-vs-Python attribution table behind `RESULTS.md`. |
+| `prep_ohio_data.py`, `prep_conus.py` | Build the Tier A and Tier C input data from the NHF v1.1.4 CONUS GeoPackage. |
 | `sweep_max_loop_size.py` | Runs Tier A across a sweep of `max_loop_size` values, captures wall/CPU/RSS per point, writes `results/max_loop_size_sweep.json`. Backs the operational deployment recommendation on chunk sizing. |
 | `plot_max_loop_size.py` | Renders the sweep JSON to `figures/max_loop_size_sweep.png`. |
-| `data/`, `golden/` | Input geopackages and reference output netCDFs (gitignored; build locally). |
+| `data/`, `golden/` | Input GeoPackages and reference output netCDFs (gitignored; build locally). |
 | `results/` | Per-run JSON metric files (`{label}.json`, `{label}.kernel.json`, `{label}.conus.json`, `max_loop_size_sweep.json`). |
 | `figures/` | PNG bar charts embedded in `RESULTS.md`. Regenerate via `python benchmark/generate_figures.py`. |
 | `generate_figures.py` | Builds the bar charts in `figures/` from the measured numbers (constants at the top). |
 
 ## High-level summary
 
-The optimizations drop **CONUS wall time from 297.2 s to 131.7 s
-(2.26x speedup)** while reducing CPU time by 1.68x, pushing worker
-utilization from 1.40x to 1.88x of 8 cores, and cutting peak
-tree-RSS (sum across the main process plus 8 workers) by 3.50x
-(100.7 GB to 28.7 GB). Tier A wall improves 1.22x and the isolated
-MC-kernel replay (Tier B) improves 1.31x. Output is bit-identical
-to a golden saved with the optimized build on the correctness gate. All
-numbers are devcontainer measurements with `MALLOC_ARENA_MAX=2`.
-See `RESULTS.md` for the per-change breakdown.
+![Overall improvement across all three tiers](figures/speedup_overview.png)
 
-The work is grouped into three tracks:
+The contribution drops **CONUS wall time from 275.8 s to 115.3 s
+(2.39x speedup)** while reducing CPU time by 1.66x and pushing worker
+utilization from 1.40x to 2.02x of 8 cores. Tier A wall improves 1.18x
+and the isolated MC-kernel replay (Tier B) improves 1.13x. Memory is
+essentially flat (~1.08x; true footprint ~28-30 GB measured as PSS,
+proportional set size, not an inflated per-process RSS sum). Output is bit-identical to a golden
+saved with the optimized build on the correctness gate. Numbers are
+DevContainer measurements (Python 3.11, `MALLOC_ARENA_MAX=2`) from the
+cooldown-gated three-way matrix. See `RESULTS.md` for the baseline
+(pre-#94), code, and Python 3.11 breakdown.
 
-1. **Kernel-level** (`src/kernel/muskingum/`):
+The work is grouped into four tracks:
+
+1. **Toolchain and build environment** (`docker/Dockerfile.dev`,
+   `pyproject.toml`): **Python 3.9 -> 3.11** (the production target),
+   picking up CPython's interpreter speedups (~6% on CONUS, in the
+   Python-heavy graph-construction phase); `fiona` dropped for
+   `pyogrio` (no system GDAL or C++ toolchain); system packages in one
+   cache-cleaned layer; `ccache` + BuildKit cache mounts for rebuilds;
+   image ~1.82 -> 1.4 GB.
+2. **Kernel-level** (`src/kernel/muskingum/`):
    `-O3 -funroll-loops` build (with optional `TROUTE_NATIVE=1`
    for host-specific `-mcpu=native`/`-march=native` tuning); hoisted
    loop-invariant transcendentals; strength-reduced powers; common
    subexpression elimination (CSE) on the upstream-weighted sum.
-2. **Routing-side** (`src/troute-routing/troute/routing/compute.py`):
-   eliminated per-cluster deepcopy; consolidated 6+ per-cluster
+3. **Routing-side** (`src/troute-routing/troute/routing/compute.py`):
+   eliminated per-cluster `deepcopy`; consolidated 6+ per-cluster
    `.reindex` calls into one extended-index `pd.api.extensions.take`;
    per-cluster fast-path guards; `.to_numpy(copy=False)` migration.
-3. **Graph construction** (`src/troute-network/troute/`): vectorized
+4. **Graph construction** (`src/troute-network/troute/`): vectorized
    `_discretize_links`, `extract_connections`, and the two
    `groupby.apply(list).to_dict()` calls in
    `crosswalk_nex_flowpath_poi`.
 
 ## Reproducing the results
 
-Everything runs inside the devcontainer. The compiled core (Fortran
+Everything runs inside the DevContainer. The compiled core (Fortran
 plus Cython extensions) is built by `compiler.sh` during the Docker
 image build.
 
-### Build the devcontainer image
+### Build the DevContainer image
 
 ```bash
 docker build --target dev -f docker/Dockerfile.dev \
@@ -71,7 +84,7 @@ docker build --target dev -f docker/Dockerfile.dev \
 `-march=native` arch tuning on the MC Fortran kernel. The
 benchmark numbers in `RESULTS.md` were taken with this flag.
 Omit it (the project default) for a portable build safe to run
-on a different CPU than the build host -- the right choice for
+on a different CPU than the build host, the right choice for
 shipping container images or conda packages across heterogeneous
 clusters, at a small wall-time cost on the kernel.
 
@@ -80,17 +93,19 @@ place under `/t-route` and the Python venv at `/opt/venv` already
 on `PATH`. The bench commands below assume you launch a container
 from that image with the bind mounts shown.
 
-The dev image builds on Python 3.11 and is about 1.39 GB. It needs no
-system GDAL or C++ toolchain: geopandas reads geopackages through
-`pyogrio`, whose manylinux aarch64 wheels bundle GDAL. The headline
-numbers in this folder were originally measured on Rocky 9's default
-Python 3.9 and reproduce the Tier A output bit-for-bit on 3.11.
+The dev image builds on Python 3.11 (the production target) and is
+about 1.4 GB. It needs no system GDAL or C++ toolchain: geopandas reads
+geopackages through `pyogrio`, whose manylinux aarch64 wheels bundle
+GDAL. The headline numbers in this folder are measured on Python 3.11;
+the benchmark matrix also runs the Python 3.9 arm to isolate the
+interpreter-version effect, and the optimized build reproduces the
+Tier A output bit-for-bit on both.
 
 ### Memory requirements
 
-CONUS (Tier C) peaks at **~19 GB resident** in the main process
-and **~29 GB resident across the whole process tree** (main + 8
-joblib workers, measured with `MALLOC_ARENA_MAX=2`). **Configure
+CONUS (Tier C) peaks at **~25 GB resident** in the main process
+and **~28 GB across the whole process tree** (main + 8 `joblib`
+workers, measured as PSS with `MALLOC_ARENA_MAX=2`). **Configure
 your container runtime with at least ~32 GB of RAM available to
 the VM.** Without this the output-write step will be OOM-killed
 (exit code -9) and you'll see the routing log stop mid-way at
@@ -119,18 +134,18 @@ changes.
 
 Setting `MALLOC_ARENA_MAX=2` caps the arena count at 2 per
 process, trading negligible allocator contention (the main
-process is effectively single-threaded; joblib workers are
-separate processes) for honest peak RSS measurements. This is a
+process is effectively single-threaded; `joblib` workers are
+separate processes) for honest peak-memory measurements. This is a
 common production setting in Python data services (Airflow, Dask,
-etc.). If you omit the env var the wall numbers shift by a few
-percent (baseline runs ~10% faster, narrowing the CONUS ratio
-from 2.26x to 2.30x) but the memory wins documented in
-`RESULTS.md` will not be visible.
+etc.). Omitting it does not materially change the wall-time ratios,
+but it inflates the absolute memory numbers (a naive RSS sum can
+exceed physical RAM), hiding the true ~28 GB footprint reported in
+`RESULTS.md`.
 
 ### Source data
 
 Both tiers derive from the **NextGen Hydrofabric v1.1.4 CONUS
-geopackage** (`nhf_1.1.4.gpkg`, ~6 GB). The numbers in `RESULTS.md`
+GeoPackage** (`nhf_1.1.4.gpkg`, ~6 GB). The numbers in `RESULTS.md`
 were produced against this exact dataset; reviewers with access to
 it can reproduce them directly. Remember the local path; the
 remaining steps both consume that single file.
@@ -158,7 +173,7 @@ docker run --rm \
 
 What each step does:
 
-- `prep_ohio_data.py` carves the upstream subgraph of fp_id 1725641 (Ohio
+- `prep_ohio_data.py` carves the upstream subgraph of `fp_id` 1725641 (Ohio
   River basin, 11,327 flowpaths) and synthesizes 144 hourly forcing
   CSVs. Output: `benchmark/data/domain/nhf_subset_ohio.gpkg`.
 - `prep_conus.py` processes the full CONUS hydrofabric and
@@ -205,7 +220,7 @@ Per-tier notes:
   runs, compares output to `golden/`, prints `PASS` / `FAIL`. Save a
   fresh golden any time via `--save-golden`.
 - **Tier B** (`bench_kernel.py`) replays the harvested
-  `compute_network_structured()` calls only: no I/O, no joblib, no
+  `compute_network_structured()` calls only: no I/O, no `joblib`, no
   config parsing. Use this to measure pure MC-kernel changes.
 - **Tier C** (`bench_conus.py`) does a single CONUS run. Swap
   `--profile none` for `--profile cprofile` to write
@@ -223,15 +238,15 @@ docker run --rm \
 ```
 
 The script reads its numbers from constants at the top of the file
-(see `BASELINE_*` / `AFTER_*` blocks); update those, rerun, and
-commit the new PNGs in `figures/`.
+(the `CONUS`, `CONUS_PHASES`, `TIER_A`, `TIER_B` blocks); update
+those, rerun, and commit the new PNGs in `figures/`.
 
 ### VS Code Dev Containers workflow
 
 The repo's `.devcontainer/devcontainer.json` resolves the
 `/hydrofabric` bind-mount source from the host environment
 variable `TROUTE_HYDROFABRIC_DIR`, falling back to
-`/tmp/troute-no-hydrofabric` (which the devcontainer's
+`/tmp/troute-no-hydrofabric` (which the DevContainer's
 `initializeCommand` creates on the host before container start)
 so the container starts cleanly for non-benchmark users.
 
@@ -244,7 +259,7 @@ To run benchmarks from inside VS Code:
    code /path/to/t-route
    ```
 2. "Reopen in Container" picks up the mount automatically; the
-   geopackage is then visible at `/hydrofabric` inside the
+   GeoPackage is then visible at `/hydrofabric` inside the
    container.
 3. Set `MALLOC_ARENA_MAX=2` in your shell or in the `containerEnv`
    block of `devcontainer.json` so every terminal in the container
@@ -257,9 +272,92 @@ If `TROUTE_HYDROFABRIC_DIR` is unset, the container still starts
 with `/hydrofabric` mapped to the empty `/tmp/troute-no-hydrofabric`
 directory; only the benchmark prep scripts will complain.
 
+## Checking your changes for regressions
+
+Before opening a PR, compare your working tree against the branch you
+are merging into (default `development`) to catch performance or
+accuracy regressions. One script does the whole thing:
+
+```bash
+# one-time: build the data the harness replays (see "Set up the input data" above)
+python benchmark/prep_ohio_data.py --src /path/to/nhf_1.1.4.gpkg
+python benchmark/harvest_kernel_inputs.py
+
+# compare your working tree vs development (Tier A + Tier B)
+benchmark/regression_check.sh
+
+# also include the CONUS tier (needs the CONUS dataset + ~32 GB RAM)
+benchmark/regression_check.sh --conus
+```
+
+`regression_check.sh` builds a Docker image for each side, runs the
+benchmark tiers on both, captures the baseline's own output as the
+accuracy reference, compares the two, and prints a verdict table:
+
+```text
+  check                    baseline             candidate    speedup  verdict
+  -------------------  ------------  --------------------  ---------  -------------
+  Tier A wall               54.83 s               46.30 s      1.18x  ok (faster)
+  Tier B kernel          3161.18 ms            2787.56 ms      1.13x  ok (faster)
+  Accuracy (flow rel)     reference       0.0e+00 (NaN 0)          -  ok (identical)
+
+OK: no regression beyond the gates
+```
+
+It **exits non-zero if any gate fails**, so it drops into a pre-PR
+hook or CI step unchanged. The gates (override on the command line or
+via env var):
+
+| gate | default | meaning |
+|---|---|---|
+| `--max-slowdown` | `1.05` | fail if the candidate is more than 5% slower on any tier |
+| `--max-rel` | `1e-3` | fail if Tier A **flow** output drifts more than this vs the baseline |
+| `MAX_MEM_GROWTH` | `1.05` | (with `--conus`) fail if candidate peak PSS grows more than 5% |
+
+**Accuracy** is measured against the baseline's *own* output, captured
+fresh each run (not a committed golden), so a pure refactor reads
+`0.0e+00 (NaN 0)  ok (identical)`. Any **new NaN/Inf** always fails.
+The relative-drift gate is on **flow** only, the conserved routing
+output; velocity and depth relative error blows up at near-dry nodes
+even between identical builds, so they are reported for information and
+gated only on new NaN. If your change *intends* to alter results, the
+gate flags it for review; confirm the new numbers are correct, then
+loosen `--max-rel`.
+
+**Build model:** both sides are built with **this branch's**
+`docker/Dockerfile.dev` (the Dockerfile your PR merges into
+development), so the build environment is identical on both sides and
+only the source code differs. Post-merge that Dockerfile is exactly
+development's, so the baseline is built as development will be.
+
+Useful overrides:
+
+- `--baseline <ref>`: compare against a ref other than `development`.
+- `BASELINE_IMG` / `CANDIDATE_IMG`: reuse a pre-built image and skip
+  that build (fast iteration, or to supply a known-good baseline image
+  when an older `development` predates the current Dockerfile).
+- `BENCH_COOLDOWN=120`: idle before each side so a throttling laptop
+  doesn't penalize whichever side runs second (recommended with
+  `--conus`).
+
+Single-laptop wall times are noisy and thermal-sensitive: treat a
+borderline `slower` verdict as "re-run to confirm," and prefer a quiet
+machine (or `BENCH_COOLDOWN`) for the CONUS tier. The accuracy gate is
+deterministic.
+
+### Comparing two existing runs by hand
+
+`compare_runs.py` is the pure comparison step and works on any two
+result tags already in `benchmark/results/`:
+
+```bash
+python benchmark/compare_runs.py \
+  --baseline regress-base --candidate regress-cand --conus
+```
+
 ## Notes
 
-- All measurements were taken inside the devcontainer on linux/arm64.
+- All measurements were taken inside the DevContainer on linux/arm64.
   Relative speedups generalize; absolute seconds will shift with the
   host CPU and the container runtime's I/O overhead.
 - `cpu_pool=1` in `nhf_subset_ohio.yaml` and `cpu_pool=8` in

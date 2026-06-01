@@ -1,94 +1,156 @@
 # t-route routing performance results
 
-All numbers were measured inside the project's devcontainer
-(`docker/Dockerfile.dev`, Rocky Linux 9, Python 3.9, linux/arm64) with
-`MALLOC_ARENA_MAX=2` set. Baseline = the `ngwpc/development`
-merge-base; After = the optimized build delivered by this work.
-Both built with the same `compiler.sh` flags inside the same image,
-so the only thing that varies across the comparison is the source
-code changes described below. See the "Memory measurement"
-subsection under Reproducing for why the arena cap matters.
+All numbers were measured inside the project's DevContainer
+(`docker/Dockerfile.dev`, Rocky Linux 9, **Python 3.11**, linux/arm64)
+with `MALLOC_ARENA_MAX=2` set, via the cooldown-gated benchmark matrix
+(`benchmark/run_matrix.sh`) so every arm starts from a comparable
+thermal state. Memory is reported as **PSS** (proportional set size,
+the true resident footprint), not a per-process RSS (resident set
+size) sum; see
+"Memory" below for why that distinction matters.
 
-The devcontainer has since been upgraded to Python 3.11 and slimmed
-(see "Build and dependency improvements" below). The optimized
-build's routing output is bit-identical on 3.11, verified against the
-Tier A correctness gate, so the numbers in this report are unchanged.
+This study measures the **author's full contribution** against the
+project state immediately before it. Three images are compared:
+
+| arm | code | Python |
+|---|---|---|
+| **baseline** | `8d17710d`, the commit PR #94 was opened against (pre-contribution) | 3.9 |
+| **after-py39** | optimized code (PRs #94, #95, and the optimization PR) | 3.9 |
+| **after-py311** | the same optimized code | 3.11 |
+
+`baseline -> after-py39` isolates the **code** contribution;
+`after-py39 -> after-py311` isolates the **Python 3.11** upgrade.
+Production runs Python 3.11, so after-py311 is the shipped build.
+PRs: <https://github.com/NGWPC/t-route/pull/94>,
+<https://github.com/NGWPC/t-route/pull/95>.
 
 ## Executive summary
 
-The optimizations cut t-route CONUS-scale routing wall time from
-**297.2 s to 131.7 s (2.26x speedup)** on the production workload
-(1.1 M flowpaths, 8 parallel workers) while keeping output
-bit-identical to a golden saved with the optimized build on the
-Tier A correctness gate. CPU time drops 1.68x, worker utilization
-climbs from 1.40x to 1.88x of 8 cores, and the **peak tree RSS
-across all 8 worker processes drops 3.50x (100.7 GB to 28.7 GB)**.
-The Tier A single-worker, kernel-dominated configuration sees a
-1.22x wall improvement.
+![Overall improvement across all three tiers](figures/speedup_overview.png)
 
-![Overall improvement](figures/speedup_overview.png)
+The contribution cuts t-route CONUS-scale routing wall time from
+**275.8 s to 115.3 s (2.39x)** on the production workload (1.1 M
+flowpaths, 8 parallel workers), with output bit-identical on the
+Tier A correctness gate. Worker utilization climbs from **1.40x to
+2.02x** of 8 cores and total CPU time drops **1.66x**: the build
+does less work *and* spreads it better across workers. The smaller,
+kernel-dominated Tier A run improves **1.18x**; the isolated MC-kernel
+replay (Tier B) improves **1.13x**.
+
+The 2.39x splits cleanly into the code work and the Python 3.11 move:
+
+| | code<br>(baseline->after-py39) | Python 3.11<br>(after-py39->after-py311) | total |
+|---|---:|---:|---:|
+| **Tier C wall** | **2.26x** | 1.06x | **2.39x** |
+| Tier A wall | 1.13x | 1.04x | 1.18x |
+| Tier B kernel | 1.13x | 1.01x | 1.13x |
+| Tier C PSS (memory) | 1.07x | 1.00x | 1.08x |
+
+The **code changes are the overwhelming driver.** Python 3.11 adds a
+consistent few percent, most visible (~6%) on CONUS, where it speeds
+the Python-heavy graph-construction phase; near-noise on the
+Fortran-kernel-bound tiers.
+
+**Memory is essentially flat** (~1.08x; true footprint ~28-30 GB across
+the process tree). Summing per-process RSS would suggest a much larger
+reduction, but that double-counts shared pages and can exceed physical
+RAM; measured as PSS, baseline and after both sit at ~28-30 GB. See
+"Memory" below.
 
 ### CONUS-scale headline (Tier C: 1.1 M flowpaths, 8 workers)
 
-![CONUS summary](figures/conus_summary.png)
+![CONUS wall, CPU, memory, and parallel utilization](figures/conus_summary.png)
 
-The 1.68x CPU reduction means the optimized build is doing **less
-total compute**, not just spreading it more evenly. The
-parallel-utilization jump from 1.40x to 1.88x shows that workers
-were severely starved by serial main-process work in the baseline;
-the changes now feed them faster.
-
-Main-process peak RSS is approximately flat at ~19 GB. Graph
-construction (`NHF.__init__`, building the 1.1 M-row parameter
-DataFrame plus the `dict[int, list[int]]` adjacency) sets the
-high-water mark in both runs; the routing-side transient savings
-sit below that ceiling. The tree-RSS reduction (sum of main + 8
-workers) is where the per-cluster memory savings surface: each
-worker ships less data per joblib call (see Track 2 below), so
-workers finish their share faster and the simultaneous peak across
-all 8 is much smaller.
+The 1.66x total-CPU reduction means the build does **less total
+compute**, not just spreads it more evenly. The utilization jump from
+**1.40x to 2.02x** of 8 cores shows workers were severely starved by
+serial main-process work in the baseline; the changes now feed them
+faster. Main-process peak RSS is approximately flat across arms
+(~24-27 GB); graph construction (`NHF.__init__`) sets the high-water
+mark in every run.
 
 ### Where the wall-time savings come from
 
-![CONUS phases](figures/conus_phases.png)
+Per-phase, baseline (pre-#94) vs after-py311, from t-route's own
+phase timers:
 
-| Phase | Baseline (s) | After (s) | Speedup |
+| Phase | baseline (s) | after (s) | speedup |
 |---|---:|---:|---:|
-| **Routing computations** | 168.2 | **44.2** | **3.81x** |
-| **Network graph construction** | 82.9 | **54.2** | **1.53x** |
-| Output writing | 30.1 | 23.3 | 1.29x |
-| Forcing array construction | 2.7 | 2.4 | 1.13x |
+| **Routing computations** | 169.5 | **40.8** | **4.15x** |
+| **Network graph construction** | 80.1 | **54.0** | **1.48x** |
+| Output writing | 15.6 | 12.2 | 1.28x |
+| Forcing array construction | 2.4 | 2.3 | 1.04x |
 
-Routing is the biggest win. The starved-workers pattern is the root
-cause: fixing the per-cluster main-process prep loop both reduces
-the work itself and lets the workers run concurrently with
-subsequent prep.
+![CONUS wall time by phase](figures/conus_phases.png)
 
-### Tier A (nhf_subset_ohio, single worker, kernel-dominated)
+Routing is the biggest win: fixing the serial per-cluster
+main-process prep loop both cuts the work and lets workers run
+concurrently with subsequent prep (the utilization story above).
+Graph construction is now the largest phase (~49% of the run), the
+natural next target, and where Python 3.11's interpreter speedups land.
 
-![Tier A summary](figures/tier_a_summary.png)
+### Tier A / Tier B (single worker, kernel-dominated)
 
-Tier A is a smaller workload (~11 k flowpaths) run with `cpu_pool=1`
-to isolate kernel cost. The 1.22x wall speedup comes primarily from
-the Fortran kernel changes (hoisted invariants, strength reduction,
-common subexpression elimination [CSE]) plus the `-O3` build
-foundation. Tier A doesn't exercise the per-cluster prep loop that
-dominates CONUS, so the optimizations that win on CONUS contribute
-proportionally less here. Tier B isolates the MC kernel further by
-replaying the harvested compute calls without the Python pipeline
-around them; it shows a 1.31x kernel-only speedup (3726.8 ms ->
-2842.6 ms median over 15 replays of ~1.05 M invocations each).
+Tier A (~11 k flowpaths, `cpu_pool=1`) isolates kernel cost:
+**54.8 -> 46.3 s (1.18x)**, mostly from the Fortran kernel changes
+(hoisted invariants, strength reduction, common subexpression
+elimination [CSE]) plus the `-O3` build. It doesn't exercise the
+per-cluster prep loop that dominates CONUS, so the CONUS-winning
+changes contribute less here. Tier B replays the harvested MC-kernel
+calls with no Python pipeline around them: **3161 -> 2788 ms (1.13x)**
+median over 15 replays of ~1.05 M invocations. Tier A main-process RSS
+is flat (~2.0 GB). (The baseline's Tier B is flagged WARN, not PASS,
+against the correctness golden: the pre-#95 build predates the kernel
+NaN-guard fix, so its kernel output differs more from the optimized
+golden; after-py39 and after-py311 both PASS.)
+
+![Tier A wall, CPU, and peak memory](figures/tier_a_summary.png)
 
 ---
 
 ## What changed
 
-The work falls into three tracks. Each track touches a distinct
-part of the pipeline and is independent of the others: any one
-could be adopted without the others, though the cumulative effect
-is what produces the headline 2.26x.
+The work falls into four tracks. Track 1 modernizes the build
+toolchain (and carries the Python 3.11 speedup); Tracks 2-4 are the
+code changes, each touching a distinct part of the pipeline and
+independently adoptable. Together they produce the headline 2.39x: the
+code tracks alone account for 2.26x, and Track 1's Python 3.11 move
+adds the remaining 1.06x.
 
-### Track 1: Kernel-level Fortran plus build flags
+### Track 1: Toolchain and build environment
+
+**Scope:** `docker/Dockerfile.dev`, `pyproject.toml`, `compiler.sh`.
+
+**What:**
+
+1. **Python 3.9 -> 3.11** (the production target). Replaces Rocky 9's
+   default Python 3.9, which is approaching end of life. Picks up
+   CPython's interpreter speedups, measured at **~6% on CONUS** (it
+   lands on the Python-heavy graph-construction phase) and ~1-4% on the
+   kernel-bound tiers. This is the `after-py39 -> after-py311` column in
+   the tables above, and it aligns the container with production.
+2. **`fiona` replaced by `pyogrio`.** `geopandas` 1.x reads GeoPackages
+   through `pyogrio` by default, and t-route's layer reads already call
+   `pyogrio`; the one remaining `fiona.listlayers` was switched to
+   `pyogrio.list_layers`. `fiona` was a redundant dependency that also
+   forced a from-source build on arm64, so dropping it removes a
+   compiled dependency outright.
+3. **Smaller image (~1.82 -> 1.40 GB, ~23%).** With `fiona` gone the
+   image needs no GDAL dev headers (`gdal-devel`) or C++ compiler
+   (`gcc-c++`) (the geo stack's `manylinux` `aarch64` wheels bundle GDAL);
+   the system packages collapse to one cache-cleaned layer, and `.o`
+   build intermediates are stripped after compile. (Python 3.11 itself
+   adds back ~140 MB of newer Python + geo-stack wheels: the py3.9
+   after-image is 1.26 GB.)
+4. **Faster rebuilds.** `ccache` (wired via PATH symlinks: `f2py` and
+   `distutils` treat `$F90` as a single executable path, so a
+   `ccache gfortran` wrapper would break) caches the Fortran kernel and
+   Cython C compiles across builds, and `pip`/`ccache` build-cache mounts
+   skip re-downloading wheels and recompiling unchanged extensions.
+   Bit-identical to a cold-cache build, so benchmark reproducibility is
+   unaffected.
+
+### Track 2: Kernel-level Fortran plus build flags
 
 **Scope:** `src/kernel/muskingum/MCsingleSegStime_f2py_NOLOOP.f90`,
 `src/kernel/muskingum/makefile`.
@@ -127,8 +189,8 @@ is what produces the headline 2.26x.
    these exponents.
 
 4. **Common subexpression elimination (CSE) on the
-   C1*qup + C2*quc + C3*qdp sum**. The same expression appeared
-   three times in `secant2_h` (channel-loss adjustment, Qj
+   `C1*qup + C2*quc + C3*qdp` sum**. The same expression appeared
+   three times in `secant2_h` (channel-loss adjustment, `Qj` update,
    residual, etc.). Caching into `s3` is pure CSE with operator
    ordering preserved: bit-identical output, fewer multiplies and
    adds.
@@ -150,7 +212,7 @@ drift-prone by nature of float32 Secant iteration, so the golden
 output is saved as a deterministic reference within the optimized
 build and every subsequent run is gated against it).
 
-### Track 2: Routing-side per-cluster prep
+### Track 3: Routing-side per-cluster prep
 
 **Scope:** `src/troute-routing/troute/routing/compute.py`.
 
@@ -166,7 +228,7 @@ the main process shipped them was larger than it needed to be.
 
 1. **Eliminated the per-cluster deep copy of `subnetwork_list`**.
    The list aliased a cached structure that was reused across
-   `max_loop` chunks; the deepcopy was added defensively against an
+   `max_loop` chunks; the `deepcopy` was added defensively against an
    in-place mutation that no longer exists. Replaced with a
    fresh-list construction at the one call site that needs it.
 
@@ -201,7 +263,7 @@ the main process shipped them was larger than it needed to be.
      or copies.
 
 4. **`.values.astype("float32")` to `.to_numpy(dtype="float32", copy=False)`**
-   at the joblib dispatch boundary. For already-float32 inputs
+   at the `joblib` dispatch boundary. For already-float32 inputs
    (`q0_sub`, `qlat_sub`) this returns a view of the underlying
    `ndarray` instead of allocating a fresh ~5 MB copy per cluster:
    roughly 6 GB of avoided main-process memcpy across a full CONUS
@@ -216,7 +278,7 @@ process preps the next batch) and a direct effect on tree RSS
 so the moment when all 8 workers are simultaneously at peak RSS
 is brief and lower).
 
-### Track 3: Graph construction
+### Track 4: Graph construction
 
 **Scope:** `src/troute-network/troute/nhd_network.py`,
 `src/troute-network/troute/nhf_preprocess.py`,
@@ -278,37 +340,38 @@ optimizations.
 
 ---
 
-## Memory: where the savings actually land
+## Memory
 
-The optimizations cut memory in three places. They land at
-different scales and in different metrics, which is why no single
-number tells the whole story.
+Memory is reported as **PSS** (proportional set size): each shared
+page is split across the processes that map it, so the tree total
+equals the unique physical pages the run occupies and is bounded by
+RAM. This matters because the parallel routing runs 8 workers that
+share large copy-on-write / memmapped data; a naive **RSS sum** counts
+those shared pages once per process, inflating the number past
+physical RAM and making it swing with worker-spawn timing.
 
-| Metric | Baseline | After | Ratio |
+| Metric (PSS = true footprint) | baseline | after-py39 | after-py311 |
 |---|---:|---:|---:|
-| Tier A peak RSS (main proc) | 2049 MB | 1986 MB | 1.03x (63 MB) |
-| Tier C peak RSS (main proc) | 18.76 GB | 18.90 GB | ~flat |
-| **Tier C peak tree RSS** (main + 8 workers) | **100.7 GB** | **28.7 GB** | **3.50x** |
-| Transient bytes eliminated per CONUS run | (baseline) | -6 GB | (cluster memcpy) |
+| Tier C tree PSS (main + 8 workers) | 29.90 GB | 27.89 GB | 27.79 GB |
+| Tier C main-process RSS | 26.54 GB | 24.64 GB | 24.61 GB |
+| Tier A main-process RSS | ~2.0 GB | ~2.0 GB | ~2.0 GB |
 
-The main-process RSS at CONUS scale is dominated by the persistent
-structures `NHF.__init__` builds: the 1.1 M-row parameter
-DataFrame and the dict-of-list adjacency. Track 3 cuts the
-*construction time* by 1.53x but the resulting structures are
-unchanged, so the watermark doesn't move. The routing-side
-transient savings (Track 2) are below that ceiling, so they don't
-shift main-proc peak either.
+**The real memory change is small: ~1.08x (about 2 GB).** The routing
+optimizations (eliminated per-cluster deepcopy, `.to_numpy(copy=False)`)
+trim per-worker transients, but the footprint is dominated by the
+persistent structures `NHF.__init__` builds (the 1.1 M-row parameter
+DataFrame and the dict-of-list adjacency), which are unchanged. Plan
+for **~28-30 GB** resident for a CONUS forecast either way.
 
-Where they do show up is in the **tree RSS** (sum of resident
-memory across all 8 worker subprocesses plus main). Each
-`.to_numpy(copy=False)` and each eliminated deepcopy means each
-joblib dispatch ships a smaller payload, which means each worker
-holds smaller temporaries during execution. Combined with the
-faster routing (44 s vs 168 s) so workers spend less wall time at
-peak simultaneously, the tree RSS drops 3.5x. This is the metric
-that matters operationally: container memory limits and host RAM
-budget have to accommodate the whole tree, not just the main
-process.
+> **Why not a per-process RSS sum?** Summing each process's RSS across
+> the tree double-counts shared pages. For this workload that sum reports
+> ~100 GB at baseline, more than the 31 GB of physical RAM on the
+> measurement host, which is impossible for a real footprint and is the
+> tell that shared pages are being counted once per process. It also
+> swings with worker-spawn timing. PSS (sampled by `bench_conus.py`)
+> splits each shared page across the processes that map it, so the tree
+> total is the true resident footprint: baseline and after both land at
+> ~28-30 GB. Memory is not where the win is; wall time and CPU are.
 
 ---
 
@@ -342,7 +405,7 @@ the overall build also changes optimization flags
 (`-O3 -funroll-loops` vs upstream `-O2`), so float32 cancellation
 noise is expected on the order of solver tolerance. We measure that
 explicitly: baseline-built Tier A output vs after-built Tier A
-output, run with identical inputs inside the same devcontainer
+output, run with identical inputs inside the same DevContainer
 image, all 11,327 flowpaths across 144 timesteps
 (`benchmark/compare_baseline_after.py`):
 
@@ -374,7 +437,7 @@ single-segment entry point, but the broader observation here is
 that the operation-reordering changes don't propagate IEEE special
 values where the baseline produced finite values.
 
-Reproduce with two devcontainer images and the comparison driver:
+Reproduce with two DevContainer images and the comparison driver:
 
 ```bash
 docker build --target dev -f docker/Dockerfile.dev \
@@ -393,37 +456,10 @@ docker run --rm \
 
 ---
 
-## Build and dependency improvements
-
-Alongside the routing work, the devcontainer itself was modernized
-and slimmed. These changes do not affect the performance numbers
-above (the optimized build was re-validated on the new toolchain and
-reproduces the Tier A output bit-for-bit); they cut build friction
-and image size.
-
-- **Python 3.11.** The devcontainer now builds on Python 3.11; it
-  previously used Rocky 9's default Python 3.9, which is approaching
-  end of life. This picks up CPython's interpreter speedups and
-  aligns the container with the rest of the project's tooling.
-- **`fiona` replaced by `pyogrio`.** geopandas 1.x reads geopackages
-  through `pyogrio` by default, and t-route's own layer reads already
-  call `pyogrio` directly; the one remaining `fiona.listlayers` call
-  was switched to `pyogrio.list_layers`. `fiona` was a redundant
-  dependency that also forced a from-source build on arm64, so
-  dropping it removes a compiled dependency outright.
-- **Smaller image, fewer build packages.** With `fiona` gone the
-  image no longer needs the GDAL development headers (`gdal-devel`)
-  or a C++ compiler (`gcc-c++`); the geo stack's manylinux aarch64
-  wheels bundle GDAL. Together with consolidating the system packages
-  into one cache-cleaned layer and disabling pip's wheel cache, the
-  dev image drops from about 1.82 GB to 1.39 GB (roughly 24% smaller).
-
----
-
 ## Reproducing
 
 See `benchmark/README.md` for the commands. All measurements were
-produced inside the devcontainer with `MALLOC_ARENA_MAX=2` set.
+produced inside the DevContainer with `MALLOC_ARENA_MAX=2` set.
 The headline numbers are medians of 5 timed runs each (Tier A),
 15 timed runs (Tier B), or a single clean run (Tier C). Run-to-run
 variance inside the container is roughly +/- 1-2 s on Tier A,
@@ -443,7 +479,7 @@ enough to swamp the optimization-driven changes.
 `MALLOC_ARENA_MAX=2` caps the arena count at 2 per process,
 trading a small amount of multi-thread allocator contention
 (negligible for our single-threaded main process plus per-process
-joblib workers) for honest peak RSS measurements. This is a
+`joblib` workers) for honest peak RSS measurements. This is a
 common production setting for Python data services (Airflow,
 Dask, etc., all recommend it).
 
@@ -479,38 +515,32 @@ between threads. Each arena reserves a ~64 MB virtual region and
 keeps its own free-list, and memory freed in arena A *cannot* be
 reused by arena B. On a workload like t-route, where the main
 process is effectively single-threaded but pulls in libraries
-that each touch the allocator (pandas, GDAL via fiona/pyogrio,
-HDF5 via netCDF4, NumPy, joblib), the default cap inflates RSS
+that each touch the allocator (pandas, GDAL via `fiona`/`pyogrio`,
+HDF5 via `netCDF4`, NumPy, `joblib`), the default cap inflates RSS
 by a substantial amount before the application allocates a
 single byte of hydrofabric data.
 
 Capping the arena count at 2 trades negligible single-process
 allocator contention (the main process is GIL-serialized;
 `joblib` workers are separate processes that each get their own
-arena cap) for honest peak-RSS numbers and reduced kernel-side
-VMA bookkeeping. Measured impact (Tier C CONUS, devcontainer):
+arena cap) for honest peak-memory numbers and reduced kernel-side
+VMA bookkeeping. Wall time is not materially affected by the cap;
+the reason to set it is measurement honesty.
 
-| Run | Wall (s) | Main proc RSS | Tree peak RSS |
-|---|---:|---:|---:|
-| Baseline, no cap | 333.93 | 18.81 GB | 70.68 GB |
-| Baseline, `arena=2` | 297.17 | 18.76 GB | 100.69 GB |
-| After-perf, no cap | 145.21 | 19.12 GB | 68.29 GB |
-| After-perf, `arena=2` | 131.65 | 18.90 GB | 28.73 GB |
+With the default cap, glibc opens up to `8 x cores` arenas, each
+reserving virtual memory up front. Summed naively across the main
+process plus 8 workers, those reservations (plus shared
+copy-on-write / memmap pages counted once per process) pushed the
+reported tree footprint past 60-100 GB in uncapped runs, larger
+than the 31 GB of physical RAM on the host, which is the tell that
+the RSS-sum metric was counting memory that isn't really resident.
+Measured correctly (`MALLOC_ARENA_MAX=2`, PSS accounting), the
+optimized build's true CONUS footprint is **~28 GB** (see the
+Memory section). The cap removes the allocator-overhead noise so
+the real footprint is visible.
 
-Wall time improves consistently with the cap (-11% baseline,
--9% after-perf). Main-process RSS is essentially unchanged in
-all four cases because graph construction sets that
-high-water mark regardless of allocator. Tree-RSS behavior is
-duration-dependent: in long-running baseline runs the sampler
-catches more simultaneous worker peaks, so the metric goes up;
-in shorter optimized runs it drops to ~29 GB. The **operational
-data point that matters** is the bottom row: with the cap
-applied to the optimized build, peak tree-RSS is ~29 GB on
-CONUS.
-
-The same env-var pattern is common in production Python
-services (Airflow, Dask, Hadoop YARN node managers), not
-exotic.
+The same env-var pattern is common in production Python services
+(Airflow, Dask, Hadoop YARN node managers), not exotic.
 
 ### 2. BLAS thread caps
 
@@ -559,7 +589,7 @@ and NUMA nodes by default (Slurm `--cpu-bind=cores`, PBS
    explicit if the scheduler's default isn't sufficient.
 
 The cost of getting this wrong is not measured in this work
-(our devcontainer test had no multi-socket NUMA structure), but
+(our DevContainer test had no multi-socket NUMA structure), but
 HPC literature consistently reports substantial regressions
 when a memory-heavy process drifts across sockets during its
 hot phase. Worth confirming with cluster ops as part of the
@@ -568,21 +598,22 @@ re-evaluate post-deploy.
 
 ### 4. Memory request sizing
 
-Sizes below are measured peak RSS from a single Tier C run in
-the devcontainer (Rocky 9, linux/arm64) with the optimized
+Sizes below are measured peak memory from a single Tier C run in
+the DevContainer (Rocky 9, linux/arm64) with the optimized
 build and `MALLOC_ARENA_MAX=2`:
 
-| Tier | Main proc peak RSS | Tree peak RSS (cpu_pool=8) |
+| Tier | Main proc peak RSS | Tree peak PSS (cpu_pool=8) |
 |---|---:|---:|
 | Tier A (single worker, ~11 k flowpaths) | ~2.0 GB | ~2.0 GB |
-| Tier C (CONUS, 1.1 M flowpaths) | 18.9 GB | 28.7 GB |
+| Tier C (CONUS, 1.1 M flowpaths) | 24.6 GB | 27.8 GB |
 
 A 32 GB memory reservation per t-route forecast cycle on CONUS
-leaves modest headroom above the measured tree-peak. Without
-the arena cap, the same run measured 68-100 GB tree-peak in our
-tests; right-sizing the reservation becomes guesswork because
-the cap-free tree-RSS metric is duration- and sampling-sensitive
-(see the table in Recommendation 1).
+leaves comfortable headroom above the ~28 GB measured tree PSS.
+`MALLOC_ARENA_MAX=2` is the key knob: glibc otherwise opens up to
+`8 x cores` malloc arenas, and the resulting fragmentation inflates
+resident memory (and inflates the naive RSS-sum metric well past
+physical RAM; see the Memory section). The cap holds the footprint
+flat without measurably affecting wall time.
 
 ### 5. `max_loop_size` (tune for the memory/wall trade-off)
 
@@ -597,8 +628,6 @@ setup, per-cluster prep); larger chunks do the opposite.
 We swept `max_loop_size` on Tier A (`nhf_subset_ohio`, 144
 hourly forcing files, 1728 routing timesteps, `cpu_pool=1`,
 `MALLOC_ARENA_MAX=2`, 2 timed runs per point):
-
-![max_loop_size sweep](figures/max_loop_size_sweep.png)
 
 | `max_loop_size` | Chunks | Wall (s, median) | Peak RSS (MB) |
 |---:|---:|---:|---:|
@@ -680,7 +709,7 @@ even after `free()`. `jemalloc` uses `mmap` regions throughout
 and calls `madvise(MADV_DONTNEED)` to return freed pages to the
 OS aggressively. macOS's `libmalloc` works on the same
 principle, which is consistent with macOS-native t-route runs
-producing visibly lower RSS than the devcontainer on the same
+producing visibly lower RSS than the DevContainer on the same
 workload (we did not preserve a head-to-head measurement of
 this).
 
@@ -717,14 +746,14 @@ page-fault cost. Tune from there on a representative workload.
 
 ### 7. I/O staging
 
-In our Tier C measurement output writing took 23.3 s, ~19% of
+In our Tier C measurement output writing took 12.2 s, ~11% of
 wall time. On shared parallel filesystems (Lustre on WCOSS,
 GPFS elsewhere), that I/O contends with the bulk model output
 stream. If the cluster offers node-local NVMe (`$TMPDIR` on
 most sites), staging the netCDF output there during the run
 and copying back on completion is a common technique for
 reducing write-phase contention. The magnitude of the saving on
-t-route specifically is unmeasured (our devcontainer uses
+t-route specifically is unmeasured (our DevContainer uses
 container-local storage, so there's nothing to stage off). Worth
 a pilot only if I/O contention is observed in production.
 
@@ -732,13 +761,13 @@ a pilot only if I/O contention is observed in production.
 
 | Recommendation | Risk | Measured impact (citation) | Unmeasured effect |
 |---|---|---|---|
-| `MALLOC_ARENA_MAX=2` | None | Baseline wall 333.93 → 297.17 s; after-perf wall 145.21 → 131.65 s; after-perf tree-RSS 68.29 → 28.73 GB (Tier C, devcontainer) | — |
-| `OPENBLAS/MKL/OMP=1` | None | — | Removes a potential oversubscription failure mode; costs nothing if not present |
-| Verified CPU/NUMA pinning | None | — | Multi-socket regressions can be substantial per HPC literature; not measured here |
-| Right-sized memory request | None | Plan ~32 GB per CONUS forecast (covers measured 28.73 GB tree-peak) | — |
+| `MALLOC_ARENA_MAX=2` | None | Measurement honesty: caps glibc arena overhead so the true ~28 GB CONUS footprint (PSS) is visible instead of an inflated 60-100 GB RSS-sum; no material wall-time change | n/a |
+| `OPENBLAS/MKL/OMP=1` | None | n/a | Removes a potential oversubscription failure mode; costs nothing if not present |
+| Verified CPU/NUMA pinning | None | n/a | Multi-socket regressions can be substantial per HPC literature; not measured here |
+| Right-sized memory request | None | Plan ~32 GB per CONUS forecast (covers measured ~28 GB tree PSS) | n/a |
 | Tuned `max_loop_size` | None | Sweep on Tier A: wall plateau at `mls ≥ 24`; `mls = 8` cuts peak RSS roughly in half (2027 → 1058 MB) at +11% wall cost | Same shape expected at CONUS scale; re-run sweep on production config to confirm |
-| `LD_PRELOAD=jemalloc` | Pilot | — | Mechanism suggests further RSS reduction; pilot to quantify |
-| I/O staging | Cluster policy | — | Reduces shared-filesystem contention on output phase; pilot to quantify |
+| `LD_PRELOAD=jemalloc` | Pilot | n/a | Mechanism suggests further RSS reduction; pilot to quantify |
+| I/O staging | Cluster policy | n/a | Reduces shared-filesystem contention on output phase; pilot to quantify |
 
 The first five are deploy-now changes. The sixth is a deliberate
 pilot. The seventh depends on cluster-side filesystem policy and
@@ -749,9 +778,39 @@ rollout.
 
 ## Future directions
 
-Several optimization paths were investigated and judged not worth
-shipping at this time. Documenting them so future contributors
-don't re-litigate the same trade-offs.
+The most promising next step, a **NumPy 2** migration, is described
+first. The remaining items were investigated and judged not worth
+shipping at this time, documented so future contributors don't
+re-litigate the same trade-offs.
+
+### NumPy 2 migration
+
+t-route currently pins `numpy~=1.0`. Migrating to NumPy 2 is a
+candidate for a future step: it lowered per-call C-API and ufunc
+overhead, which the routing pipeline's millions of small array
+operations per CONUS run (per-cluster `take` / `to_numpy`, `qlat`
+assembly, the `flowveldepth` scatter) would compound. It is an ABI/API
+break, so the main things a migration would touch:
+
+- **Compiled extensions.** Every Cython module that includes
+  `numpy/arrayobject.h` (the `.pyx` extensions across `troute-network`
+  and `troute-routing`, for example `fast_reach/mc_reach` and `reach`)
+  and the f2py-wrapped Fortran kernels must be rebuilt against NumPy 2
+  headers; wheels built against NumPy 1 are not import-compatible.
+- **Dependency pins.** Lift `numpy~=1.0` in `requirements.txt` and the
+  `troute-*` `pyproject.toml` files, and confirm the pinned `pandas`,
+  `scipy`, `xarray`, and `pyogrio` versions all ship NumPy 2 builds.
+- **Removed or changed APIs.** Sweep for NumPy 2 removals and behavior
+  changes: `np.float_`, `np.in1d`, `np.row_stack` and similar aliases;
+  the stricter `np.array(..., copy=False)`, which now raises instead of
+  silently copying; and the NEP 50 scalar-promotion rules.
+- **Numerical parity.** Re-run the Tier A correctness gate and the
+  baseline-vs-after equivalence check: NEP 50 promotion and some
+  reduction orders changed, so confirm the routing output still matches
+  within tolerance.
+
+Quantify the win with the harness here: build a NumPy 2 image and run
+it as an extra arm against the current one.
 
 ### CSR-style graph adjacency
 
@@ -761,7 +820,7 @@ to replace the `dict[int, list[int]]` adjacency that the graph
 algorithms (`reverse_network`, `reachable_network`,
 `dfs_decomposition`, `build_subnetworks`) currently use. The
 pattern works well for the non-graph-algorithm consumers (e.g.,
-the `extract_connections` vectorization included in Track 3 is a
+the `extract_connections` vectorization included in Track 4 is a
 partial step toward it).
 
 For the graph algorithms themselves, three independent attempts
