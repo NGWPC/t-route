@@ -122,6 +122,20 @@ How you bump the VM's RAM ceiling depends on your runtime:
 Tiers A and B run comfortably in the default 8-16 GB; only Tier C
 needs the bump.
 
+### Reducing memory with `max_loop_size`
+
+`max_loop_size` chunks the forcing file list, trading peak memory
+against wall time: smaller chunks cut the transient footprint but add
+per-chunk overhead. A Tier A sweep (`nhf_subset_ohio`):
+
+![max_loop_size sweep on Tier A: wall/CPU and peak RSS vs chunk size](figures/max_loop_size_sweep.png)
+
+Peak RSS grows steeply with chunk size (about 415 MB at `mls=1` to about
+8.8 GB at `mls=144`) while wall time plateaus past `mls=24`, so a
+moderate value captures most of the speed at a fraction of the memory.
+See "Operational deployment recommendations" in `RESULTS.md` for the
+full table and guidance.
+
 ### Memory measurement (why `MALLOC_ARENA_MAX=2`)
 
 Without an arena cap, glibc's ptmalloc2 allocator reserves several

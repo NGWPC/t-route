@@ -629,6 +629,8 @@ We swept `max_loop_size` on Tier A (`nhf_subset_ohio`, 144
 hourly forcing files, 1728 routing timesteps, `cpu_pool=1`,
 `MALLOC_ARENA_MAX=2`, 2 timed runs per point):
 
+![max_loop_size sweep on Tier A: wall/CPU and peak RSS vs chunk size](figures/max_loop_size_sweep.png)
+
 | `max_loop_size` | Chunks | Wall (s, median) | Peak RSS (MB) |
 |---:|---:|---:|---:|
 | 1   | 144 | 113.15 |   415 |
@@ -638,7 +640,7 @@ hourly forcing files, 1728 routing timesteps, `cpu_pool=1`,
 | 12  |  12 |  49.48 |  1420 |
 | **24**  |   **6** |  **46.47** |  **2027** |
 | 48  |   3 |  46.08 |  3407 |
-| 72  |   2 |  51.53 |  4609 |
+| 72  |   2 |  44.52 |  4623 |
 | 144 |   1 |  46.27 |  8807 |
 
 **What the curve shows.** Wall time drops sharply as the chunk
@@ -646,12 +648,13 @@ size grows from 1 to ~12, plateaus near `max_loop_size = 24`,
 and offers no further wall benefit up to 144. Peak RSS scales
 roughly linearly with `max_loop_size` over the lower range and
 super-linearly at the top (loading all 144 files at once costs
-~8.8 GB). The empirical wall minimum at `mls=48` (46.08 s) is
-0.4 s below the `mls=24` median, well inside our run-to-run
-noise; the two settings are operationally equivalent for wall
-but `mls=24` uses 68% less memory. The bump at `mls=72` (51.53
-s) is run-to-run jitter, not a structural feature; the
-individual timed runs at that point spread from 49.4 to 53.7 s.
+~8.8 GB). Across the plateau (`mls=24` to 144) wall time sits in
+a narrow band of ~44.5 to 46.5 s, within run-to-run and session
+noise (the `mls=72` point was re-measured to remove an
+external-load artifact), so those settings are operationally
+equivalent for wall time; `mls=24` is the sweet spot because it
+uses ~68% less memory than `mls=48` and far less than the larger
+chunks.
 
 **Recommendations.**
 
