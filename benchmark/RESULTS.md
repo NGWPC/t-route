@@ -147,13 +147,15 @@ adds the remaining 1.06x.
    skips the unchanged system and dependency layers. `ccache` (wired via
    PATH symlinks, since `f2py` and `distutils` treat `$F90` as a single
    executable path and a `ccache gfortran` wrapper would break) caches
-   the Fortran kernel compile, trimming that step from ~18 s to ~12 s;
-   most of the Cython compiles are uncacheable (f2py and distutils invoke
-   the compiler in a way ccache cannot key on), so its overall effect is
-   small. The `pip` cache mount avoids re-downloading the geo-stack
-   wheels when the dependency layer rebuilds. All of these are
-   bit-identical to a cold-cache build, so benchmark reproducibility is
-   unaffected.
+   the C compiles, including the Cython-generated C (a forced Cython
+   rebuild hits 100% on the second pass). It cannot cache the Fortran
+   (`.f90`/`.F`): ccache has no Fortran front end, so the MC kernel,
+   diffusive, and reservoir modules recompile every build, and
+   `compiler.sh`'s `make clean` forces that rebuild anyway. The Fortran
+   is the compile floor, not the Cython. The `pip` cache mount avoids
+   re-downloading the geo-stack wheels when the dependency layer
+   rebuilds. All caches are bit-identical to a cold-cache build, so
+   benchmark reproducibility is unaffected.
 
 ### Track 2: Kernel-level Fortran plus build flags
 
