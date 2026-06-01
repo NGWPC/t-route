@@ -142,12 +142,17 @@ adds the remaining 1.06x.
    build intermediates are stripped after compile. (Python 3.11 itself
    adds back ~140 MB of newer Python + geo-stack wheels: the py3.9
    after-image is 1.26 GB.)
-4. **Faster rebuilds.** `ccache` (wired via PATH symlinks: `f2py` and
-   `distutils` treat `$F90` as a single executable path, so a
-   `ccache gfortran` wrapper would break) caches the Fortran kernel and
-   Cython C compiles across builds, and `pip`/`ccache` build-cache mounts
-   skip re-downloading wheels and recompiling unchanged extensions.
-   Bit-identical to a cold-cache build, so benchmark reproducibility is
+4. **Faster rebuilds.** A from-scratch build is ~132 s; a rebuild after
+   a source change is ~29 s (~4.5x), almost entirely because BuildKit
+   skips the unchanged system and dependency layers. `ccache` (wired via
+   PATH symlinks, since `f2py` and `distutils` treat `$F90` as a single
+   executable path and a `ccache gfortran` wrapper would break) caches
+   the Fortran kernel compile, trimming that step from ~18 s to ~12 s;
+   most of the Cython compiles are uncacheable (f2py and distutils invoke
+   the compiler in a way ccache cannot key on), so its overall effect is
+   small. The `pip` cache mount avoids re-downloading the geo-stack
+   wheels when the dependency layer rebuilds. All of these are
+   bit-identical to a cold-cache build, so benchmark reproducibility is
    unaffected.
 
 ### Track 2: Kernel-level Fortran plus build flags
