@@ -80,6 +80,12 @@ place under `/t-route` and the Python venv at `/opt/venv` already
 on `PATH`. The bench commands below assume you launch a container
 from that image with the bind mounts shown.
 
+The dev image builds on Python 3.11 and is about 1.39 GB. It needs no
+system GDAL or C++ toolchain: geopandas reads geopackages through
+`pyogrio`, whose manylinux aarch64 wheels bundle GDAL. The headline
+numbers in this folder were originally measured on Rocky 9's default
+Python 3.9 and reproduce the Tier A output bit-for-bit on 3.11.
+
 ### Memory requirements
 
 CONUS (Tier C) peaks at **~19 GB resident** in the main process

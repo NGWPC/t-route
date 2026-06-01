@@ -1,13 +1,18 @@
 # t-route routing performance results
 
 All numbers were measured inside the project's devcontainer
-(`docker/Dockerfile.dev`, Rocky Linux 9, linux/arm64) with
+(`docker/Dockerfile.dev`, Rocky Linux 9, Python 3.9, linux/arm64) with
 `MALLOC_ARENA_MAX=2` set. Baseline = the `ngwpc/development`
 merge-base; After = the optimized build delivered by this work.
 Both built with the same `compiler.sh` flags inside the same image,
 so the only thing that varies across the comparison is the source
 code changes described below. See the "Memory measurement"
 subsection under Reproducing for why the arena cap matters.
+
+The devcontainer has since been upgraded to Python 3.11 and slimmed
+(see "Build and dependency improvements" below). The optimized
+build's routing output is bit-identical on 3.11, verified against the
+Tier A correctness gate, so the numbers in this report are unchanged.
 
 ## Executive summary
 
@@ -385,6 +390,33 @@ docker run --rm \
   python /t-route/benchmark/compare_baseline_after.py \
     --baseline /baseline --after /after
 ```
+
+---
+
+## Build and dependency improvements
+
+Alongside the routing work, the devcontainer itself was modernized
+and slimmed. These changes do not affect the performance numbers
+above (the optimized build was re-validated on the new toolchain and
+reproduces the Tier A output bit-for-bit); they cut build friction
+and image size.
+
+- **Python 3.11.** The devcontainer now builds on Python 3.11; it
+  previously used Rocky 9's default Python 3.9, which is approaching
+  end of life. This picks up CPython's interpreter speedups and
+  aligns the container with the rest of the project's tooling.
+- **`fiona` replaced by `pyogrio`.** geopandas 1.x reads geopackages
+  through `pyogrio` by default, and t-route's own layer reads already
+  call `pyogrio` directly; the one remaining `fiona.listlayers` call
+  was switched to `pyogrio.list_layers`. `fiona` was a redundant
+  dependency that also forced a from-source build on arm64, so
+  dropping it removes a compiled dependency outright.
+- **Smaller image, fewer build packages.** With `fiona` gone the
+  image no longer needs the GDAL development headers (`gdal-devel`)
+  or a C++ compiler (`gcc-c++`); the geo stack's manylinux aarch64
+  wheels bundle GDAL. Together with consolidating the system packages
+  into one cache-cleaned layer and disabling pip's wheel cache, the
+  dev image drops from about 1.82 GB to 1.39 GB (roughly 24% smaller).
 
 ---
 
