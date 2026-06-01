@@ -56,7 +56,7 @@ DEFAULT_TAILWATER_FPID = 1725641
 
 # MC-kernel channel-parameter columns guarded by troute's load-time
 # validator; kept in sync with troute.nhf_preprocess._FLOWPATHS_CHANNEL_COLS.
-try:  # pragma: no cover -- prefer the live list if troute is importable
+try:  # pragma: no cover, prefer the live list if troute is importable
     from troute.nhf_preprocess import _FLOWPATHS_CHANNEL_COLS as CHANNEL_COLS
 except Exception:
     CHANNEL_COLS = (

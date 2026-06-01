@@ -4,8 +4,8 @@
 Replays the compute_network_structured() calls captured by
 harvest_kernel_inputs.py straight into the compiled function, over
 `--warmup` + `--runs` timed iterations. No IO, no joblib, no config
-parsing, no network construction -- just the kernel-dominated hot path
--- so it is a fast, low-noise speed metric for MC-kernel changes.
+parsing, no network construction (just the kernel-dominated hot path),
+so it is a fast, low-noise speed metric for MC-kernel changes.
 
 `compute_network_structured` is the Cython routine that runs the
 timestep loop, the per-reach loop, and every Muskingum-Cunge Fortran
@@ -44,7 +44,7 @@ RESULTS_DIR = BENCH_DIR / "results"
 REL_DRIFT_GATE = 1e-2
 
 # compute_network_structured returns an 11-tuple; element 1 is the
-# flowveldepth output (flow/velocity/depth) -- the kernel's actual product.
+# flowveldepth output (flow/velocity/depth), the kernel's actual product.
 # The other elements are data-assimilation / upstream-bookkeeping arrays
 # that an isolated single-subnetwork replay does not reproduce, so they are
 # not kernel-correctness signals. bench_e2e.py is the authoritative gate.
@@ -60,7 +60,7 @@ def replay_once(calls: list[dict], fn) -> tuple[float, list]:
 
     Note: because the deepcopy is excluded, the returned (measured) time can
     diverge noticeably from the apparent wall time of this function when the
-    harvested arrays are large -- the copy can take longer than the kernel
+    harvested arrays are large, the copy can take longer than the kernel
     replay itself. That is intentional: we want the pure kernel time, not the
     setup cost. If you instrument this function's total wall time externally,
     expect it to exceed the reported number.

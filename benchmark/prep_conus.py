@@ -4,7 +4,7 @@
 The CONUS workload is the full NHF hydrofabric (~1.1 M flowpaths). This
 script, run once:
 
-  1. Clones the source geopackage (a verbatim ~6 GB file copy -- fast, low
+  1. Clones the source geopackage (a verbatim ~6 GB file copy, fast, low
      memory) and repairs any non-finite Muskingum-Cunge channel parameter
      to that column's finite median. GeoPackage spatialite triggers are
      dropped first so the in-place repair UPDATE can run; t-route only
@@ -91,7 +91,7 @@ def clone_and_clean(
     if has_lakes:
         lakes_emptied = cur.execute("SELECT count(*) FROM lakes").fetchone()[0]
         cur.execute("DELETE FROM lakes")
-        print(f"  lakes: emptied ({lakes_emptied} rows) -- routed as MC channels")
+        print(f"  lakes: emptied ({lakes_emptied} rows), routed as MC channels")
 
     fp_cols = {r[1] for r in cur.execute("PRAGMA table_info(flowpaths)")}
     repaired: dict[str, int] = {}
