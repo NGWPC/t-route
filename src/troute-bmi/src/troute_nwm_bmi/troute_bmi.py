@@ -4,10 +4,8 @@ import pickle
 import typing
 import numpy as np
 from bmipy import Bmi
+from datetime import datetime, timezone
 import logging
-
-from ewts.helper import getenv_any
-from ewts.logger import configure_existing_logger
 
 from .troute_model import Model, BmiVars
 
@@ -15,6 +13,13 @@ if typing.TYPE_CHECKING:
     from numpy.typing import NDArray
 
 LOG = logging.getLogger("TROUTE")
+
+try:
+    from ewts.helper import getenv_any
+    from ewts.logger import configure_existing_logger
+    TROUTE_USE_EWTS = True
+except ImportError:
+    TROUTE_USE_EWTS = False
 
 _VAR_NAME_UNITS_MAP = {
     BmiVars.CATCHMENT_VALUE: ['streamflow_cms', 'm3 s-1'],
@@ -47,14 +52,55 @@ _INPUT_VAR_NAMES = [
     BmiVars.NGEN_DT,
 ]
 
+class StdoutStyleFormatter(logging.Formatter):
+
+    INFO_FORMAT = (
+        "%(asctime)s %(name)-8s %(levelname)-7s %(message)s"
+    )
+
+    DETAILED_FORMAT = (
+        "%(asctime)s %(name)-8s %(levelname)-7s "
+        "%(message)s "
+        "[%(filename)s.%(funcName)s(L%(lineno)s)]"
+    )
+
+    def format(self, record):
+        if record.levelno == logging.INFO:
+            self._style._fmt = self.INFO_FORMAT
+        else:
+            self._style._fmt = self.DETAILED_FORMAT
+
+        return super().format(record)
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    
+
+def _configure_stdout_logging():
+    LOG.setLevel(logging.INFO)
+
+    if not LOG.handlers:
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(StdoutStyleFormatter())
+        LOG.addHandler(handler)
+
+    LOG.propagate = False
 
 class BmiTroute(Bmi):
     _model: Model
 
     def __init__(self):
-        val = getenv_any("EWTS_USE_NGEN_BRIDGE", "").strip().lower()
-        if val in {"1", "true", "yes", "on"}:
-            configure_existing_logger(LOG)
+        if TROUTE_USE_EWTS:
+            val = getenv_any("EWTS_USE_NGEN_BRIDGE", "").strip().lower()
+            if val in {"1", "true", "yes", "on"}:
+                configure_existing_logger(LOG)
+            else:
+                _configure_stdout_logging()
+                LOG.warning("ewts package installed but EWTS_USE_NGEN_BRIDGE not on. Falling back to default logging.")
+        else:
+            _configure_stdout_logging()
 
         super().__init__()
         self._values: dict[str, NDArray] = {
