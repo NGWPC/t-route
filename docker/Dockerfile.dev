@@ -3,18 +3,22 @@ FROM rockylinux:9.2 AS rocky-base
 
 WORKDIR "/t-route/"
 
-# Install system dependencies. EPEL provides netcdf-* and gdal; gdal-devel
-# lives in the CRB (CodeReady Builder) repo which is disabled by default
-# on Rocky Linux 9.
+# Install system dependencies in a single layer and clean the package cache
+# in-layer to keep the image small. netcdf-fortran-devel (needed to link the
+# MC Fortran kernel) lives in the CRB (CodeReady Builder) repo, disabled by
+# default on Rocky Linux 9; EPEL provides the netcdf runtime packages.
+#
+# No GDAL / gcc-c++: the Python geo stack (geopandas + pyogrio) installs
+# manylinux aarch64 wheels with GDAL bundled, and t-route's own extensions are
+# Fortran (gfortran) + C (gcc). Nothing builds C++ or links system GDAL from
+# source now that fiona is dropped.
 RUN yum install -y epel-release dnf-plugins-core \
-    && yum config-manager --set-enabled crb
-RUN yum install -y netcdf netcdf-fortran netcdf-fortran-devel netcdf-openmpi
-RUN yum install -y git cmake python python-devel pip
-# GDAL is needed at install time on arm64: troute-network requires fiona,
-# which has no pre-built aarch64 wheel for python 3.9 and falls back to
-# building from source. fiona/_transform.cpp also needs a C++ compiler
-# (cc1plus -- shipped in gcc-c++, not the base gcc that gdal-devel pulls).
-RUN yum install -y gdal gdal-devel gcc-c++
+    && yum config-manager --set-enabled crb \
+    && yum install -y \
+        netcdf netcdf-fortran netcdf-fortran-devel netcdf-openmpi \
+        git cmake python3.11 python3.11-devel python3.11-pip \
+    && yum clean all \
+    && rm -rf /var/cache/dnf /var/cache/yum
 
 # Expose the gfortran netcdf module to the openmpi include path that
 # t-route's compiler.sh looks at. The arch-suffixed dir name comes from
@@ -25,8 +29,10 @@ RUN ln -s /usr/lib64/gfortran/modules/netcdf.mod \
 
 # Setup virtual environment
 ENV VIRTUAL_ENV=/opt/venv
-RUN python3 -m venv $VIRTUAL_ENV
+RUN python3.11 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+# Don't persist pip's download/wheel cache in image layers.
+ENV PIP_NO_CACHE_DIR=1
 
 # Install non-t-route dependencies. matplotlib + psutil are extra deps
 # the benchmark/ harness needs (chart generation + RSS sampler); the
