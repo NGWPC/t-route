@@ -3,5 +3,6 @@
 data/
 golden/
 results/
+.regress_golden/
 __pycache__/
 *.pyc

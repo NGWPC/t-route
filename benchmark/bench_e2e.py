@@ -142,10 +142,16 @@ def main() -> int:
     ap.add_argument("--nts", type=int, default=None, help="override nts (dev loop)")
     ap.add_argument("--save-golden", action="store_true",
                     help="store this run's output as the correctness reference")
+    ap.add_argument("--golden-dir", default=None,
+                    help="reference-output dir for the correctness gate "
+                         "(default benchmark/golden). regression_check.sh points "
+                         "this at a baseline branch's output so the candidate is "
+                         "compared against it without touching the committed golden")
     ap.add_argument("--label", default=None, help="label for the JSON record")
     ap.add_argument("--json", action="store_true",
                     help="write results/<label>.json")
     args = ap.parse_args()
+    golden_dir = Path(args.golden_dir).resolve() if args.golden_dir else GOLDEN_DIR
 
     work = Path(tempfile.mkdtemp(prefix="bench_e2e_"))
     samples: list[dict] = []
@@ -184,15 +190,15 @@ def main() -> int:
         status = "n/a"
         report: dict = {}
         if args.save_golden:
-            GOLDEN_DIR.mkdir(exist_ok=True)
-            for f in GOLDEN_DIR.glob("troute_output_*.nc"):
+            golden_dir.mkdir(parents=True, exist_ok=True)
+            for f in golden_dir.glob("troute_output_*.nc"):
                 f.unlink()
             for f in sorted(last_out.glob("troute_output_*.nc")):
-                shutil.copy2(f, GOLDEN_DIR / f.name)
-            print(f"\ngolden saved -> {GOLDEN_DIR}")
+                shutil.copy2(f, golden_dir / f.name)
+            print(f"\ngolden saved -> {golden_dir}")
             status = "golden-saved"
-        elif (GOLDEN_DIR / "troute_output_200001010000.nc").exists():
-            golden = load_output(GOLDEN_DIR)
+        elif any(golden_dir.glob("troute_output_*.nc")):
+            golden = load_output(golden_dir)
             report, worst_rel, new_nan = compare(new, golden)
             print("\ncorrectness vs golden:")
             for v in COMPARE_VARS:

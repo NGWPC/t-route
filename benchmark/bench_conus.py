@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Tier C -- parallel CONUS-scale benchmark (single-shot diagnostic).
+"""Tier C: parallel CONUS-scale benchmark (single-shot diagnostic).
 
 Runs the full ~1.1 M-flowpath NHF case once, in parallel (cpu_pool=8), to
 expose the regime the kernel-dominated serial Tier A run cannot reach:
 parallel scaling, real memory footprint, and load-imbalance hotpaths.
 
-Single run by design -- CONUS is expensive. Always captures wall / CPU /
+Single run by design; CONUS is expensive. Always captures wall / CPU /
 peak RSS and t-route's own phase breakdown. The `--profile` mode adds a
 hotpath profile:
 
@@ -73,17 +73,26 @@ def _rusage_metrics(ru, wall: float) -> dict:
 
 
 class _MemSampler:
-    """Background thread tracking the peak total RSS of a process tree.
+    """Background thread tracking the peak PSS of a process tree.
 
     os.wait4 only reports the *main* process's peak RSS; a parallel run's
-    real footprint is main + all joblib worker processes. This polls the
-    whole tree (psutil) and keeps the peak of the summed RSS.
+    footprint is main + all joblib worker processes. PSS (proportional set
+    size) splits each shared page across the processes that map it, so the
+    sum over the tree equals the unique physical pages the tree occupies and
+    is bounded by RAM. A naive RSS sum, by contrast, double-counts shared
+    (COW / joblib-memmap) pages, can exceed physical RAM, and swings with
+    worker-spawn timing, so PSS is the number to report.
+
+    PSS comes from /proc/<pid>/smaps (Linux). On a platform without PSS (e.g.
+    macOS) the sampler falls back to per-process RSS, which double-counts, and
+    sets ``degraded`` so the caller can flag the number.
     """
 
-    def __init__(self, root_pid: int, interval: float = 0.5):
+    def __init__(self, root_pid: int, interval: float = 1.0):
         self.root_pid = root_pid
         self.interval = interval
-        self.peak_bytes = 0
+        self.peak_pss = 0
+        self.degraded = False
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
 
@@ -91,11 +100,11 @@ class _MemSampler:
         try:
             root = psutil.Process(self.root_pid)
         except psutil.Error as e:
-            # Could not attach to the root process at all -> peak RSS will be
+            # Could not attach to the root process at all -> peak will be
             # reported as 0. Warn loudly so the missing metric isn't mistaken
             # for a real measurement.
-            print(f"WARNING: RSS monitor could not attach to pid "
-                  f"{self.root_pid} ({e}); peak RSS will not be logged.",
+            print(f"WARNING: memory monitor could not attach to pid "
+                  f"{self.root_pid} ({e}); peak memory will not be logged.",
                   file=sys.stderr)
             return
         while not self._stop.is_set():
@@ -103,7 +112,12 @@ class _MemSampler:
             try:
                 for p in [root, *root.children(recursive=True)]:
                     try:
-                        total += p.memory_info().rss
+                        try:
+                            total += p.memory_full_info().pss
+                        except (psutil.Error, AttributeError):
+                            # No PSS here (e.g. macOS) -> fall back to RSS.
+                            total += p.memory_info().rss
+                            self.degraded = True
                     except psutil.Error:
                         # A child exited between enumeration and sampling --
                         # benign and routine for a short-lived joblib worker;
@@ -111,16 +125,16 @@ class _MemSampler:
                         pass
             except psutil.Error:
                 pass
-            self.peak_bytes = max(self.peak_bytes, total)
+            self.peak_pss = max(self.peak_pss, total)
             self._stop.wait(self.interval)
 
     def start(self) -> None:
         self._thread.start()
 
-    def stop(self) -> float:
+    def stop(self) -> tuple:
         self._stop.set()
         self._thread.join(timeout=2)
-        return self.peak_bytes / (1024 * 1024)
+        return self.peak_pss / (1024 * 1024), self.degraded
 
 
 def run(config: Path, log: Path, mode: str, pstats_path: Path,
@@ -147,7 +161,7 @@ def run(config: Path, log: Path, mode: str, pstats_path: Path,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _, status, ru = os.wait4(proc.pid, 0)
         wall = time.perf_counter() - t0
-        peak_tree_mb = sampler.stop()
+        peak_tree_pss_mb, pss_degraded = sampler.stop()
         if spy is not None:
             spy.wait()
     proc.returncode = os.waitstatus_to_exitcode(status)
@@ -155,7 +169,8 @@ def run(config: Path, log: Path, mode: str, pstats_path: Path,
         tail = "\n".join(log.read_text(errors="replace").splitlines()[-40:])
         raise RuntimeError(f"nwm_routing failed (exit {proc.returncode}):\n{tail}")
     m = _rusage_metrics(ru, wall)
-    m["peak_tree_rss_mb"] = peak_tree_mb
+    m["peak_tree_pss_mb"] = peak_tree_pss_mb
+    m["pss_degraded"] = pss_degraded
     return m
 
 
@@ -198,16 +213,18 @@ def main() -> int:
         config = resolved_config(out_dir)
         log = out_dir / "run.log"
 
-        print(f"CONUS-scale run (cpu_pool=8, profile={args.profile}) -- "
+        print(f"CONUS-scale run (cpu_pool=8, profile={args.profile}): "
               f"this is a single expensive run ...")
         m = run(config, log, args.profile, pstats_path, flame_path)
 
-        tree_gb = m["peak_tree_rss_mb"] / 1024
+        pss_gb = m["peak_tree_pss_mb"] / 1024
+        mem_note = ("RSS-sum, PSS unavailable; double-counts shared pages"
+                    if m.get("pss_degraded") else "TRUE footprint")
         print(f"\nCONUS end-to-end (single run)")
         print(f"  wall          {m['wall_s']:9.1f} s")
         print(f"  cpu           {m['cpu_s']:9.1f} s   "
-              f"({m['cpu_s'] / m['wall_s']:.2f}x wall -- parallel utilization)")
-        print(f"  peak RSS      {tree_gb:9.2f} GB  (whole process tree)")
+              f"({m['cpu_s'] / m['wall_s']:.2f}x wall, parallel utilization)")
+        print(f"  peak mem      {pss_gb:9.2f} GB  (whole tree PSS, {mem_note})")
         print(f"  peak RSS      {m['rss_mb'] / 1024:9.2f} GB  (main process only)")
 
         timing = parse_timing(log)
@@ -223,7 +240,7 @@ def main() -> int:
             if flame_path.exists():
                 print(f"\nflamegraph -> {flame_path}")
             else:
-                print("\nNOTE: py-spy produced no flamegraph -- on macOS it "
+                print("\nNOTE: py-spy produced no flamegraph; on macOS it "
                       "needs sudo. Re-run `--profile pyspy` with sudo available.")
 
         if m["wall_s"] > 0:
@@ -231,7 +248,7 @@ def main() -> int:
             note = {"cprofile": "cProfile", "pyspy": "py-spy",
                     "none": "clean"}[args.profile]
             print(f"| `{_git_sha()}` | {m['wall_s']:.1f} | {m['cpu_s']:.1f} | "
-                  f"{m['peak_tree_rss_mb'] / 1024:.2f} | {note} |")
+                  f"{m['peak_tree_pss_mb'] / 1024:.2f} | {note} |")
 
         if args.json:
             rec = {"label": label, "git_sha": _git_sha(),
