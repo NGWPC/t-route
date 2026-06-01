@@ -14,11 +14,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import troute.nhf_preprocess as nhf_preprocess
 from troute.nhf_preprocess import (
     _BAD_FPID_PREVIEW_LIMIT,
     _FLOWPATHS_CHANNEL_COLS,
     LAYERS_TO_READ,
     _groupby_to_list_dict,
+    _missing_requested_columns,
     _validate_flowpaths_channel_params,
     _validate_required_columns,
 )
@@ -170,129 +172,121 @@ def test_validator_works_with_partial_channel_columns():
 # index`` deep inside discretization.
 
 
-def _required_for(layer):
-    """Mirror the validator's rule for a layer's required column set: a
-    layer's explicit ``columns`` list (None-columns layers are not validated)."""
-    cols = layer["columns"]
+def _columns_for(name):
+    """The explicit columns list a layer declares (or [] if columns=None)."""
+    cols = next(c for n, c, _ in LAYERS_TO_READ if n == name)
     return list(cols) if isinstance(cols, list) else []
 
 
-def _make_valid_table_dict():
-    """Build a table_dict satisfying every layer's required columns.
-
-    Required layers get a (zero-row) DataFrame carrying exactly their required
-    columns; non-required layers (lakes, gages, ...) get bare empty frames, as
-    they would when absent from a geopackage.
-    """
-    table_dict = {}
-    for layer in LAYERS_TO_READ:
-        required = _required_for(layer)
-        if required:
-            table_dict[layer["name"]] = pd.DataFrame(columns=required)
-        else:
-            table_dict[layer["name"]] = pd.DataFrame()
-    return table_dict
+def _full_available():
+    """{layer_name: set(columns)} where every validated layer carries all of
+    its requested columns -- the metadata view _validate_required_columns
+    derives from pyogrio.read_info on a complete hydrofabric."""
+    return {name: set(cols) for name, cols, _ in LAYERS_TO_READ
+            if isinstance(cols, list)}
 
 
-def _layers_with_requirements():
-    return [layer for layer in LAYERS_TO_READ if _required_for(layer)]
+def _validated_layer_names():
+    return [name for name, cols, _ in LAYERS_TO_READ if isinstance(cols, list)]
 
 
-def test_required_columns_valid_dataset_passes():
-    _validate_required_columns(_make_valid_table_dict())
+# --- pure _missing_requested_columns logic ---------------------------------
+
+def test_missing_requested_columns_complete_dataset_is_empty():
+    assert _missing_requested_columns(_full_available()) == {}
 
 
-def test_required_columns_reference_flowpaths_spec_includes_segment_order():
+def test_reference_flowpaths_spec_includes_segment_order():
     # Guard the spec itself: the layer that caused the production bug must
-    # declare segment_order as required.
-    rf = next(l for l in LAYERS_TO_READ if l["name"] == "reference_flowpaths")
-    assert "segment_order" in _required_for(rf)
+    # declare segment_order among its loaded columns.
+    assert "segment_order" in _columns_for("reference_flowpaths")
 
 
-def test_required_columns_missing_segment_order_raises():
-    # The exact production failure: reference_flowpaths without segment_order.
-    td = _make_valid_table_dict()
-    td["reference_flowpaths"] = td["reference_flowpaths"].drop(columns=["segment_order"])
+def test_missing_requested_columns_missing_segment_order():
+    avail = _full_available()
+    avail["reference_flowpaths"].discard("segment_order")
+    missing = _missing_requested_columns(avail)
+    assert missing == {"reference_flowpaths": ["segment_order"]}
+
+
+def test_missing_requested_columns_missing_flowpaths_col():
+    avail = _full_available()
+    avail["flowpaths"].discard("n")
+    assert _missing_requested_columns(avail) == {"flowpaths": ["n"]}
+
+
+def test_missing_requested_columns_aggregates_across_layers():
+    avail = _full_available()
+    avail["reference_flowpaths"].discard("segment_order")
+    avail["virtual_flowpaths"].discard("dn_virtual_nex_id")
+    missing = _missing_requested_columns(avail)
+    assert missing["reference_flowpaths"] == ["segment_order"]
+    assert missing["virtual_flowpaths"] == ["dn_virtual_nex_id"]
+
+
+def test_missing_requested_columns_ignores_none_layers():
+    # lakes/gages/hydrolocations/virtual_nexus declare columns=None and are
+    # never validated, even if entirely absent from the available map.
+    avail = _full_available()
+    assert all(n not in avail for n in ("lakes", "gages", "hydrolocations",
+                                        "virtual_nexus"))
+    assert _missing_requested_columns(avail) == {}
+
+
+def test_missing_requested_columns_absent_layer_reports_full_set():
+    # A layer omitted from the available map (absent from the geopackage)
+    # reports its entire requested set as missing.
+    avail = _full_available()
+    del avail["reference_flowpaths"]
+    missing = _missing_requested_columns(avail)
+    assert set(missing["reference_flowpaths"]) == set(
+        _columns_for("reference_flowpaths"))
+
+
+def test_missing_requested_columns_extra_columns_ignored():
+    # Available columns beyond the requested set are fine.
+    avail = _full_available()
+    avail["reference_flowpaths"].add("some_extra_col")
+    assert _missing_requested_columns(avail) == {}
+
+
+# --- _validate_required_columns wrapper (read_info-driven, fails early) -----
+
+def _patch_read_info(monkeypatch, fields_by_layer):
+    """Make pyogrio.read_info return controlled field lists per layer (only
+    called for layers in present_layers, so absent layers are never looked up)."""
+    def fake_read_info(path, layer):
+        return {"fields": list(fields_by_layer[layer])}
+    monkeypatch.setattr(nhf_preprocess.pyogrio, "read_info", fake_read_info)
+
+
+def test_validate_required_columns_passes_on_complete_metadata(monkeypatch):
+    avail = _full_available()
+    _patch_read_info(monkeypatch, avail)
+    _validate_required_columns("dummy.gpkg", present_layers=set(avail))  # no raise
+
+
+def test_validate_required_columns_raises_actionable_error(monkeypatch):
+    avail = _full_available()
+    avail["reference_flowpaths"].discard("segment_order")
+    _patch_read_info(monkeypatch, avail)
     with pytest.raises(ValueError) as excinfo:
-        _validate_required_columns(td)
+        _validate_required_columns("dummy.gpkg", present_layers=set(avail))
     msg = str(excinfo.value)
     assert "reference_flowpaths" in msg
     assert "segment_order" in msg
-    # Message should be actionable about hydrofabric versioning.
-    assert "hydrofabric" in msg
+    assert "hydrofabric" in msg  # actionable about dataset versioning
 
 
-def test_required_columns_missing_flowpaths_col_raises():
-    # flowpaths requirements are derived from its explicit `columns` list.
-    td = _make_valid_table_dict()
-    assert "n" in td["flowpaths"].columns  # sanity
-    td["flowpaths"] = td["flowpaths"].drop(columns=["n"])
+def test_validate_required_columns_absent_layer_raises(monkeypatch):
+    # reference_flowpaths absent from the geopackage (not in present_layers) ->
+    # reported missing its full requested set; read_info is never called for it.
+    avail = _full_available()
+    _patch_read_info(monkeypatch, avail)
+    present = set(avail) - {"reference_flowpaths"}
     with pytest.raises(ValueError) as excinfo:
-        _validate_required_columns(td)
-    msg = str(excinfo.value)
-    assert "flowpaths" in msg
-    assert "'n'" in msg
-
-
-def test_required_columns_aggregates_across_layers():
-    # Multiple layers missing columns -> a single error listing all of them.
-    td = _make_valid_table_dict()
-    td["reference_flowpaths"] = td["reference_flowpaths"].drop(columns=["segment_order"])
-    td["virtual_flowpaths"] = td["virtual_flowpaths"].drop(columns=["dn_virtual_nex_id"])
-    with pytest.raises(ValueError) as excinfo:
-        _validate_required_columns(td)
-    msg = str(excinfo.value)
-    assert "reference_flowpaths" in msg and "segment_order" in msg
-    assert "virtual_flowpaths" in msg and "dn_virtual_nex_id" in msg
-
-
-def test_required_columns_optional_empty_layers_do_not_raise():
-    # lakes/gages/hydrolocations/virtual_nexus are used conditionally and may
-    # be legitimately empty/absent; they must not trigger validation.
-    td = _make_valid_table_dict()
-    for name in ("lakes", "gages", "hydrolocations", "virtual_nexus"):
-        assert td[name].empty
-    _validate_required_columns(td)  # must not raise
-
-
-def test_required_columns_absent_layer_reports_full_required_set():
-    # A layer entirely missing from the geopackage is replaced upstream with a
-    # bare empty DataFrame (no columns) -> its full required set is reported.
-    td = _make_valid_table_dict()
-    td["reference_flowpaths"] = pd.DataFrame()  # simulate missing layer
-    with pytest.raises(ValueError) as excinfo:
-        _validate_required_columns(td)
-    msg = str(excinfo.value)
-    for col in _required_for(
-        next(l for l in LAYERS_TO_READ if l["name"] == "reference_flowpaths")
-    ):
-        assert col in msg
-
-
-def test_required_columns_none_layer_reports_full_required_set():
-    # Defensive: a layer key absent from the dict entirely (None) is treated as
-    # missing all its required columns rather than crashing.
-    td = _make_valid_table_dict()
-    td["reference_flowpaths"] = None
-    with pytest.raises(ValueError) as excinfo:
-        _validate_required_columns(td)
+        _validate_required_columns("dummy.gpkg", present_layers=present)
     assert "reference_flowpaths" in str(excinfo.value)
-
-
-def test_required_columns_zero_row_layer_with_schema_passes():
-    # A present-but-empty layer still carries its schema columns, so a 0-row
-    # frame with the right columns must pass (distinct from an absent layer).
-    td = _make_valid_table_dict()
-    for layer in _layers_with_requirements():
-        assert td[layer["name"]].empty  # zero rows...
-    _validate_required_columns(td)  # ...but columns present -> passes
-
-
-def test_required_columns_extra_columns_are_ignored():
-    # Datasets carrying additional columns beyond the required set are fine.
-    td = _make_valid_table_dict()
-    td["reference_flowpaths"]["some_extra_col"] = pd.Series(dtype=float)
-    _validate_required_columns(td)
 
 
 # ----- _groupby_to_list_dict (Step N2 helper) ------------------------------

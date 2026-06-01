@@ -1,4 +1,6 @@
 from pathlib import Path
+from itertools import starmap
+from typing import Optional
 
 import geopandas as gpd
 import numpy as np
@@ -46,36 +48,55 @@ def _validate_flowpaths_channel_params(flowpaths):
         f"Affected fp_ids{more}: {preview}"
     )
 
-def _validate_required_columns(table_dict):
-    """Raise if any layer is missing a column the NHF build requested.
+def _missing_requested_columns(
+    available_by_layer: dict[str, set],
+) -> dict[str, list]:
+    """Pure check: which requested columns are absent from each layer.
 
-    A layer's required columns are exactly its explicit ``columns`` request --
-    we only ask for columns the build consumes downstream, so every requested
-    column must be present. Layers loaded with ``columns=None`` (lakes, gages,
-    hydrolocations, virtual_nexus) are used conditionally and may be
-    legitimately empty or absent, so they are not validated here.
-
-    Failing here -- at load time, with the full list of missing columns across
-    all layers -- replaces cryptic ``KeyError``s raised deep inside
-    discretization/crosswalk steps (e.g. ``['segment_order'] not in index``).
-
-    Note: a layer present but with zero rows still carries its schema, so its
-    columns validate normally; a layer entirely absent from the geopackage was
-    replaced upstream with an empty ``DataFrame()`` carrying no columns, so its
-    full requested set is correctly reported as missing.
+    ``available_by_layer`` maps a layer name to the set of column names the
+    geopackage actually carries for it; omit a layer to signal it is entirely
+    absent. Only layers that declare an explicit ``columns`` list are checked
+    (``columns=None`` layers are loaded in full and used conditionally).
+    Returns ``{layer_name: [missing columns]}`` (empty if nothing is missing).
     """
-    missing_by_layer = {}
-    for layer in LAYERS_TO_READ:
-        required = layer["columns"]
-        if not isinstance(required, list):
+    missing_by_layer: dict[str, list] = {}
+    for name, columns, _ in LAYERS_TO_READ:
+        if columns is None:
             continue
-        df = table_dict.get(layer["name"])
-        if df is None:
-            missing_by_layer[layer["name"]] = list(required)
+        available = available_by_layer.get(name)
+        if available is None:
+            missing_by_layer[name] = list(columns)
             continue
-        missing = [c for c in required if c not in df.columns]
-        if missing:
-            missing_by_layer[layer["name"]] = missing
+        absent = [c for c in columns if c not in available]
+        if absent:
+            missing_by_layer[name] = absent
+    return missing_by_layer
+
+
+def _validate_required_columns(gpkg_path: Path, present_layers: set[str]) -> None:
+    """Fail fast -- from layer metadata, before any rows are read -- if the
+    geopackage is missing a column the NHF build requests.
+
+    Each layer's requested ``columns`` doubles as its required set (we only
+    ask for columns the build consumes downstream). ``present_layers`` is the
+    set of layers actually in the geopackage (from ``pyogrio.list_layers``); a
+    validated layer absent from it is reported as missing its full requested
+    set, and a present one is checked against ``pyogrio.read_info(...)["fields"]``
+    (the attribute field names, read without touching the rows). This costs one
+    metadata lookup per present validated layer and catches a stale hydrofabric
+    (e.g. ``reference_flowpaths`` lacking ``segment_order``) up front, replacing
+    a cryptic ``KeyError`` raised deep inside discretization. Layers loaded with
+    ``columns=None`` (lakes, gages, hydrolocations, virtual_nexus) are used
+    conditionally and not validated.
+    """
+    available_by_layer: dict[str, set[str]] = {}
+    for name, columns, _ in LAYERS_TO_READ:
+        if columns is None or name not in present_layers:
+            continue
+        available_by_layer[name] = set(
+            pyogrio.read_info(gpkg_path, layer=name)["fields"]
+        )
+    missing_by_layer = _missing_requested_columns(available_by_layer)
     if missing_by_layer:
         details = "; ".join(
             f"{name}: {cols}" for name, cols in missing_by_layer.items()
@@ -89,68 +110,36 @@ def _validate_required_columns(table_dict):
         )
 
 
-# Only read relevant areas of NHF to cut down on processing time and memory footprint.
-LAYERS_TO_READ = [
-    {
-        "name": "flowpaths",
-        "columns": [
-            "fp_id",
-            "length_km",
-            "n",
-            "mainstem_lp",
-            "topwdth",
-            "slope",
-            "ncc",
-            "btmwdth",
-            "musx",
-            "chslp",
-            "topwdthcc",
-            "musk",
-        ],
-        "ignore_geometry": True
-    },
-    {
-        "name": "reference_flowpaths",
-        # Load only the columns the NHF build consumes (was previously loaded
-        # in full). These double as the validation set -- `_validate_required_columns`
-        # checks that every requested column is present. `segment_order` in
-        # particular is a newer hydrofabric field; older datasets lack it and
-        # would otherwise fail deep in discretization with a cryptic pandas
-        # KeyError. `ref_fp_id` is the join key in crosswalk_nex_flowpath_poi.
-        "columns": ["ref_fp_id", "fp_id", "virtual_fp_id", "segment_order", "div_id"],
-        "ignore_geometry": True
-    },
-    {
-        "name": "virtual_flowpaths",
-        "columns": [
-            "length_km", 
-            "virtual_fp_id", 
-            "dn_virtual_nex_id", 
-            "up_virtual_nex_id",
-            "percentage_area_contribution"
-            ],
-        "ignore_geometry": False
-    },
-    {
-        "name": "virtual_nexus",
-        "columns": None,
-        "ignore_geometry": True
-    },
-    {
-        "name": "lakes",
-        "columns": None,
-        "ignore_geometry": True
-    },
-    {
-        "name": "gages",
-        "columns": None,
-        "ignore_geometry": True
-    },
-    {
-        "name": "hydrolocations",
-        "columns": None,
-        "ignore_geometry": True
-    }
+# Layers to read from the NHF geopackage, as (name, columns, ignore_geometry)
+# tuples. ``columns`` is the explicit list of fields to load (and doubles as
+# the required-column set validated up front by _validate_required_columns),
+# or None to load every field. We read only what the build consumes to cut
+# processing time and memory. ``reference_flowpaths`` lists its five consumed
+# columns explicitly: `segment_order` is a newer hydrofabric field whose
+# absence otherwise fails deep in discretization, and `ref_fp_id` is the join
+# key in crosswalk_nex_flowpath_poi.
+LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
+    (
+        "flowpaths",
+        ["fp_id", "length_km", "n", "mainstem_lp", "topwdth", "slope",
+         "ncc", "btmwdth", "musx", "chslp", "topwdthcc", "musk"],
+        True,
+    ),
+    (
+        "reference_flowpaths",
+        ["ref_fp_id", "fp_id", "virtual_fp_id", "segment_order", "div_id"],
+        True,
+    ),
+    (
+        "virtual_flowpaths",
+        ["length_km", "virtual_fp_id", "dn_virtual_nex_id",
+         "up_virtual_nex_id", "percentage_area_contribution"],
+        False,
+    ),
+    ("virtual_nexus", None, True),
+    ("lakes", None, True),
+    ("gages", None, True),
+    ("hydrolocations", None, True),
 ]
 
 def read_qlat_file(f):
@@ -219,32 +208,40 @@ def read_ngen_waterbody_type_df(parm_file, lake_index_field="wb-id", lake_id_mas
 
 def read_geo_file(supernetwork_parameters, cpu_pool):
     geo_file_path = supernetwork_parameters["geo_file_path"]
-    file_type = Path(geo_file_path).suffix
-    if file_type == ".gpkg":
+    if Path(geo_file_path).suffix != ".gpkg":
+        raise RuntimeError("Only .gpkg files are currently supported for the geo_file_path parameter.")
 
-        def read_layer(lyr):
-            try:
-                _df = gpd.read_file(geo_file_path, layer=lyr["name"], columns=lyr["columns"], ignore_geometry=lyr["ignore_geometry"])
-                return _df
-            except pyogrio.errors.DataSourceError as e:
-                print(f"Error reading file {geo_file_path}: {e}")
-                raise pyogrio.errors.DataSourceError from e
-            except pyogrio.errors.DataLayerError:
-                return pd.DataFrame()  # Missing layer -> empty DF
+    # Inspect the geopackage once up front (metadata only): which layers are
+    # present, and -- via _validate_required_columns -- do they carry the
+    # columns the build needs. A stale/incomplete hydrofabric fails here,
+    # before we pay to read any rows.
+    gpkg_layers = {name for name, _ in pyogrio.list_layers(geo_file_path)}
+    _validate_required_columns(geo_file_path, gpkg_layers)
 
-        # Retrieve geopackage information using matched layer names
-        if cpu_pool > 1:
-            with Parallel(n_jobs=min(cpu_pool, len(LAYERS_TO_READ))) as parallel:
-                gpkg_list = parallel(delayed(read_layer)(layer) for layer in LAYERS_TO_READ)
+    def read_layer(
+        name: str, columns: Optional[list[str]], ignore_geometry: bool,
+    ) -> tuple[str, pd.DataFrame]:
+        return name, gpd.read_file(
+            geo_file_path, layer=name, columns=columns,
+            ignore_geometry=ignore_geometry,
+        )
 
-            table_dict = {LAYERS_TO_READ[i]["name"]: gpkg_list[i] for i in range(len(LAYERS_TO_READ))}
-        else:
-            table_dict = {layer["name"]: read_layer(layer) for layer in LAYERS_TO_READ}
+    # Read present layers in parallel; layers absent from the geopackage become
+    # empty DataFrames (they are used conditionally downstream). to_read keeps
+    # the full (name, columns, ignore_geometry) tuples so starmap can unpack
+    # them into read_layer's arguments.
+    to_read = [layer for layer in LAYERS_TO_READ if layer[0] in gpkg_layers]
+    if not to_read:
+        raise ValueError(
+            f"None of the expected layers to read were present in the geopackage: "
+            f"{[lyr for lyr, _, _ in LAYERS_TO_READ]}. Found layers: {gpkg_layers}."
+        )
+    table_dict = {lyr: pd.DataFrame() for lyr, *_ in LAYERS_TO_READ}
+    with Parallel(n_jobs=min(cpu_pool, len(to_read))) as parallel:
+        table_dict.update(
+            dict(parallel(starmap(delayed(read_layer), to_read)))
+        )
 
-    else:
-        raise RuntimeError("Unsupported file type: {}".format(file_type))
-
-    _validate_required_columns(table_dict)
     _validate_flowpaths_channel_params(table_dict.get("flowpaths"))
     return table_dict
 
