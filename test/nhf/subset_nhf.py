@@ -3,9 +3,9 @@ import sqlite3
 from pathlib import Path
 from typing import Union
 
-import fiona
 import geopandas as gpd
 import pandas as pd
+import pyogrio
 
 
 def get_upstream_fp_ids(gpkg_path: str, outlet_fp_id: int) -> list[int]:
@@ -29,7 +29,7 @@ def get_upstream_fp_ids(gpkg_path: str, outlet_fp_id: int) -> list[int]:
 def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFrame]:
     """Extract all layers for the given flowpath IDs."""
     fp_set = set(fp_ids)
-    layers = fiona.listlayers(gpkg_path)
+    layers = [name for name, _ in pyogrio.list_layers(gpkg_path)]
 
     # Flowpaths
     if "flowpaths" in layers:

@@ -8,11 +8,11 @@ from itertools import chain
 from pathlib import Path
 from pprint import pformat
 
-import fiona
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
+import pyogrio
 import troute.nhd_io as nhd_io  # FIXME
 import xarray as xr
 from joblib import Parallel, delayed
@@ -37,7 +37,7 @@ def find_layer_name(layers, pattern):
 
 def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
     # Retrieve available layers from the GeoPackage
-    available_layers = fiona.listlayers(file_path)
+    available_layers = [name for name, _ in pyogrio.list_layers(file_path)]
 
     # patterns for the layers we want to find
     layer_patterns = {
