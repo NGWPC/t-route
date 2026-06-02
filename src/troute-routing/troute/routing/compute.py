@@ -585,6 +585,15 @@ class ExecutionPlan:
         )
         river_df = reach_data.generate_view(river_reaches)
 
+        # Extend river_df with NaN rows for lake reaches so that data_idx
+        # (= river_df.index) includes waterbody IDs. The routing kernel uses
+        # binary_find(data_idx, upstream_reach) for ALL upstream lookups,
+        # including cases where the upstream is a reservoir. The old code
+        # achieved this via param_df_sub.reindex(...+lake_segs).sort_index().
+        if lake_reaches:
+            extended_index = np.sort(np.concatenate([river_df.index.values, lake_reaches]))
+            river_df = river_df.reindex(extended_index)
+
         # Create subnetwork instance
         return ComputationJob(
             graph,
@@ -1395,8 +1404,8 @@ def build_compute_package(
     _assert_channel_rows_present(
         "q0", q0_pos, job.river_index, job.waterbody_set,
     )
-    if job.waterbody_set is not None:
-        q0_pos = np.where(job.waterbody_set_mask, -1, q0_pos)
+    if job.lake_mask is not None:
+        q0_pos = np.where(job.lake_mask, -1, q0_pos)
     q0_sub = pd.DataFrame(
         _reindex_via_take(forcing.q0_vals, q0_pos),
         index=job.river_index,
