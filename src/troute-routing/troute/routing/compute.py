@@ -84,7 +84,7 @@ _EMPTY_F64 = np.empty(0, dtype=np.float64)
 _EMPTY_DF = pd.DataFrame()
 _EMPTY_GL_DF = pd.DataFrame(columns=["lake_id", "time", "Discharge"])
 _EMPTY_LIST: list = []
-_qlat_loc_map = {"top": 0, "middle": 1, "bottom": 2}
+_QLAT_LOC_MAP = {"top": 0, "middle": 1, "bottom": 2}
 
 ### OBJECT DEFINITIONS ###
 
@@ -158,7 +158,7 @@ class ComputeConfig:
     @property
     def qlat_add_loc_c(self) -> int:
         """Integer representing lateral flow addition location."""
-        return _qlat_loc_map[self.qlat_add_loc]
+        return _QLAT_LOC_MAP[self.qlat_add_loc]
 
     @property
     def t0_str(self) -> str:
@@ -251,7 +251,7 @@ class ComputationJob:
     @cached_property
     def reach_types(self) -> list[tuple[Any, int]]:
         """Routing paths paired with their reach-type flag (1 = waterbody, 0 = river, etc)."""
-        return _build_reach_type_list(self.routing_paths, self.waterbody_reaches)
+        return _build_reach_type_list(self.routing_paths, self.waterbody_set)
 
     @cached_property
     def waterbody_types(self) -> np.ndarray:
@@ -368,27 +368,27 @@ class ForcingData:
 
     @cached_property
     def q0_vals(self) -> np.ndarray:
-        return self.qlats.to_numpy(copy=False)
+        return self.q0.to_numpy(copy=False)
 
     @cached_property
     def q0_idx(self) -> np.ndarray:
-        return self.qlats.index
+        return self.q0.index
 
     @cached_property
     def q0_cols(self) -> np.ndarray:
-        return self.qlats.columns
+        return self.q0.columns
 
     @cached_property
     def eloss_vals(self) -> np.ndarray:
-        return self.qlats.to_numpy(copy=False)
+        return self.eloss.to_numpy(copy=False)
 
     @cached_property
     def eloss_idx(self) -> np.ndarray:
-        return self.qlats.index
+        return self.eloss.index
 
     @cached_property
     def eloss_cols(self) -> np.ndarray:
-        return self.qlats.columns
+        return self.eloss.columns
 
 
 
