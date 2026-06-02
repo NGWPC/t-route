@@ -5,7 +5,8 @@ FROM rockylinux:9.2 AS rocky-base
 WORKDIR "/t-route/"
 
 # C.UTF-8 avoids locale-dependent crashes in some Python packages; the ccache
-# settings speed up rebuilds of the Fortran kernel + Cython C compiles.
+# settings speed up rebuilds of the Cython/C compiles (ccache has no Fortran
+# front end, so the Fortran kernel is not cached).
 ENV LANG="C.UTF-8" \
     CCACHE_DIR="/root/.cache/ccache" \
     CCACHE_MAXSIZE="5G"
@@ -66,8 +67,10 @@ COPY src /t-route/src
 RUN --mount=type=cache,target=/root/.cache/pip,id=pip-cache \
     --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     set -eux && python -m pip install .[test]
-# ccache (via the PATH symlinks) caches the kernel + Cython compiles; drop the
-# .o intermediates afterward (the editable install keeps the .so in src/).
+# ccache (via the PATH symlinks) caches the Cython/C compiles; the Fortran
+# kernel is not cached (ccache has no Fortran front end, so gfortran just falls
+# through). Drop the .o intermediates afterward (the editable install keeps the
+# .so in src/).
 RUN --mount=type=cache,target=/root/.cache/ccache,id=ccache \
     set -eux && ./compiler.sh && \
     find /t-route/src -name "*.o" -delete
