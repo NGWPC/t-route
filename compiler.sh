@@ -69,7 +69,7 @@ fi
 
 if [ -z "$NETCDF" ]
 then
-    export NETCDFINC=/usr/include/openmpi-x86_64/
+    export NETCDFINC="/usr/include/openmpi-$(uname -m)/"
     # set alternative NETCDF variable include path, for example for WSL
     # (Windows Subsystems for Linux).
     #
@@ -91,7 +91,11 @@ if [[ "$build_mc_kernel" == true ]]; then
     #building reach and resevoir kernel files .o
     cd $REPOROOT/src/kernel/muskingum/
     make clean
-    make || exit
+    # ``TROUTE_NATIVE=1 ./compiler.sh`` opts into -mcpu=native / -march=native
+    # for the kernel build. Default is the portable -O3 build (no native
+    # arch flags), which is required for any artifact that may run on a
+    # different CPU than the build host. See src/kernel/muskingum/makefile.
+    make TROUTE_NATIVE=${TROUTE_NATIVE:-0} || exit
     make install || exit
 
 fi
@@ -110,35 +114,13 @@ fi
 if [[ "$build_reservoir_kernel" == true ]]; then
     cd $REPOROOT/src/kernel/reservoir/
     make clean
-    #make NETCDFINC=`nc-config --includedir` || exit
-    #make binding_lp.a
-    #make install_lp || exit
-    make
+    # The makefile's `all` target lists bind_hybrid.a whose build rule
+    # is commented out -- bare `make` fails. Build only the two
+    # archives we actually need + install them, matching what the
+    # pixi-build path does.
+    make binding_lp.a bind_rfc.a || exit
     make install_lp || exit
     make install_rfc || exit
-fi
-
-# Remove any old/stale ewts/troute_ewts from the environment to avoid shadowing
-pip uninstall -y ewts troute_ewts >/dev/null 2>&1 || true
-
-# Prefer installed EWTS wheel; fall back to source tree for development
-EWTS_WHEEL=""
-if compgen -G "${EWTS_WHEEL_DIR}/ewts-*.whl" > /dev/null; then
-  EWTS_WHEEL=$(ls -1t "${EWTS_WHEEL_DIR}"/ewts-*.whl | head -n 1)
-fi
-
-if [[ -n "${EWTS_WHEEL}" ]]; then
-  echo "Installing EWTS from wheel: ${EWTS_WHEEL}"
-  pip install "${EWTS_WHEEL}" || exit
-else
-  echo "No EWTS wheel found in ${EWTS_WHEEL_DIR}"
-  echo "Falling back to source install from ${EWTS_PY_ROOT}"
-
-  if [[ ${WITH_EDITABLE} == true ]]; then
-    pip install --editable "${EWTS_PY_ROOT}" || exit
-  else
-    pip install "${EWTS_PY_ROOT}" || exit
-  fi
 fi
 
 if [[ "$build_framework" == true ]]; then
