@@ -105,9 +105,9 @@ class BmiTroute(Bmi):
         super().__init__()
         self._values: dict[str, NDArray] = {
             BmiVars.NGEN_DT: np.array([-1], dtype=np.intc),
-            BmiVars.NEXUS_ID: np.zeros(0, dtype=np.intc),
+            BmiVars.NEXUS_ID: np.zeros(0, dtype=np.int64),
             BmiVars.NEXUS_VALUE: np.zeros(0, dtype=np.double),
-            BmiVars.CATCHMENT_ID: np.zeros(0, dtype=np.intc),
+            BmiVars.CATCHMENT_ID: np.zeros(0, dtype=np.int64),
             BmiVars.CATCHMENT_VALUE: np.zeros(0, dtype=np.double),
             BmiVars.UPSTREAM_ID: np.zeros(0, dtype=int),
             BmiVars.CHANNEL_WATER_ID: np.zeros(0, dtype=np.int64),
