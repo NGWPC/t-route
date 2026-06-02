@@ -353,6 +353,7 @@ class ForcingData:
     qlats: pd.DataFrame
     q0: pd.DataFrame
     eloss: pd.DataFrame
+    h0: pd.DataFrame
 
     @cached_property
     def qlat_vals(self) -> np.ndarray:
@@ -1425,6 +1426,9 @@ def build_compute_package(
         columns=forcing.eloss_cols,
     )
 
+    # Update h0
+    job.waterbodies_df.update(forcing.h0)
+
     # Build streamflow DA dataframes
     usgs_df_sub, lastobs_df_sub, da_positions_list_byseg = _prep_da_dataframes(
         assimilation_data.usgs_df, assimilation_data.lastobs_df, job.river_reaches
@@ -1716,7 +1720,8 @@ def compute_nhd_routing_v02(
     )
     reach_data = ReachData(param_df)
     waterbody_data = WaterbodyData(waterbodies_df, waterbody_types_df)
-    forcing_data = ForcingData(qlats, q0, eloss_df)
+    wbody_h0 = waterbodies_df[["h0"]]
+    forcing_data = ForcingData(qlats, q0, eloss_df, wbody_h0)
     assimilation_data = AssimilationData(
         reservoir_usgs_df = reservoir_usgs_df,
         reservoir_usgs_param_df = reservoir_usgs_param_df,
