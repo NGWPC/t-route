@@ -38,12 +38,12 @@ def run_bmi(config_path: str):
     feature_ids = np.array(first_df.index, dtype=np.intc)
 
     # Set the IDs (constant across all timesteps)
-    model.set_value("land_surface_water_source__id", feature_ids)
+    model.set_value("catchment_water_source__id", feature_ids)
 
     # Build forcing data
     flow_values = pd.concat([pd.read_csv(i).set_index("feature_id") for i in forcing_files], axis=1)
     flow_values = flow_values.values.flatten(order="F")
-    model.set_value("land_surface_water_source__volume_flow_rate", flow_values)
+    model.set_value("catchment_water_source__volume_flow_rate", flow_values)
     model.update_until(model._model.forcing_parameters["nts"])
 
 

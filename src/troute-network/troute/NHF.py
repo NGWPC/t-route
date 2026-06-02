@@ -88,16 +88,11 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             # NHF always reads topology from .gpkg files, even in BMI mode.
             # The ngen framework provides only qlat data via BMI; network
             # geometry comes from the geopackage specified in supernetwork_parameters.
-            nhf = read_geo_file(
-                self.supernetwork_parameters,
-                self.waterbody_parameters,
-                self.compute_parameters,
-                self.compute_parameters.get("cpu_pool", 1),
-            )
+            nhf = read_geo_file(self.supernetwork_parameters,self.compute_parameters.get("cpu_pool", 1))
 
             # Handle different key column names between flowpaths and flowpath_attributes
             flowpaths = nhf["flowpaths"]
-            waterbodies = nhf["waterbodies"]
+            waterbodies = nhf["lakes"]
             gages = nhf["gages"]
             reference_flowpaths = nhf["reference_flowpaths"]
             virtual_flowpaths = nhf["virtual_flowpaths"]
@@ -117,7 +112,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             )
 
             # Preprocess waterbody objects
-            self.preprocess_waterbodies(waterbodies, virtual_nexus)
+            self.preprocess_waterbodies(waterbodies)
 
             # Preprocess data assimilation objects #TODO: Move to DataAssimilation.py?
             self.preprocess_data_assimilation(
@@ -158,6 +153,10 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         """
         return self._waterbody_connections
 
+    @waterbody_connections.setter
+    def waterbody_connections(self, val):
+        self._waterbody_connections = val
+
     @property
     def gages(self):
         """
@@ -165,9 +164,6 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         """
         return self._gages
 
-    @property
-    def great_lakes_climatology_df(self):
-        return pd.DataFrame()
 
     @property
     def waterbody_null(self):
@@ -188,10 +184,10 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         )
         self._connections = None  # Forces recomputation on first call to self.connections
         self._terminal_codes = set(self._dataframe["downstream"]).difference(self._dataframe.index)  # Outlets
-        self._build_fp_outlet_crosswalk(reference_flowpaths, virtual_flowpaths, self.nexus_remapping)
+        self._build_fp_outlet_crosswalk(reference_flowpaths, virtual_flowpaths)
         self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, self.nexus_remapping)
 
-    def _build_fp_outlet_crosswalk(self, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]):
+    def _build_fp_outlet_crosswalk(self, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame):
         """Build a mapping from routing link ID to fp_id to be used when writing results.
         
         N.B. There are a few strategies one could use to assign an outflow timeseries for a merged flowpath
@@ -203,8 +199,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         ids = reference_flowpaths["fp_id"].dropna().astype(int).unique()
         ids_merged = set(ids).difference(self._dataframe["fp_id"])
 
-        # Aggregate links in _dataframe to get one outlet per fp_id.  Assumes node IDs increase in downstream direction.
-        mapping_base = self._dataframe.reset_index().groupby("fp_id", sort=False)["up_node_id"].max().reset_index().astype(int)
+        # Aggregate links in _dataframe to get one outlet per fp_id.
+        mapping_base = self._dataframe.loc[self._dataframe.groupby("fp_id", sort=False)["segment_order"].idxmax()].reset_index()[["fp_id", "up_node_id"]].astype(int)
         link_2_fp = mapping_base.set_index("up_node_id")["fp_id"].to_dict()
         fp_2_link = mapping_base.set_index("fp_id")["up_node_id"].to_dict()
 
@@ -226,19 +222,22 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         cross_fp = cross_fp[cross_fp["fp_id_dn"] != cross_fp["fp_id_up"]]
 
         # Build merged fp → upstream fp mapping, then resolve chains for consecutive merges
-        merged_to_upstream = dict(zip(cross_fp["fp_id_dn"], cross_fp["fp_id_up"]))
-        merged_mapping = {}
+        merged_to_upstream = cross_fp.set_index("fp_id_dn")["fp_id_up"].groupby(level=0).agg(list)
+        merged_mapping = defaultdict(list)
         for merged_fp in ids_merged:
-            current = merged_fp
-            seen = set()
-            while current in ids_merged and current in merged_to_upstream:
-                if current in seen:
-                    break
-                seen.add(current)
-                current = merged_to_upstream[current]
-            if current in fp_2_link:
-                outlet_link = fp_2_link[current]
-                merged_mapping.setdefault(outlet_link, []).append(merged_fp)
+            q = list(merged_to_upstream.get(merged_fp, []))
+            visited = set()
+            while len(q) > 0:
+                cur = q.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                us = merged_to_upstream.get(cur)
+                if us:
+                    q.extend(us)
+                else:
+                    merged_mapping[fp_2_link[cur]].append(merged_fp)
+
 
         # Put all results into the mapping dict
         self._fp_outlet_crosswalk = defaultdict(list)

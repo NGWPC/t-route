@@ -71,6 +71,19 @@ _compute_func_map = defaultdict(
         "V02-structured": compute_network_structured,
     },
 )
+
+
+# Sentinel empties reused by _prep_reservoir_da_dataframes for the all-DA-disabled
+# case (the CONUS benchmark path). The function is called once per cluster prep
+# (~1200 times per CONUS run); each else-branch was constructing fresh
+# pd.DataFrame() and pd.DataFrame().to_numpy().reshape(0,) sentinels (~100 µs each,
+# 31 per call) -- ~4 s of wasted BlockManager allocation across the run.
+# These constants are never mutated by callers (downstream code does
+# .values.astype("float32") which copies), so reuse is safe.
+_EMPTY_F64 = np.empty(0, dtype=np.float64)
+_EMPTY_DF = pd.DataFrame()
+_EMPTY_GL_DF = pd.DataFrame(columns=["lake_id", "time", "Discharge"])
+_EMPTY_LIST: list = []
 _qlat_loc_map = {"top": 0, "middle": 1, "bottom": 2}
 
 ### OBJECT DEFINITIONS ###
@@ -221,12 +234,16 @@ class ComputationJob:
             offnetwork_upstreams=merged_offnetwork_upstreams,
         )
 
-    @property
+    @cached_property
     def waterbody_reaches(self) -> list[ReachId]:
         """Reach IDs for all waterbodies in this job."""
         return list(self.waterbodies_df.index.values)
 
-    @property
+    @cached_property
+    def waterbody_set(self) -> set[ReachId]:
+        return set(self.waterbody_reaches)
+
+    @cached_property
     def river_reaches(self) -> NDArray[np.int64]:
         """Reach IDs for all river segments in this job."""
         return self.river_df.index.values
@@ -241,21 +258,32 @@ class ComputationJob:
         """Waterbody type codes."""
         return self.waterbodies_types_df.values.astype("int32")
 
-    @property
+    @cached_property
     def river_fields(self) -> np.ndarray:
         """Column names of the river parameter DataFrame."""
         return self.river_df.columns.values
 
-    @property
+    @cached_property
     def river_values(self) -> np.ndarray:
         """River parameter values as a 2-D array."""
         return self.river_df.values
 
-    @property
+    @cached_property
     def waterbody_values(self) -> np.ndarray:
         """Waterbody parameter values as a 2-D array."""
         return self.waterbodies_df.values
 
+    @cached_property
+    def river_index(self) -> pd.Index:
+        return pd.Index(self.river_reaches)
+
+    @cached_property
+    def lake_mask(self) -> Union[np.ndarray, None]:
+        if len(self.waterbody_reaches) > 0:
+            _lake_arr = np.fromiter(self.waterbody_set, dtype=np.int64, count=len(self.waterbody_set))
+            return np.isin(self.river_index, _lake_arr)
+        else:
+            return None
 
 @dataclass
 class NetworkTopology:
@@ -325,6 +353,43 @@ class ForcingData:
     qlats: pd.DataFrame
     q0: pd.DataFrame
     eloss: pd.DataFrame
+
+    @cached_property
+    def qlat_vals(self) -> np.ndarray:
+        return self.qlats.to_numpy(copy=False)
+
+    @cached_property
+    def qlat_idx(self) -> np.ndarray:
+        return self.qlats.index
+
+    @cached_property
+    def qlat_cols(self) -> np.ndarray:
+        return self.qlats.columns
+
+    @cached_property
+    def q0_vals(self) -> np.ndarray:
+        return self.qlats.to_numpy(copy=False)
+
+    @cached_property
+    def q0_idx(self) -> np.ndarray:
+        return self.qlats.index
+
+    @cached_property
+    def q0_cols(self) -> np.ndarray:
+        return self.qlats.columns
+
+    @cached_property
+    def eloss_vals(self) -> np.ndarray:
+        return self.qlats.to_numpy(copy=False)
+
+    @cached_property
+    def eloss_idx(self) -> np.ndarray:
+        return self.qlats.index
+
+    @cached_property
+    def eloss_cols(self) -> np.ndarray:
+        return self.qlats.columns
+
 
 
 @dataclass
@@ -642,11 +707,9 @@ class ExecutionPlan:
                     not waterbody_data.dataframe.empty
                     and assimilation_data.usgs_df.empty
                 ):
-                    path_func = partial(
-                        nhd_network.split_at_waterbodies_and_junctions,
-                        set(waterbody_data.dataframe.index.values),
-                        rconn_subn,
-                    )
+                    # Fast path: dfs_decomposition's path_func=None inlines
+                    # the equivalent of partial(split_at_junction, rconn_subn).
+                    path_func = None
 
                 else:
                     path_func = partial(nhd_network.split_at_junction, rconn_subn)
@@ -740,11 +803,59 @@ def _format_qlat_start_time(qlat_start_time):
 
 def _build_reach_type_list(reach_list, wbodies_segs):
 
+    # No waterbody break segments (e.g. NHF stubs waterbodies): every reach is
+    # type 0, so we can skip the per-reach set work entirely.
+    if not wbodies_segs:
+        return [(reaches, 0) for reaches in reach_list]
+
+    # set.isdisjoint() short-circuits at the first shared element and builds no
+    # intermediate set, unlike `set(reaches) & wbodies_segs`.
     reach_type_list = [
-                1 if (set(reaches) & set(wbodies_segs)) else 0 for reaches in reach_list
-            ]
+        0 if wbodies_segs.isdisjoint(reaches) else 1 for reaches in reach_list
+    ]
 
     return list(zip(reach_list, reach_type_list))
+
+
+def _reindex_via_take(values_arr, positions, fill_value=np.nan):
+    # Equivalent to df.reindex(<index whose .get_indexer is positions>).to_numpy(copy=False)
+    # given values_arr = df.to_numpy(copy=False). pd.api.extensions.take dispatches
+    # to the pandas Cython take primitive (_take_nd_ndarray), which handles the
+    # -1-means-missing semantics natively via allow_fill=True. ``values_arr`` must
+    # be the cached ndarray view of the source DataFrame -- calling df.to_numpy()
+    # per cluster (especially on a multi-block source, or on a freshly column-
+    # sliced df[cols]) would re-trigger pandas' internal block consolidation
+    # on the 1.1 M-row source frame each call.
+    return pd.api.extensions.take(
+        values_arr, positions, allow_fill=True, fill_value=fill_value
+    )
+
+
+def _assert_channel_rows_present(label, positions, extended_index_arr, lake_segs_set):
+    """Restore the fast-fail behavior of the original .loc[]-based code.
+
+    The legacy ``qlats.loc[common_segs]`` / ``param_df.loc[common_segs]`` raised
+    KeyError on missing channel rows. The extended-index ``take`` path collapses
+    that into a silent NaN-fill via ``allow_fill=True`` (positions == -1). Here
+    we re-validate that every -1 in ``positions`` corresponds to a lake-segment
+    extension row -- the only legitimate source of missing entries. A missing
+    channel row signals either a malformed forcing file or a flowpath/reservoir
+    ID namespace collision and should surface immediately, not propagate as NaN.
+    """
+    missing_mask = (positions == -1)
+    if not missing_mask.any():
+        return
+    missing = extended_index_arr[missing_mask]
+    if not lake_segs_set:
+        bad = [int(s) for s in missing]
+    else:
+        bad = [int(s) for s in missing if int(s) not in lake_segs_set]
+    if bad:
+        raise KeyError(
+            f"{label}: {len(bad)} channel segment(s) missing from source frame "
+            f"(e.g. {bad[:5]}). Lake-seg extension rows are expected to be "
+            f"missing (filled per the per-call fill_value); channel rows are not."
+        )
 
 
 def _prep_da_dataframes(
@@ -829,6 +940,13 @@ def _prep_da_positions_byreach(reach_list, gage_index):
     and a corresponding list of indexes of the gage_list of the gages in
     the order they are found in the reach_list.
     """
+    # Empty gage_index (DA disabled) is the dominant case in CONUS runs.
+    # The original double loop did 12.2 M ``seg in gage_index`` checks on an
+    # empty RangeIndex per CONUS run (~5 s under cProfile / ~1.5 s clean),
+    # all of which return False. Short-circuit when there's nothing to find.
+    if len(gage_index) == 0:
+        return [], gage_index.get_indexer([])
+
     reach_key = []
     reach_gage = []
     for i, r in enumerate(reach_list):
@@ -909,12 +1027,15 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
         reservoir_usgs_persistence_update_time = reservoir_usgs_param_df['persistence_update_time'].loc[usgs_wbodies_sub].to_numpy()
         reservoir_usgs_persistence_index = reservoir_usgs_param_df['persistence_index'].loc[usgs_wbodies_sub].to_numpy()
     else:
-        reservoir_usgs_df_sub = pd.DataFrame()
-        reservoir_usgs_df_time = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_usgs_update_time = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_usgs_prev_persisted_flow = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_usgs_persistence_update_time = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_usgs_persistence_index = pd.DataFrame().to_numpy().reshape(0,)
+        # Reuse module-level empties; the original per-cluster
+        # pd.DataFrame().to_numpy().reshape(0,) idiom allocates a fresh
+        # BlockManager each call (~100 µs × 31 calls/iter × 1200 iters).
+        reservoir_usgs_df_sub = _EMPTY_DF
+        reservoir_usgs_df_time = _EMPTY_F64
+        reservoir_usgs_update_time = _EMPTY_F64
+        reservoir_usgs_prev_persisted_flow = _EMPTY_F64
+        reservoir_usgs_persistence_update_time = _EMPTY_F64
+        reservoir_usgs_persistence_index = _EMPTY_F64
         if not waterbody_types_df_sub.empty:
             waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 2] = 1
 
@@ -934,13 +1055,13 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
         reservoir_usace_prev_persisted_flow = reservoir_usace_param_df['prev_persisted_outflow'].loc[usace_wbodies_sub].to_numpy()
         reservoir_usace_persistence_update_time = reservoir_usace_param_df['persistence_update_time'].loc[usace_wbodies_sub].to_numpy()
         reservoir_usace_persistence_index = reservoir_usace_param_df['persistence_index'].loc[usace_wbodies_sub].to_numpy()
-    else: 
-        reservoir_usace_df_sub = pd.DataFrame()
-        reservoir_usace_df_time = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_usace_update_time = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_usace_prev_persisted_flow = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_usace_persistence_update_time = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_usace_persistence_index = pd.DataFrame().to_numpy().reshape(0,)
+    else:
+        reservoir_usace_df_sub = _EMPTY_DF
+        reservoir_usace_df_time = _EMPTY_F64
+        reservoir_usace_update_time = _EMPTY_F64
+        reservoir_usace_prev_persisted_flow = _EMPTY_F64
+        reservoir_usace_persistence_update_time = _EMPTY_F64
+        reservoir_usace_persistence_index = _EMPTY_F64
         if not waterbody_types_df_sub.empty:
             waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 3] = 1
 
@@ -960,13 +1081,13 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
         reservoir_usbr_prev_persisted_flow = reservoir_usbr_param_df['prev_persisted_outflow'].loc[usbr_wbodies_sub].to_numpy()
         reservoir_usbr_persistence_update_time = reservoir_usbr_param_df['persistence_update_time'].loc[usbr_wbodies_sub].to_numpy()
         reservoir_usbr_persistence_index = reservoir_usbr_param_df['persistence_index'].loc[usbr_wbodies_sub].to_numpy()
-    else: 
-        reservoir_usbr_df_sub = pd.DataFrame()
-        reservoir_usbr_df_time = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_usbr_update_time = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_usbr_prev_persisted_flow = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_usbr_persistence_update_time = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_usbr_persistence_index = pd.DataFrame().to_numpy().reshape(0,)
+    else:
+        reservoir_usbr_df_sub = _EMPTY_DF
+        reservoir_usbr_df_time = _EMPTY_F64
+        reservoir_usbr_update_time = _EMPTY_F64
+        reservoir_usbr_prev_persisted_flow = _EMPTY_F64
+        reservoir_usbr_persistence_update_time = _EMPTY_F64
+        reservoir_usbr_persistence_index = _EMPTY_F64
         if not waterbody_types_df_sub.empty:
             waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 7] = 1
     
@@ -986,14 +1107,14 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
         reservoir_rfc_da_timestep = reservoir_rfc_param_df['da_timestep'].loc[rfc_wbodies_sub].to_numpy()
         reservoir_rfc_persist_days = reservoir_rfc_param_df['rfc_persist_days'].loc[rfc_wbodies_sub].to_numpy()
     else:
-        reservoir_rfc_df_sub = pd.DataFrame()
-        reservoir_rfc_totalCounts = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_rfc_file = []
-        reservoir_rfc_use_forecast = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_rfc_timeseries_idx = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_rfc_update_time = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_rfc_da_timestep = pd.DataFrame().to_numpy().reshape(0,)
-        reservoir_rfc_persist_days = pd.DataFrame().to_numpy().reshape(0,)
+        reservoir_rfc_df_sub = _EMPTY_DF
+        reservoir_rfc_totalCounts = _EMPTY_F64
+        reservoir_rfc_file = _EMPTY_LIST
+        reservoir_rfc_use_forecast = _EMPTY_F64
+        reservoir_rfc_timeseries_idx = _EMPTY_F64
+        reservoir_rfc_update_time = _EMPTY_F64
+        reservoir_rfc_da_timestep = _EMPTY_F64
+        reservoir_rfc_persist_days = _EMPTY_F64
         if not from_files:
             if not waterbody_types_df_sub.empty:
                 waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 4] = 1
@@ -1013,12 +1134,12 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
         gl_param_time_sub = gl_param_df_sub.previous_assimilated_time.to_numpy()
         gl_param_update_time_sub = gl_param_df_sub.update_time.to_numpy()
     else:
-        gl_df_sub = pd.DataFrame(columns=['lake_id','time','Discharge'])
-        gl_climatology_df_sub = pd.DataFrame()
-        gl_parm_lake_id_sub = pd.DataFrame().to_numpy().reshape(0,)
-        gl_param_flows_sub = pd.DataFrame().to_numpy().reshape(0,)
-        gl_param_time_sub = pd.DataFrame().to_numpy().reshape(0,)
-        gl_param_update_time_sub = pd.DataFrame().to_numpy().reshape(0,)
+        gl_df_sub = _EMPTY_GL_DF
+        gl_climatology_df_sub = _EMPTY_DF
+        gl_parm_lake_id_sub = _EMPTY_F64
+        gl_param_flows_sub = _EMPTY_F64
+        gl_param_time_sub = _EMPTY_F64
+        gl_param_update_time_sub = _EMPTY_F64
         if not waterbody_types_df_sub.empty:
             waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 6] = 1
 
@@ -1255,12 +1376,47 @@ def build_compute_package(
     interorder_boundaries: dict[ReachId, BoundaryCondition],
 ) -> ComputeInputs:
     """Assemble a ComputeInputs package for a computation job by subsetting all forcing and DA data to the job's reaches."""
-    qlat_sub = forcing.qlats.loc[
-        job.river_reaches
-    ]  # TODO: debug these to make sure we get forcing we want with respect to channels vs lakes
-    q0_sub = forcing.q0.loc[job.river_reaches]
-    eloss_sub = forcing.eloss.loc[job.river_reaches]
+    # Build qlats
+    qlat_pos = forcing.qlat_idx.get_indexer(job.river_index)
+    _assert_channel_rows_present(
+        "qlats", qlat_pos, job.river_index, job.waterbody_set,
+    )
+    if job.lake_mask is not None:
+        # Force lake-row NaN-fill regardless of whether the
+        # source qlats happens to contain those IDs.
+        qlat_pos = np.where(job.lake_mask, -1, qlat_pos)
+    qlat_sub = pd.DataFrame(
+        _reindex_via_take(forcing.qlat_vals, qlat_pos),
+        index=job.river_reaches,
+        columns=forcing.qlat_cols,
+    )
+    # Build q0
+    q0_pos = forcing.q0_idx.get_indexer(job.river_index)
+    _assert_channel_rows_present(
+        "q0", q0_pos, job.river_index, job.waterbody_set,
+    )
+    if job.waterbody_set is not None:
+        q0_pos = np.where(job.waterbody_set_mask, -1, q0_pos)
+    q0_sub = pd.DataFrame(
+        _reindex_via_take(forcing.q0_vals, q0_pos),
+        index=job.river_index,
+        columns=forcing.q0_cols,
+    )
 
+    # Build eloss
+    # eloss_df is intentionally lenient: the legacy
+    # ``eloss_df.reindex(...).fillna(0.0)`` swallowed missing
+    # channel rows the same way (0-fill, no error). The
+    # ``fill_value=0.0`` below preserves that semantic for both
+    # missing channel rows and lake extension rows.
+    eloss_pos = forcing.eloss_idx.get_indexer(job.river_index)
+    eloss_sub = pd.DataFrame(
+        _reindex_via_take(forcing.eloss_vals, eloss_pos, fill_value=0.0),
+        index=job.river_index,
+        columns=forcing.eloss_cols,
+    )
+
+    # Build streamflow DA dataframes
     usgs_df_sub, lastobs_df_sub, da_positions_list_byseg = _prep_da_dataframes(
         assimilation_data.usgs_df, assimilation_data.lastobs_df, job.river_reaches
     )
@@ -1329,9 +1485,17 @@ def build_compute_package(
         data_idx=job.river_reaches,
         data_cols=job.river_fields,
         data_values=job.river_values,
-        initial_conditions=q0_sub.values.astype("float32"),
-        qlat_values=qlat_sub.values.astype("float32"),
-        eloss_values=eloss_sub.values.astype("float32"),
+        # to_numpy(dtype=..., copy=False) returns a view
+        # when the source already matches the requested
+        # dtype (q0 is float32 after
+        # build_channel_initial_state, qlats is float32
+        # after np.stack of CHRTOUT data); for eloss_df
+        # (built as pd.DataFrame(0.0, ...) which is
+        # float64) the copy still fires, same as the
+        # original .values.astype("float32") chain.
+        initial_conditions=q0_sub.to_numpy(dtype="float32", copy=False),
+        qlat_values=qlat_sub.to_numpy(dtype="float32", copy=False),
+        eloss_values=eloss_sub.to_numpy(dtype="float32", copy=False),
         ssout=config.ssout,
         lake_numbers_col=job.waterbody_reaches,
         wbody_cols=job.waterbodies_df.values,

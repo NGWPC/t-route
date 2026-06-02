@@ -69,7 +69,7 @@ fi
 
 if [ -z "$NETCDF" ]
 then
-    export NETCDFINC=/usr/include/openmpi-x86_64/
+    export NETCDFINC="/usr/include/openmpi-$(uname -m)/"
     # set alternative NETCDF variable include path, for example for WSL
     # (Windows Subsystems for Linux).
     #
@@ -86,12 +86,18 @@ fi
 echo "using NETCDFINC=${NETCDFINC}"
 
 
-if  [[ "$build_mc_kernel" == true ]]; then
-  #building reach and resevoir kernel files .o
-  cd $REPOROOT/src/kernel/muskingum/
-  make clean
-  make  || exit
-  make install || exit
+
+if [[ "$build_mc_kernel" == true ]]; then
+    #building reach and resevoir kernel files .o
+    cd $REPOROOT/src/kernel/muskingum/
+    make clean
+    # ``TROUTE_NATIVE=1 ./compiler.sh`` opts into -mcpu=native / -march=native
+    # for the kernel build. Default is the portable -O3 build (no native
+    # arch flags), which is required for any artifact that may run on a
+    # different CPU than the build host. See src/kernel/muskingum/makefile.
+    make TROUTE_NATIVE=${TROUTE_NATIVE:-0} || exit
+    make install || exit
+
 fi
 
 if  [[ "$build_diffusive_tulane_kernel" == true ]]; then
@@ -108,10 +114,11 @@ fi
 if [[ "$build_reservoir_kernel" == true ]]; then
     cd $REPOROOT/src/kernel/reservoir/
     make clean
-    #make NETCDFINC=`nc-config --includedir` || exit
-    #make binding_lp.a
-    #make install_lp || exit
-    make
+    # The makefile's `all` target lists bind_hybrid.a whose build rule
+    # is commented out -- bare `make` fails. Build only the two
+    # archives we actually need + install them, matching what the
+    # pixi-build path does.
+    make binding_lp.a bind_rfc.a || exit
     make install_lp || exit
     make install_rfc || exit
 fi

@@ -284,9 +284,14 @@ def sample_reaches(
     samples_per_stream_order = n_stream_order_reaches // run_context.max_stream_order
     working_reach_list = set()
 
+    mask = (run_context.routed_results["flow"] > 0).any(dim="time")
+    nonzero_fps = run_context.routed_results["feature_id"].where(mask, drop=True).values.astype(int)
+    in_links = run_context.links_df["fp_id"].unique()
+    valid_fp = set(in_links).intersection(nonzero_fps)
     tmp_flowpaths = run_context.flowpaths_gdf[
-        run_context.flowpaths_gdf["fp_id"].isin(run_context.links_df["fp_id"].values)
+        run_context.flowpaths_gdf["fp_id"].isin(valid_fp)
     ]
+
 
     # Sample from stream orders
     for i in range(1, run_context.max_stream_order + 1):
@@ -793,14 +798,17 @@ def plot_attenuation(df: pd.DataFrame, out_path: Path) -> None:
     fig, ax = plt.subplots()
     min_val = np.floor(df["pct_attenuation"].min() * 2) / 2
     max_val = np.ceil(df["pct_attenuation"].max() * 2) / 2
-    bins = np.arange(min_val, max_val + 0.5, 0.5)
-    sns.histplot(df, x="pct_attenuation", ax=ax, bins=bins)
-    ax.axvline(0, ls="dashed", c="k", alpha=0.3)
-    ax.set_xlabel("Attenuation (as % of peak inflow)")
-    ax.grid()
-    ax.set_axisbelow(True)
-    ax.set_facecolor("whitesmoke")
-    fig.tight_layout()
+    if np.isnan(min_val):
+        ax.text(x=0, y=0, s="Attenuation was NAN")
+    else:
+        bins = np.arange(min_val, max_val + 0.5, 0.5)
+        sns.histplot(df, x="pct_attenuation", ax=ax, bins=bins)
+        ax.axvline(0, ls="dashed", c="k", alpha=0.3)
+        ax.set_xlabel("Attenuation (as % of peak inflow)")
+        ax.grid()
+        ax.set_axisbelow(True)
+        ax.set_facecolor("whitesmoke")
+        fig.tight_layout()
     fig.savefig(out_path / "attenuation_histogram.png", dpi=300)
 
 

@@ -1,68 +1,145 @@
 from pathlib import Path
+from itertools import starmap
+from typing import Optional
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import pyogrio
+from troute.rfc_lake_gage_crosswalk import get_great_lakes_climatology
 import xarray as xr
 from joblib import Parallel, delayed
 
-# Only read relevant areas of NHF to cut down on processing time and memory footprint.
-LAYERS_TO_READ = [
-    {
-        "name": "flowpaths",
-        "columns": [
-            "fp_id",
-            "length_km",
-            "n",
-            "mainstem_lp",
-            "topwdth",
-            "slope",
-            "ncc",
-            "btmwdth",
-            "musx",
-            "chslp",
-            "topwdthcc",
-            "musk",
-        ],
-        "ignore_geometry": True
-    },
-    {
-        "name": "reference_flowpaths",
-        "columns": None,  # Loads all
-        "ignore_geometry": True
-    },
-    {
-        "name": "virtual_flowpaths",
-        "columns": [
-            "length_km", 
-            "virtual_fp_id", 
-            "dn_virtual_nex_id", 
-            "up_virtual_nex_id",
-            "percentage_area_contribution"
-            ],
-        "ignore_geometry": False
-    },
-    {
-        "name": "virtual_nexus",
-        "columns": None,
-        "ignore_geometry": True
-    },
-    {
-        "name": "waterbodies",
-        "columns": None,
-        "ignore_geometry": True
-    },
-    {
-        "name": "gages",
-        "columns": None,
-        "ignore_geometry": True
-    },
-    {
-        "name": "hydrolocations",
-        "columns": None,
-        "ignore_geometry": True
-    }
+# Channel-parameter columns of `flowpaths` consumed by the Muskingum-Cunge
+# kernel. Non-finite (NaN/Inf) values in any of these would propagate
+# into NaN routing output; guard against them at load time and fail loud.
+_FLOWPATHS_CHANNEL_COLS = (
+    "length_km", "n", "slope", "topwdth", "btmwdth",
+    "topwdthcc", "ncc", "chslp", "musx", "musk", "mainstem_lp",
+)
+_BAD_FPID_PREVIEW_LIMIT = 10
+
+
+def _validate_flowpaths_channel_params(flowpaths):
+    """Raise if any MC-kernel channel parameter is non-finite (NaN/Inf)."""
+    if flowpaths is None or flowpaths.empty:
+        return
+    cols = [c for c in _FLOWPATHS_CHANNEL_COLS if c in flowpaths.columns]
+    if not cols:
+        return
+    arr = flowpaths[cols].to_numpy(dtype=float, copy=False, na_value=np.nan)
+    bad_per_col = ~np.isfinite(arr)
+    if not bad_per_col.any():
+        return
+    bad_row_mask = bad_per_col.any(axis=1)
+    bad_count = int(bad_row_mask.sum())
+    per_col = {c: int(bad_per_col[:, i].sum())
+               for i, c in enumerate(cols) if bad_per_col[:, i].any()}
+    bad_fp_ids = (flowpaths.loc[bad_row_mask, "fp_id"].tolist()
+                  if "fp_id" in flowpaths.columns else [])
+    preview = bad_fp_ids[:_BAD_FPID_PREVIEW_LIMIT]
+    more = ("" if len(bad_fp_ids) <= _BAD_FPID_PREVIEW_LIMIT
+            else f" (and {len(bad_fp_ids) - _BAD_FPID_PREVIEW_LIMIT} more)")
+    raise ValueError(
+        f"flowpaths contains {bad_count} of {len(flowpaths)} segments with "
+        f"non-finite (NaN/Inf) channel parameter(s); the Muskingum-Cunge "
+        f"kernel requires finite values. Affected columns: {per_col}. "
+        f"Affected fp_ids{more}: {preview}"
+    )
+
+def _missing_requested_columns(
+    available_by_layer: dict[str, set],
+) -> dict[str, list]:
+    """Pure check: which requested columns are absent from each layer.
+
+    ``available_by_layer`` maps a layer name to the set of column names the
+    geopackage actually carries for it; omit a layer to signal it is entirely
+    absent. Only layers that declare an explicit ``columns`` list are checked
+    (``columns=None`` layers are loaded in full and used conditionally).
+    Returns ``{layer_name: [missing columns]}`` (empty if nothing is missing).
+    """
+    missing_by_layer: dict[str, list] = {}
+    for name, columns, _ in LAYERS_TO_READ:
+        if columns is None:
+            continue
+        available = available_by_layer.get(name)
+        if available is None:
+            missing_by_layer[name] = list(columns)
+            continue
+        absent = [c for c in columns if c not in available]
+        if absent:
+            missing_by_layer[name] = absent
+    return missing_by_layer
+
+
+def _validate_required_columns(gpkg_path: Path, present_layers: set[str]) -> None:
+    """Fail fast -- from layer metadata, before any rows are read -- if the
+    geopackage is missing a column the NHF build requests.
+
+    Each layer's requested ``columns`` doubles as its required set (we only
+    ask for columns the build consumes downstream). ``present_layers`` is the
+    set of layers actually in the geopackage (from ``pyogrio.list_layers``); a
+    validated layer absent from it is reported as missing its full requested
+    set, and a present one is checked against ``pyogrio.read_info(...)["fields"]``
+    (the attribute field names, read without touching the rows). This costs one
+    metadata lookup per present validated layer and catches a stale hydrofabric
+    (e.g. ``reference_flowpaths`` lacking ``segment_order``) up front, replacing
+    a cryptic ``KeyError`` raised deep inside discretization. Layers loaded with
+    ``columns=None`` (lakes, gages, hydrolocations, virtual_nexus) are used
+    conditionally and not validated.
+    """
+    available_by_layer: dict[str, set[str]] = {}
+    for name, columns, _ in LAYERS_TO_READ:
+        if columns is None or name not in present_layers:
+            continue
+        available_by_layer[name] = set(
+            pyogrio.read_info(gpkg_path, layer=name)["fields"]
+        )
+    missing_by_layer = _missing_requested_columns(available_by_layer)
+    if missing_by_layer:
+        details = "; ".join(
+            f"{name}: {cols}" for name, cols in missing_by_layer.items()
+        )
+        raise ValueError(
+            "Input geopackage is missing required column(s) needed by the NHF "
+            f"network build -> {details}. This usually means the hydrofabric "
+            "predates the current schema (for example, older datasets lack the "
+            "'segment_order' column in 'reference_flowpaths'); regenerate or "
+            "update the dataset to a compatible hydrofabric version."
+        )
+
+
+# Layers to read from the NHF geopackage, as (name, columns, ignore_geometry)
+# tuples. ``columns`` is the explicit list of fields to load (and doubles as
+# the required-column set validated up front by _validate_required_columns),
+# or None to load every field. We read only what the build consumes to cut
+# processing time and memory. ``reference_flowpaths`` lists its five consumed
+# columns explicitly: `segment_order` is a newer hydrofabric field whose
+# absence otherwise fails deep in discretization, and `ref_fp_id` is the join
+# key in crosswalk_nex_flowpath_poi.
+LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
+    (
+        "flowpaths",
+        ["fp_id", "length_km", "n", "mainstem_lp", "topwdth", "slope",
+         "ncc", "btmwdth", "musx", "chslp", "topwdthcc", "musk"],
+        True,
+    ),
+    (
+        "reference_flowpaths",
+        ["ref_fp_id", "fp_id", "virtual_fp_id", "segment_order", "div_id"],
+        True,
+    ),
+    (
+        "virtual_flowpaths",
+        ["length_km", "virtual_fp_id", "dn_virtual_nex_id",
+         "up_virtual_nex_id", "percentage_area_contribution"],
+        False,
+    ),
+    ("virtual_nexus", None, True),
+    ("lakes", None, True),
+    ("gages", None, True),
+    ("hydrolocations", None, True),
 ]
 
 def read_qlat_file(f):
@@ -129,51 +206,43 @@ def read_ngen_waterbody_type_df(parm_file, lake_index_field="wb-id", lake_id_mas
     return df
 
 
-def read_geo_file(supernetwork_parameters, waterbody_parameters, compute_parameters, cpu_pool):
+def read_geo_file(supernetwork_parameters, cpu_pool):
     geo_file_path = supernetwork_parameters["geo_file_path"]
-    file_type = Path(geo_file_path).suffix
-    if file_type == ".gpkg":
+    if Path(geo_file_path).suffix != ".gpkg":
+        raise RuntimeError("Only .gpkg files are currently supported for the geo_file_path parameter.")
 
-        # TODO enable lakes to be read into the routing solution here
-        # if waterbody_parameters.get("break_network_at_waterbodies", False):
-        #     layers_to_read.extend(["lakes", "nexus"])
+    # Inspect the geopackage once up front (metadata only): which layers are
+    # present, and -- via _validate_required_columns -- do they carry the
+    # columns the build needs. A stale/incomplete hydrofabric fails here,
+    # before we pay to read any rows.
+    gpkg_layers = {name for name, _ in pyogrio.list_layers(geo_file_path)}
+    _validate_required_columns(geo_file_path, gpkg_layers)
 
-        # data_assimilation_parameters = compute_parameters.get("data_assimilation_parameters", {})
-        # if any(
-        #     [
-        #         data_assimilation_parameters.get("streamflow_da", {}).get("streamflow_nudging", False),
-        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usgs", False),
-        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usace", False),
-        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usbr", False),
-        #         data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_rfc_da", {}).get("reservoir_rfc_forecasts", False),
-        #     ]
-        # ):
-        #     layers_to_read.append("network")
+    def read_layer(
+        name: str, columns: Optional[list[str]], ignore_geometry: bool,
+    ) -> tuple[str, pd.DataFrame]:
+        return name, gpd.read_file(
+            geo_file_path, layer=name, columns=columns,
+            ignore_geometry=ignore_geometry,
+        )
 
-        # Layers whose geometry we need to preserve for discretization
+    # Read present layers in parallel; layers absent from the geopackage become
+    # empty DataFrames (they are used conditionally downstream). to_read keeps
+    # the full (name, columns, ignore_geometry) tuples so starmap can unpack
+    # them into read_layer's arguments.
+    to_read = [layer for layer in LAYERS_TO_READ if layer[0] in gpkg_layers]
+    if not to_read:
+        raise ValueError(
+            f"None of the expected layers to read were present in the geopackage: "
+            f"{[lyr for lyr, _, _ in LAYERS_TO_READ]}. Found layers: {gpkg_layers}."
+        )
+    table_dict = {lyr: pd.DataFrame() for lyr, *_ in LAYERS_TO_READ}
+    with Parallel(n_jobs=min(cpu_pool, len(to_read))) as parallel:
+        table_dict.update(
+            dict(parallel(starmap(delayed(read_layer), to_read)))
+        )
 
-        def read_layer(lyr):
-            try:
-                _df = gpd.read_file(geo_file_path, layer=lyr["name"], columns=lyr["columns"], ignore_geometry=lyr["ignore_geometry"])
-                return _df
-            except pyogrio.errors.DataSourceError as e:
-                print(f"Error reading file {geo_file_path}: {e}")
-                raise pyogrio.errors.DataSourceError from e
-            except pyogrio.errors.DataLayerError:
-                return pd.DataFrame()  # Missing layer -> empty DF
-
-        # Retrieve geopackage information using matched layer names
-        if cpu_pool > 1:
-            with Parallel(n_jobs=min(cpu_pool, len(LAYERS_TO_READ))) as parallel:
-                gpkg_list = parallel(delayed(read_layer)(layer) for layer in LAYERS_TO_READ)
-
-            table_dict = {LAYERS_TO_READ[i]["name"]: gpkg_list[i] for i in range(len(LAYERS_TO_READ))}
-        else:
-            table_dict = {layer["name"]: read_layer(layer) for layer in LAYERS_TO_READ}
-
-    else:
-        raise RuntimeError("Unsupported file type: {}".format(file_type))
-
+    _validate_flowpaths_channel_params(table_dict.get("flowpaths"))
     return table_dict
 
 
@@ -229,6 +298,58 @@ def read_file(file_name):
     return df
 
 
+def _groupby_to_list_dict(df, key_col, val_col):
+    """Vectorized equivalent of ``df.groupby(key_col)[val_col].apply(list).to_dict()``.
+
+    Pandas ``groupby.apply(list)`` builds Python lists per group via a
+    per-row Python loop -- the per-row overhead dominates at CONUS scale
+    (1.1 M rows = ~700 ms per call). This function does the same work in
+    pure numpy: argsort, find group boundaries, split, then tolist. About
+    3x faster on uniform-distribution CONUS-shape inputs; can be much
+    faster on skewed distributions where pandas' per-group fallback is
+    slow.
+
+    Matches pandas semantics for the cases this helper is called on:
+      * NaN keys are dropped (pandas ``groupby(..., dropna=True)`` default).
+        Without this mask numpy would produce a single ``nan`` key in the
+        output dict because ``np.argsort`` sorts NaN to the end and
+        ``np.unique`` returns each NaN as its own equality class.
+      * Numeric keys are unboxed via ``.item()`` so the dict has python
+        ``int`` / ``float`` keys (matches pandas' ``.to_dict()`` boxing).
+      * Object-dtype keys (python strings, etc.) are returned as-is.
+
+    The helper is intentionally narrow: it expects the key column to be
+    numeric or string. For nullable / extension dtypes (Int64, string[python],
+    etc.) fall back to pandas at the caller side, since ``to_numpy()``
+    behavior on those types is dtype-dependent and would require a more
+    elaborate dispatch.
+    """
+    if df.empty:
+        return {}
+    keys = df[key_col].to_numpy()
+    vals = df[val_col].to_numpy()
+    # Drop rows whose key is NaN/NaT, matching pandas' dropna=True default.
+    # pd.notna handles float NaN, datetime NaT, and object None uniformly.
+    if keys.dtype.kind in "fcmM" or keys.dtype == object:
+        mask = pd.notna(keys)
+        if not mask.all():
+            keys = keys[mask]
+            vals = vals[mask]
+    if keys.size == 0:
+        return {}
+    order = np.argsort(keys, kind="stable")
+    sorted_keys = keys[order]
+    sorted_vals = vals[order]
+    unique_keys, group_starts = np.unique(sorted_keys, return_index=True)
+    groups = np.split(sorted_vals, group_starts[1:])
+    # Object-dtype keys (e.g. Python strings) iterate as raw Python
+    # objects and have no .item(); numpy scalars do. Branch on dtype
+    # so we don't silently box numpy ints/floats into numpy scalars.
+    if unique_keys.dtype == object:
+        return {k: g.tolist() for k, g in zip(unique_keys, groups)}
+    return {k.item(): g.tolist() for k, g in zip(unique_keys, groups)}
+
+
 class NHFPreprocessMixin:
     """Mixin providing preprocessing methods for the NHF class."""
 
@@ -240,22 +361,33 @@ class NHFPreprocessMixin:
         gages,
         reference_flowpaths
     ):
-        self._nexus_dict = virtual_flowpaths.groupby("dn_virtual_nex_id")["virtual_fp_id"].apply(list).to_dict()  ##{id: toid}
-        if hydrolocations.empty or gages.empty:
-            self._poi_nex_dict = None
-        else:
-            waterbody_ids = hydrolocations.merge(
-                waterbodies,
-                left_on='hy_id',
-                right_on='hy_id',
-                how='right'
-            )
-            gage_ids = hydrolocations.merge(
-                gages,
-                left_on='hy_id',
-                right_on='hy_id',
-                how='right'
-            )
+        # Step N2: vectorized replacement for
+        #   virtual_flowpaths.groupby("dn_virtual_nex_id")["virtual_fp_id"]
+        #       .apply(list).to_dict()
+        # which dominated NHF.__init__ at CONUS scale (~10 s per call,
+        # 2 calls in this method -- the cProfile-measured ~20 s.)
+        self._nexus_dict = _groupby_to_list_dict(
+            virtual_flowpaths, "dn_virtual_nex_id", "virtual_fp_id"
+        )  # {nex_id: [fp_id, ...]}
+        if not hydrolocations.empty:
+            if not waterbodies.empty:
+                waterbody_ids = hydrolocations.merge(
+                    waterbodies,
+                    left_on='hy_id',
+                    right_on='hy_id',
+                    how='right'
+                )
+            else:
+                waterbody_ids = pd.DataFrame(columns=["hy_id", "ref_fp_id"])
+            if not hydrolocations.empty and not gages.empty:
+                gage_ids = hydrolocations.merge(
+                    gages,
+                    left_on='hy_id',
+                    right_on='hy_id',
+                    how='right'
+                )
+            else:
+                gage_ids = pd.DataFrame(columns=["hy_id", "ref_fp_id"])
             hy_id_to_ref_id = pd.concat([waterbody_ids[["hy_id", "ref_fp_id"]].copy(), gage_ids[["hy_id", "ref_fp_id"]]])
             _ref_ids = reference_flowpaths.merge(
                 hy_id_to_ref_id,
@@ -269,165 +401,207 @@ class NHFPreprocessMixin:
                 right_on='virtual_fp_id',
                 how='left',
             )
-            self._poi_nex_dict = result.groupby("hy_id")["dn_virtual_nex_id"].apply(list).to_dict()
+            # Step N2: same vectorization as the _nexus_dict above.
+            self._poi_nex_dict = _groupby_to_list_dict(
+                result, "hy_id", "dn_virtual_nex_id"
+            )
+        else:
+            self._poi_nex_dict = None
 
-    def preprocess_waterbodies(self, lakes, nexus):
-        # TODO work on waterbodies support for NHF
-        # If waterbodies are being simulated, create waterbody dataframes and dictionaries
-        # if not lakes.empty:
-        #     self._waterbody_df = lakes[
-        #         [
-        #             "lake_id",
-        #             "id",
-        #             "ifd",
-        #             "LkArea",
-        #             "LkMxE",
-        #             "OrificeA",
-        #             "OrificeC",
-        #             "OrificeE",
-        #             "WeirC",
-        #             "WeirE",
-        #             "WeirL",
-        #         ]
-        #     ]
+    def preprocess_waterbodies(self, lakes):
+        if not lakes.empty:
+            # Formate waterbodies df
+            lake_id_field = "lake_id"
+            self._waterbody_df = lakes[
+                [
+                    lake_id_field,
+                    "fp_id",
+                    "ifd",
+                    "LkArea",
+                    "LkMxE",
+                    "OrificeA",
+                    "OrificeC",
+                    "OrificeE",
+                    "WeirC",
+                    "WeirE",
+                    "WeirL",
+                ]
+            ].copy()
+            self._waterbody_df[lake_id_field] = self._waterbody_df[lake_id_field].astype(int)
+            self._waterbody_df = self.waterbody_dataframe.set_index(lake_id_field).drop_duplicates().sort_index()
 
-        #     id = self.waterbody_dataframe["id"].str.split("-", expand=True).iloc[:, 1]
-        #     self._waterbody_df.loc[:, "id"] = id
-        #     self._waterbody_df.loc[:, "id"] = self._waterbody_df.id.astype(float).astype(int)
-        #     self._waterbody_df.loc[:, "lake_id"] = self.waterbody_dataframe.lake_id.astype(float).astype(int)
-        #     self._waterbody_df = self.waterbody_dataframe.set_index("lake_id").drop_duplicates().sort_index()
+            # Extract Great Lakes
+            gl_df = self.waterbody_dataframe[self.waterbody_dataframe.index.isin([4800002, 4800004, 4800006, 4800007])].copy()
 
-        #     # Drop any waterbodies that do not have parameters
-        #     self._waterbody_df = self.waterbody_dataframe.dropna()
+            # Validate
+            rows = self._waterbody_df[self._waterbody_df["OrificeE"] > self._waterbody_df["WeirE"]]
+            if len(rows) > 0:
+                ids = rows[lake_id_field].values
+                raise ValueError(f"Orifice elevation must be less than or equal to weir elevation.  This was not the case at {ids}")
+            rows = self._waterbody_df[self._waterbody_df["WeirE"] > self._waterbody_df["LkMxE"]]
+            if len(rows) > 0:
+                ids = rows[lake_id_field].values
+                raise ValueError(f"Weir elevation must be less than or equal to maximum lake elevation.  This was not the case at {ids}")
 
-        #     # Check if there are any lake_ids that are also segment_ids. If so, add a large value
-        #     # to the lake_ids:
-        #     duplicate_ids = list(set(self.waterbody_dataframe.index).intersection(set(self.dataframe.index)))
-        #     self._duplicate_ids_df = pd.DataFrame(
-        #         {"lake_id": duplicate_ids, "synthetic_ids": [int(id + 9.99e11) for id in duplicate_ids]}
-        #     )
-        #     update_dict = dict(self._duplicate_ids_df[["lake_id", "synthetic_ids"]].values)
+            # Drop any waterbodies that do not have parameters
+            self._waterbody_df = self.waterbody_dataframe.dropna()
 
-        #     tmp_wbody_conn = self.dataframe[["waterbody"]].dropna()
-        #     tmp_wbody_conn = (
-        #         tmp_wbody_conn["waterbody"]
-        #         .str.split(",", expand=True)
-        #         .reset_index()
-        #         .melt(id_vars="key")
-        #         .drop("variable", axis=1)
-        #         .dropna()
-        #         .astype(int)
-        #     )
-        #     tmp_wbody_conn = tmp_wbody_conn[tmp_wbody_conn["value"].isin(self.waterbody_dataframe.index)]
-        #     self._dataframe = (
-        #         self.dataframe.reset_index()
-        #         .merge(tmp_wbody_conn, how="left", on="key")
-        #         .drop("waterbody", axis=1)
-        #         .rename(columns={"value": "waterbody"})
-        #         .set_index("key")
-        #     )
+            # Add a large value to the lake_ids to create synthetic IDs and avoid conflicts.
+            max_df_id = max(self.dataframe.index) + 1 if not self.dataframe.index.empty else 0
+            self._waterbody_df.index = np.arange(len(self._waterbody_df)) + max_df_id
+            self._waterbody_df = self._waterbody_df.rename_axis(lake_id_field)
+            self._duplicate_ids_df = pd.DataFrame()  # Relic from how hyfeatures and NHD handled this. We add relationship to _fp_outlet_crosswalk 
 
-        #     self._waterbody_df = self.waterbody_dataframe.rename(index=update_dict).sort_index()
-        #     self._dataframe = self.dataframe.replace({"waterbody": update_dict})
+            # Add the Great Lakes to the connections dictionary and waterbody dataframe
+            # NOTE: This dataset never appears to be used.  Newer versions of T-Route CLI get great lakes flows 
+            # exclusively from data assimilation. Consider removing in future.
+            if not gl_df.empty:
+                self.waterbody_dataframe = pd.concat([self.waterbody_dataframe, gl_df])
+                self.great_lakes_climatology_df = get_great_lakes_climatology()
+            else:
+                self.great_lakes_climatology_df = pd.DataFrame()
 
-        #     # FIXME temp solution for missing waterbody info in hydrofabric
-        #     self.bandaid()
+            # Clean fp_id type
+            self._waterbody_df["fp_id"] = self._waterbody_df["fp_id"].astype(int)
 
-        #     wbody_conn = self.dataframe[["waterbody"]].dropna().astype(int).reset_index()
+            # Condense flowpaths in a reservoir to single level pool node
+            self._refactor_reservoirs(lake_id_field)
 
-        #     self._waterbody_connections = (
-        #         wbody_conn[wbody_conn["waterbody"].isin(self.waterbody_dataframe.index)]
-        #         .set_index("key")["waterbody"]
-        #         .to_dict()
-        #     )
+            # Add lat, lon, and crs columns for LAKEOUT files:
+            lakeout = self.output_parameters.get("lakeout_output", None)
+            if lakeout:
+                raise NotImplementedError("The lakeout feature has not been developed for NHF.")
 
-        #     # if waterbodies are being simulated, adjust the connections graph so that
-        #     # waterbodies are collapsed to single nodes. Also, build a mapping between
-        #     # waterbody outlet segments and lake ids
-        #     break_network_at_waterbodies = self.waterbody_parameters.get("break_network_at_waterbodies", False)
-        #     if break_network_at_waterbodies:
-        #         self._connections, self._link_lake_crosswalk = replace_waterbodies_connections(
-        #             self.connections, self.waterbody_connections
-        #         )
-        #     else:
-        #         self._link_lake_crosswalk = None
+            
 
-        #     # Add lat, lon, and crs columns for LAKEOUT files:
-        #     lakeout = self.output_parameters.get("lakeout_output", None)
-        #     if lakeout:
-        #         lat_lon_crs = lakes[["hl_link", "hl_reference", "geometry"]].rename(columns={"hl_link": "lake_id"})
-        #         lat_lon_crs = lat_lon_crs[lat_lon_crs["hl_reference"] == "WBOut"]
-        #         lat_lon_crs["lake_id"] = lat_lon_crs.lake_id.astype(float).astype(int)
-        #         lat_lon_crs = lat_lon_crs.set_index("lake_id").drop_duplicates().sort_index()
-        #         lat_lon_crs = lat_lon_crs[lat_lon_crs.index.isin(self.waterbody_dataframe.index)]
-        #         lat_lon_crs = lat_lon_crs.to_crs(crs=4326)
-        #         lat_lon_crs["lon"] = lat_lon_crs.geometry.x
-        #         lat_lon_crs["lat"] = lat_lon_crs.geometry.y
-        #         lat_lon_crs["crs"] = str(lat_lon_crs.crs)
-        #         lat_lon_crs = lat_lon_crs[["lon", "lat", "crs"]]
+            self._waterbody_types_df = pd.DataFrame(
+                data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
+            ).sort_index()
 
-        #         self._waterbody_df = self.waterbody_dataframe.join(lat_lon_crs)
-        #     else:
-        #         self._waterbody_df["lon"] = np.nan
-        #         self._waterbody_df["lat"] = np.nan
-        #         self._waterbody_df["crs"] = np.nan
+            # Add Great Lakes waterbody type (6)
+            self._waterbody_types_df.loc[gl_df.index, "reservoir_type"] = 6
 
-        #     # Add the Great Lakes to the connections dictionary and waterbody dataframe
-        #     nexus["WBOut_id"] = nexus["hl_uri"].str.extract(r"WBOut-(\d+)").astype(float)
-        #     great_lakes_df = nexus[nexus["WBOut_id"].isin([4800002, 4800004, 4800006, 4800007])][["WBOut_id", "toid"]]
-        #     if not great_lakes_df.empty:
-        #         great_lakes_df["toid"] = great_lakes_df["toid"].str.extract(r"wb-(\d+)").astype(float)
-        #         great_lakes_df = great_lakes_df.astype(int)
-        #         great_lakes_df["toid"] = great_lakes_df["toid"].apply(lambda x: [x])
-        #         gl_dict = great_lakes_df.set_index("WBOut_id")["toid"].to_dict()
-        #         self._connections.update(gl_dict)
+            self._waterbody_type_specified = True
 
-        #         gl_wbody_df = pd.DataFrame(
-        #             data=np.ones([len(gl_dict), self.waterbody_dataframe.shape[1]]),
-        #             index=gl_dict.keys(),
-        #             columns=self.waterbody_dataframe.columns,
-        #         )
-        #         gl_wbody_df.index.name = self.waterbody_dataframe.index.name
+        else:
+            self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
+                "reservoir_persistence_usgs"
+            ] = False
+            self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
+                "reservoir_persistence_usace"
+            ] = False
+            self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
+                "reservoir_persistence_usbr"
+            ] = False
+            self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
+                "reservoir_persistence_canada"
+            ] = False
+            self.data_assimilation_parameters["reservoir_da"]["reservoir_rfc_da"]["reservoir_rfc_forecasts"] = False
+            self.waterbody_parameters["break_network_at_waterbodies"] = False
 
-        #         self._waterbody_df = pd.concat([self.waterbody_dataframe, gl_wbody_df]).sort_index()
+            self._waterbody_df = pd.DataFrame()
+            self._waterbody_types_df = pd.DataFrame()
+            self._waterbody_connections = {}
+            self._waterbody_type_specified = False
+            self._link_lake_crosswalk = None
+            self._duplicate_ids_df = pd.DataFrame()
+            self.great_lakes_climatology_df = pd.DataFrame()
 
-        #         self._gl_climatology_df = get_great_lakes_climatology()
 
-        #     else:
-        #         gl_dict = {}
-        #         self._gl_climatology_df = pd.DataFrame()
+    
+    def _refactor_reservoirs(self, lake_id_field: str = "lake_id"):
+        """Refactor network connectivity to explicitly represent reservoirs (waterbodies) and their interactions with flowpaths and links.
 
-        #     self._waterbody_types_df = pd.DataFrame(
-        #         data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
-        #     ).sort_index()
+        Conceptual model:
+            - Multiple flowpaths may exist within a single waterbody.
+            - A single flowpath may intersect multiple waterbodies.
 
-        #     # Add Great Lakes waterbody type (6)
-        #     self._waterbody_types_df.loc[gl_dict.keys(), "reservoir_type"] = 6
+        For each flowpath containing at least one waterbody (``outlet_fp``):
+            1. Identify all flowpaths contained within any waterbody intersecting
+            the outlet flowpath (``all_fp``).
+            2. Identify all network links associated with these flowpaths (``all_links``).
+            3. Remove all links in ``all_links`` from the network dataframe.
+            4. For each waterbody associated with ``outlet_fp``, insert ordered
+            connections into the network connectivity structure.
+            5. For each link whose downstream node lies within ``all_links``,
+            redirect its connection to the most upstream waterbody.
+            6. Create a synthetic headwater link (``qlat_link``) that drains into
+            the appropriate waterbody link (``wb_link``).
+            7. Redirect all lateral inflows (qlats) from ``all_fp`` to ``qlat_link``.
 
-        #     self._waterbody_type_specified = True
+        Parameters
+        ----------
+        lake_id_field : str, optional
+            Column name used to uniquely identify waterbodies in the input
+            dataframe. Default is ``"lake_id"``.
 
-        # else:
-        self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
-            "reservoir_persistence_usgs"
-        ] = False
-        self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
-            "reservoir_persistence_usace"
-        ] = False
-        self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
-            "reservoir_persistence_usbr"
-        ] = False
-        self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
-            "reservoir_persistence_canada"
-        ] = False
-        self.data_assimilation_parameters["reservoir_da"]["reservoir_rfc_da"]["reservoir_rfc_forecasts"] = False
-        self.waterbody_parameters["break_network_at_waterbodies"] = False
+        """
+        # Until this is implemented in NHF, spoof here
+        lake_overlaps = self.waterbody_dataframe[["fp_id"]].reset_index().copy()
 
-        self._waterbody_df = pd.DataFrame()
-        self._waterbody_types_df = pd.DataFrame()
-        self._waterbody_connections = {}
-        self._waterbody_type_specified = False
-        self._link_lake_crosswalk = None
-        self._duplicate_ids_df = pd.DataFrame()
+        max_node_id = self.dataframe.index.max()
+        lookup = np.arange(max_node_id + 1)
+        df_rows = []
+        index_vals = []
+        downstream_groups = self.dataframe.groupby("downstream").groups
+        for outlet_fp, wb_group in self.waterbody_dataframe.groupby("fp_id"):
+            # Until this is implemented in NHF, spoof here
+            wb_group["lake_order"] = np.arange(len(wb_group))
+            wb_group = wb_group.sort_values("lake_order")
+
+            # Get all flowpaths associated with the waterbody(ies)
+            all_fp = lake_overlaps[lake_overlaps[lake_id_field].isin(wb_group.index.values)]
+            all_links = self.dataframe[self.dataframe["fp_id"].isin(all_fp["fp_id"])].reset_index()
+            ds_set = set(all_links["downstream"]).difference(all_links["up_node_id"])
+            us_set = set(all_links["up_node_id"]).difference(all_links["downstream"])
+            if len(ds_set) != 1 or len(us_set) != 1:
+                raise ValueError(f"Expected exactly one inlet/outlet for waterbody {outlet_fp}, got {len(us_set)} inlets and {len(ds_set)} outlets")
+            ds, us = ds_set.pop(), us_set.pop()
+
+            # Remove references to those links
+            self.dataframe = self.dataframe.drop(all_links["up_node_id"])                
+            if self._connections is not None:
+                for i in all_links["up_node_id"]:
+                    # Remove connection
+                    self._connections.pop(i)
+            self.zero_nodes = list(set(self.zero_nodes).difference(all_links["up_node_id"].values))
+
+            # Modify connections to use waterbodies instead
+            for i in wb_group.index.values:
+                self.connections[i] = [ds]
+                ds = i
+            for i in downstream_groups.get(us, []):
+                self.connections[i] = [ds]
+
+            # Add synthetic headwater reach
+            headwater = all_links[all_links["fp_id"] == outlet_fp].iloc[0]
+            head_id = int(headwater["up_node_id"])
+            self.connections[head_id] = [ds]
+            headwater["downstream"] = ds
+            row = headwater.drop(labels="up_node_id").to_dict()
+            df_rows.append(row)
+            index_vals.append(head_id)
+
+            # TODO: consider putting these within single condensed for loop with above.
+            # Reroute all div flows to headwater
+            for i in all_links["up_node_id"]:
+                lookup[i] = head_id
+
+            # Remap outflow from waterbody to fps
+            for i in all_links["up_node_id"]:
+                if i in self._fp_outlet_crosswalk:
+                    self._fp_outlet_crosswalk[wb_group.index[0]].extend(self._fp_outlet_crosswalk[i])
+                    del self._fp_outlet_crosswalk[i]
+
+        self.vfp_nex_ids = lookup[self.vfp_nex_ids]
+        self._link_lake_crosswalk = None  # Handled by _fp_outlet_crosswalk
+        self.waterbody_connections = {i: i for i in self.waterbody_dataframe.index}
+
+        row_df = pd.DataFrame(df_rows, index=index_vals)
+        row_df.index.name = self.dataframe.index.name
+        row_df = row_df.astype(self.dataframe.dtypes.to_dict())
+        self.dataframe = pd.concat([self.dataframe, row_df])
+
 
     def preprocess_data_assimilation(
         self,
@@ -583,8 +757,9 @@ class NHFPreprocessMixin:
         #     self._waterbody_types_df.loc[self._rfc_lake_gage_crosswalk.index, "reservoir_type"] = 4
         # else:
         #     self._rfc_lake_gage_crosswalk = pd.DataFrame()
+
         self._gages = {}
-        self._usgs_lake_gage_crosswalk = pd.DataFrame()
+        self._usgs_lake_gage_crosswalk = pd.DataFrame({"usgs_lake_id": [4800002, 4800004],"usgs_gage_id": ["04127885", "04159130"]})
         self._usace_lake_gage_crosswalk = pd.DataFrame()
         self._usbr_lake_gage_crosswalk = pd.DataFrame()
         self._rfc_lake_gage_crosswalk = pd.DataFrame()
