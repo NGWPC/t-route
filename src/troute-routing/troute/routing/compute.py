@@ -513,9 +513,7 @@ class BoundaryConditionStore:
     def generate_view(self, reaches: list[ReachId]) -> dict[ReachId, BoundaryCondition]:
         """Return boundary conditions for the specified upstream reaches."""
         # TODO: add a view cache
-        return {
-            reach_id: bc for reach_id, bc in self.bcs.items() if reach_id in reaches
-        }
+        return {reach_id: self.bcs[reach_id] for reach_id in reaches}
 
     def update(self, reach_id: ReachId, results: np.ndarray) -> None:
         """Store routing results for a tailwater to be used as an upstream boundary condition at the next routing level."""
