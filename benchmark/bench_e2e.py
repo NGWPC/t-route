@@ -186,6 +186,8 @@ def main() -> int:
                   f"{s['mean']:10.2f} {s['stdev']:9.3f}")
 
         # correctness
+        if last_out is None:
+            sys.exit("ERROR: no timed run produced output (need --runs >= 1)")
         new = load_output(last_out)
         status = "n/a"
         report: dict = {}
