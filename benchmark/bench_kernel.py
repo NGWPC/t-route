@@ -166,6 +166,12 @@ def main() -> int:
           f"(worst sampled rel drift {worst_rel:.3e}, gate {REL_DRIFT_GATE:.0e})")
     for line in report:
         print(f"  {line}")
+    print("  reading the numbers: the ms above are the kernel-only replay time")
+    print(f"  per iteration over the harvested {invocations:,} MC-kernel")
+    print("  invocations, with no IO/joblib/Python pipeline, so a lower value")
+    print("  means a faster kernel. 'rel drift' is a sanity check of the replayed")
+    print("  output vs the harvested baseline (should be ~0 for an unchanged")
+    print("  kernel); bench_e2e.py is the authoritative full-output gate.")
 
     print("\nRESULTS.md kernel column:")
     print(f"  median {stats['median']*1000:.2f} ms   ({status})")

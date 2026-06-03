@@ -200,7 +200,7 @@ def main() -> int:
         elif any(golden_dir.glob("troute_output_*.nc")):
             golden = load_output(golden_dir)
             report, worst_rel, new_nan = compare(new, golden)
-            print("\ncorrectness vs golden:")
+            print("\ncorrectness vs golden (candidate minus golden, per variable):")
             for v in COMPARE_VARS:
                 r = report[v]
                 if "status" in r:
@@ -208,8 +208,15 @@ def main() -> int:
                 else:
                     print(f"  {v:10s} max_abs={r['max_abs']:.3e}  "
                           f"max_rel={r['max_rel']:.3e}  new_nan={r['new_nan']}")
+            print("  reading the numbers: max_abs is the absolute diff in physical")
+            print("  units (flow m^3/s, velocity m/s, depth m). max_rel is relative,")
+            print("  |cand-gold| / max(|gold|, 1e-6). FLOW max_rel is the reliable")
+            print("  metric (1e-6 ~ identical, ~1 ~ 100% off at some reach); velocity")
+            print("  and depth max_rel blow up at near-dry nodes (gold ~ 0 in the")
+            print("  denominator), so judge those two by max_abs. new_nan counts")
+            print("  values that became NaN/Inf (the only PASS/FAIL gate here).")
             status = "PASS" if new_nan == 0 else "FAIL (new NaN)"
-            print(f"  -> {status}  (worst rel err {worst_rel:.3e})")
+            print(f"  -> {status}  (gate: no new NaN/Inf; flow worst rel {worst_rel:.3e})")
         else:
             print("\ncorrectness: no golden yet (run with --save-golden first)")
 
