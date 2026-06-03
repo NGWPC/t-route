@@ -285,6 +285,22 @@ class ComputationJob:
             return np.isin(self.river_index, _lake_arr)
         else:
             return None
+    
+    @cached_property
+    def tailwater_results_indices(self) -> list[int]:
+        """The index of tailwaters in the results tuple returned by the kernel for this job.
+
+        The kernel applies fill_index_mask to data_idx before returning, which strips
+        every offnetwork_upstream row. Since offnetwork_upstreams is known at plan-build
+        time, we can reconstruct the same filtered index here and call get_loc on it —
+        giving us O(log n) precomputed positions instead of the O(n) .tolist().index()
+        scan that was previously done at routing time on every call to
+        update_boundary_conditions.
+        """
+        filtered_index = self.river_df.index[
+            ~self.river_df.index.isin(self.offnetwork_upstreams)
+        ]  # kernel will remove these from results array
+        return [filtered_index.get_loc(tw) for tw in self.tailwaters]
 
 @dataclass
 class NetworkTopology:
@@ -783,8 +799,7 @@ class ExecutionPlan:
     ) -> None:
         """Propagate tailwater results from a completed routing level into the boundary condition store."""
         for job_ind, job in enumerate(self.batches[routing_level]):
-            for tailwater in job.tailwaters:
-                tw_result_ind = results[job_ind][0].tolist().index(tailwater)
+            for tailwater, tw_result_ind in zip(job.tailwaters, job.tailwater_results_indices):
                 tw_results = results[job_ind][1][tw_result_ind]
                 self.boundary_conditions.update(tailwater, tw_results)
 
