@@ -134,6 +134,7 @@ class ComputeConfig:
     t0: datetime
     ssout: float
     data_assimilation_parameters: dict[str, Any]
+    da_parameter_dict: dict[str, Any]
     waterbody_type_specified: bool
     assume_short_ts: bool
     return_courant: bool
@@ -168,7 +169,7 @@ class ComputeConfig:
     @property
     def da_decay_coefficient(self) -> float:
         """Data Assimilation decay coefficient for streamflow nudging."""
-        return self.data_assimilation_parameters.get("da_decay_coefficient", 0)
+        return self.da_parameter_dict.get("da_decay_coefficient", 0)
 
 
 @dataclass
@@ -1594,6 +1595,7 @@ def build_compute_package(
         assume_short_ts=config.assume_short_ts,
         return_courant=config.return_courant,
         from_files=config.from_files,
+        qlat_add_loc=config.qlat_add_loc_c
     )
 
 
@@ -1701,7 +1703,8 @@ def compute_nhd_routing_v02(
         qts_subdivisions=qts_subdivisions,
         t0=t0,
         ssout=ssout,
-        data_assimilation_parameters=da_parameter_dict,
+        data_assimilation_parameters=data_assimilation_parameters,
+        da_parameter_dict=da_parameter_dict,
         waterbody_type_specified=waterbody_type_specified,
         assume_short_ts=assume_short_ts,
         return_courant=return_courant,
