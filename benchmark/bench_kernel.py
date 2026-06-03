@@ -36,7 +36,7 @@ import numpy as np
 
 BENCH_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BENCH_DIR))
-from harvest_kernel_inputs import CALLS_PKL, summarize_result  # noqa: E402
+from harvest_kernel_inputs import CALLS_PKL, summarize_result, qlat_from_call  # noqa: E402
 
 RESULTS_DIR = BENCH_DIR / "results"
 
@@ -129,7 +129,7 @@ def main() -> int:
                  "python benchmark/harvest_kernel_inputs.py")
     payload = pickle.load(open(CALLS_PKL, "rb"))
     calls = payload["calls"]
-    invocations = sum(int(c["args"][9].size) for c in calls)
+    invocations = sum(int(qlat_from_call(c["args"], c["kwargs"]).size) for c in calls)
     print(f"loaded {len(calls)} call(s) "
           f"({payload['n_calls_kept']}/{payload['n_calls_total']} from harvest), "
           f"{invocations:,} kernel invocations / iteration")
@@ -137,7 +137,7 @@ def main() -> int:
     from troute.routing.fast_reach.mc_reach import compute_network_structured
 
     samples: list[float] = []
-    last_results = None
+    last_results: list = []
     for i in range(args.warmup + args.runs):
         elapsed, results = replay_once(calls, compute_network_structured)
         if i >= args.warmup:
