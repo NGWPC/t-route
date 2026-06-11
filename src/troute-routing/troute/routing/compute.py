@@ -30,25 +30,22 @@ execution_plan
 """
 
 from __future__ import annotations
-from ast import For
 from collections import defaultdict
 from dataclasses import dataclass, field
-import enum
 from itertools import chain
 from functools import cached_property, partial
-from typing import Any, Callable, Literal, TYPE_CHECKING, Iterable, TypedDict, Union, get_args
+from typing import Any, Callable, Literal, Self, Sequence, TYPE_CHECKING, Iterable, TypedDict, Union, cast, get_args
 from joblib import delayed, Parallel
-from datetime import datetime, timedelta
-import time
+from datetime import datetime
 import pandas as pd
 import numpy as np
-import copy
-import os.path
 
 import troute.nhd_network as nhd_network
 from troute.routing.fast_reach.mc_reach import compute_network_structured
 import troute.routing.diffusive_utils_v02 as diff_utils
-from troute.routing.fast_reach import diffusive
+# Compiled f2py/Cython extension with no stubs -- pyright cannot see the
+# submodule symbol even though it imports fine at runtime.
+from troute.routing.fast_reach import diffusive  # pyright: ignore[reportAttributeAccessIssue]
 
 import logging
 LOG = logging.getLogger("TROUTE")
@@ -56,6 +53,41 @@ LOG = logging.getLogger("TROUTE")
 if TYPE_CHECKING:
     from typing import Annotated
     from numpy.typing import NDArray
+
+    # Typed numpy array aliases. NDArray encodes the element dtype (what the MC
+    # kernel's typed memoryviews enforce) but not shape; use these throughout
+    # the module in annotations in place of the untyped `np.ndarray`.
+    Float32Array = NDArray[np.float32]
+    Float64Array = NDArray[np.float64]
+    Int32Array = NDArray[np.int32]
+    Int64Array = NDArray[np.int64]
+    IntpArray = NDArray[np.intp]
+    BoolArray = NDArray[np.bool_]
+    ObjectArray = NDArray[np.object_]
+
+    # Domain type aliases. Type-check-only: with `from __future__ import
+    # annotations` every use is a string annotation, so they need not exist at
+    # runtime (do not reference them as values, e.g. in cast()/isinstance()).
+    # A single routing link
+    ReachId = int
+    # The outlet of a RoutingPath or tree
+    TailwaterId = ReachId
+    # A connected subset of a tree grouped for dependency management and execution.
+    Partition = set[ReachId]
+    # A contiguous sequence of reaches uninterrupted by confluences, waterbodies, or points of interest.
+    RoutingPath = list[ReachId]
+    # A list of routing paths ordered such that upstream paths are run before any of their downstream dependent paths
+    OrderedRoutingPaths = list[RoutingPath]
+    # A hierarchical rank within a tree where level 0 is the tailwater/root and increasing levels move upstream.
+    RoutingLevel = int
+    # The connection between a reach and downstream reach(es)
+    Adjacency = dict[ReachId, list[ReachId]]
+    # Network connectivity (reach -> downstream reaches) for the full routing graph or a subgraph
+    DownstreamGraph = Adjacency
+    # The connection between a reach and upstream reach(es)
+    UpstreamAdjacency = dict[ReachId, list[ReachId]]
+    # Network connectivity (reach -> upstream reaches) for the full routing graph or a subgraph
+    UpstreamGraph = UpstreamAdjacency
 
 
 PARALLEL_COMPUTE_METHODS = Literal[
@@ -65,12 +97,9 @@ PARALLEL_COMPUTE_METHODS = Literal[
     "serial",
     "bmi"
 ]
-_compute_func_map = defaultdict(
-    compute_network_structured,
-    {
-        "V02-structured": compute_network_structured,
-    },
-)
+_compute_func_map = {
+    "V02-structured": compute_network_structured,
+}
 
 
 # Sentinel empties reused by _prep_reservoir_da_dataframes for the all-DA-disabled
@@ -78,8 +107,9 @@ _compute_func_map = defaultdict(
 # (~1200 times per CONUS run); each else-branch was constructing fresh
 # pd.DataFrame() and pd.DataFrame().to_numpy().reshape(0,) sentinels (~100 µs each,
 # 31 per call) -- ~4 s of wasted BlockManager allocation across the run.
-# These constants are never mutated by callers (downstream code does
-# .values.astype("float32") which copies), so reuse is safe.
+# These constants are never mutated: they are empty (0-size), so the
+# to_numpy(dtype=...) views taken of them downstream have nothing to mutate,
+# and the kernel treats its array inputs as read-only.
 _EMPTY_F64 = np.empty(0, dtype=np.float64)
 _EMPTY_DF = pd.DataFrame()
 _EMPTY_GL_DF = pd.DataFrame(columns=["lake_id", "time", "Discharge"])
@@ -88,40 +118,23 @@ _QLAT_LOC_MAP = {"top": 0, "middle": 1, "bottom": 2}
 
 ### OBJECT DEFINITIONS ###
 
-ReachId = int  # A single routing link
-TailwaterId = ReachId  # The outlet of a RoutingPath or tree
-Partition = set[
-    ReachId
-]  # A connected subset of a tree grouped for dependency management and execution.
-RoutingPath = set[
-    ReachId
-]  # A contiguous sequence of reaches uninterrupted by confluences, waterbodies, or points of interest.
-OrderedRoutingPaths = list[
-    RoutingPath
-]  # A list of routing paths ordered such that upstream paths are run before any of their downstream dependent paths
-RoutingLevel = int  # A hierarchical rank within a tree where level 0 is the tailwater/root and increasing levels move upstream.
-Adjacency = dict[
-    ReachId, list[ReachId]
-]  # The connection between a reach and downstream reach(es)
-DownstreamGraph = dict[
-    ReachId, Adjacency
-]  # A representation of network connectivity for the full routing graph or a subgraph
-UpstreamAdjacency = dict[
-    ReachId, list[ReachId]
-]  # The connection between a reach and upstream reach(es)
-UpstreamGraph = dict[
-    ReachId, UpstreamAdjacency
-]  # A representation of network connectivity for the full routing graph or a subgraph
-Partitions = dict[
-    TailwaterId, DownstreamGraph
-]  # A connected subset of a tree grouped for dependency management and execution.
-
 
 class BoundaryCondition(TypedDict):
     """A storage container for flow values between reaches in different RoutingLevels."""
 
-    results: np.ndarray
+    # None until the producing routing level publishes results via
+    # BoundaryConditionStore.update (and again after clear_data).
+    results: Float32Array | None
     position_index: int
+
+
+def _concat_unique_sorted(dfs: list[pd.DataFrame]) -> pd.DataFrame:
+    """Concatenate per-job frames, dropping duplicated indices (shared
+    offnetwork-upstream ghost rows) and sorting for binary-search use."""
+    if not dfs:
+        return pd.DataFrame()
+    merged = pd.concat(dfs)
+    return merged.loc[~merged.index.duplicated()].sort_index()
 
 
 @dataclass
@@ -144,7 +157,7 @@ class ComputeConfig:
     qlat_add_loc: str
     compute_func_name: str
     subnetwork_target_size: int
-    backend: str = field(default_factory=lambda: "loky")
+    backend: Literal["loky", "threading", "multiprocessing"] = "loky"
 
     def __post_init__(self):
         # Control serial execution by forcing single worker instead of a code change.
@@ -154,7 +167,14 @@ class ComputeConfig:
     @property
     def compute_function(self) -> Callable:
         """Callable routing function."""
-        return _compute_func_map[self.compute_func_name]
+        try:
+            return _compute_func_map[self.compute_func_name]
+        except KeyError:
+            opts = ", ".join(_compute_func_map)
+            raise ValueError(
+                f"compute kernel should be one of {opts} but got "
+                f"{self.compute_func_name!r}"
+            ) from None
 
     @property
     def qlat_add_loc_c(self) -> int:
@@ -169,7 +189,7 @@ class ComputeConfig:
     @property
     def da_decay_coefficient(self) -> float:
         """Data Assimilation decay coefficient for streamflow nudging."""
-        return self.da_parameter_dict.get("da_decay_coefficient", 0)
+        return self.da_parameter_dict.get("da_decay_coefficient", 0.0)
 
 
 @dataclass
@@ -177,7 +197,7 @@ class ComputationJob:
     """A set of routing paths passed together to the routing kernel for execution."""
 
     connections: UpstreamGraph
-    routing_paths: RoutingPath
+    routing_paths: OrderedRoutingPaths
     waterbodies_df: pd.DataFrame
     waterbodies_types_df: pd.DataFrame
     river_df: pd.DataFrame
@@ -196,31 +216,15 @@ class ComputationJob:
         waterbodies_dfs = [
             job.waterbodies_df for job in jobs if not job.waterbodies_df.empty
         ]
-        merged_waterbodies_df = (
-            pd.concat(waterbodies_dfs)
-            .loc[lambda df: ~df.index.duplicated()]
-            .sort_index()
-            if waterbodies_dfs
-            else pd.DataFrame()
-        )
+        merged_waterbodies_df = _concat_unique_sorted(waterbodies_dfs)
         waterbodies_types_dfs = [
             job.waterbodies_types_df
             for job in jobs
             if not job.waterbodies_types_df.empty
         ]
-        merged_waterbodies_types_df = (
-            pd.concat(waterbodies_types_dfs)
-            .loc[lambda df: ~df.index.duplicated()]
-            .sort_index()
-            if waterbodies_types_dfs
-            else pd.DataFrame()
-        )
+        merged_waterbodies_types_df = _concat_unique_sorted(waterbodies_types_dfs)
         river_dfs = [job.river_df for job in jobs if not job.river_df.empty]
-        merged_river_df = (
-            pd.concat(river_dfs).loc[lambda df: ~df.index.duplicated()].sort_index()
-            if river_dfs
-            else pd.DataFrame()
-        )
+        merged_river_df = _concat_unique_sorted(river_dfs)
         merged_tailwaters = list(chain.from_iterable(job.tailwaters for job in jobs))
         merged_offnetwork_upstreams: set[ReachId] = set().union(
             *(job.offnetwork_upstreams for job in jobs)
@@ -238,16 +242,19 @@ class ComputationJob:
     @cached_property
     def waterbody_reaches(self) -> list[ReachId]:
         """Reach IDs for all waterbodies in this job."""
-        return list(self.waterbodies_df.index.values)
+        return list(self.waterbodies_df.index.to_numpy())
 
     @cached_property
     def waterbody_set(self) -> set[ReachId]:
         return set(self.waterbody_reaches)
 
     @cached_property
-    def river_reaches(self) -> NDArray[np.int64]:
+    def river_reaches(self) -> Int64Array:
         """Reach IDs for all river segments in this job."""
-        return self.river_df.index.values
+        # dtype=int64 matches the kernel's `const long[:] data_idx` memoryview
+        # (C long is 64-bit on the LP64 targets); a mismatch would raise a
+        # Cython buffer-dtype error at the call.
+        return self.river_df.index.to_numpy(dtype="int64")
 
     @cached_property
     def reach_types(self) -> list[tuple[Any, int]]:
@@ -255,52 +262,58 @@ class ComputationJob:
         return _build_reach_type_list(self.routing_paths, self.waterbody_set)
 
     @cached_property
-    def waterbody_types(self) -> np.ndarray:
+    def waterbody_types(self) -> Int32Array:
         """Waterbody type codes."""
-        return self.waterbodies_types_df.values.astype("int32")
+        return self.waterbodies_types_df.to_numpy(dtype="int32")
 
     @cached_property
-    def river_fields(self) -> np.ndarray:
+    def river_fields(self) -> ObjectArray:
         """Column names of the river parameter DataFrame."""
-        return self.river_df.columns.values
+        return self.river_df.columns.to_numpy()
 
     @cached_property
-    def river_values(self) -> np.ndarray:
+    def river_values(self) -> Float32Array:
         """River parameter values as a 2-D array."""
-        return self.river_df.values
+        # dtype=float32 matches the kernel's `const float[:,:] data_values`
+        # memoryview (river_df is already float32 via param_df.astype, so this
+        # is a no-copy view; the cast just makes the contract explicit here).
+        return self.river_df.to_numpy(dtype="float32")
 
-    @cached_property
-    def waterbody_values(self) -> np.ndarray:
-        """Waterbody parameter values as a 2-D array."""
-        return self.waterbodies_df.values
+    # NOTE: no cached property for waterbodies_df.values -- build_compute_package
+    # mutates the frame's h0 column on every run set (the state-transfer step),
+    # so a cached values array would freeze the first run set's elevations.
 
     @cached_property
     def river_index(self) -> pd.Index:
         return pd.Index(self.river_reaches)
 
     @cached_property
-    def lake_mask(self) -> Union[np.ndarray, None]:
+    def lake_mask(self) -> BoolArray | None:
         if len(self.waterbody_reaches) > 0:
             _lake_arr = np.fromiter(self.waterbody_set, dtype=np.int64, count=len(self.waterbody_set))
             return np.isin(self.river_index, _lake_arr)
-        else:
-            return None
-    
+
     @cached_property
-    def tailwater_results_indices(self) -> list[int]:
+    def tailwater_results_indices(self) -> IntpArray:
         """The index of tailwaters in the results tuple returned by the kernel for this job.
 
         The kernel applies fill_index_mask to data_idx before returning, which strips
         every offnetwork_upstream row. Since offnetwork_upstreams is known at plan-build
-        time, we can reconstruct the same filtered index here and call get_loc on it —
-        giving us O(log n) precomputed positions instead of the O(n) .tolist().index()
-        scan that was previously done at routing time on every call to
-        update_boundary_conditions.
+        time, we reconstruct the same filtered index here and get_indexer the tailwaters
+        against it in one vectorized call — giving precomputed positions instead of the
+        O(n) .tolist().index() scan that was previously done at routing time on every
+        call to update_boundary_conditions.
         """
-        filtered_index = self.river_df.index[
-            ~self.river_df.index.isin(self.offnetwork_upstreams)
-        ]  # kernel will remove these from results array
-        return [filtered_index.get_loc(tw) for tw in self.tailwaters]
+        # kernel will remove these from results array
+        filtered_index = self.river_df.index[~self.river_df.index.isin(self.offnetwork_upstreams)]
+        # get_indexer accepts list-likes at runtime; the stub over-narrows to Index.
+        positions = filtered_index.get_indexer(self.tailwaters)  # pyright: ignore[reportArgumentType]
+        # Tailwaters are this job's outlets, so always in the stripped result index;
+        # a -1 would silently take the wrong result row, so fail loud.
+        if (positions < 0).any():
+            missing = [tw for tw, p in zip(self.tailwaters, positions) if p < 0]
+            raise KeyError(f"tailwaters not in job result index: {missing[:5]}")
+        return positions
 
 @dataclass
 class NetworkTopology:
@@ -308,7 +321,7 @@ class NetworkTopology:
 
     connections: DownstreamGraph
     reverse_connections: UpstreamGraph
-    paths_by_tailwater: dict[TailwaterId, RoutingPath]
+    paths_by_tailwater: dict[TailwaterId, OrderedRoutingPaths]
     connections_by_tw: dict[TailwaterId, DownstreamGraph]
 
     @property
@@ -323,13 +336,28 @@ class ReachData:
 
     dataframe: pd.DataFrame
 
+    def __post_init__(self) -> None:
+        # Precompute the column subset AND the index as a set once. generate_view()
+        # and the per-job reach intersection in ExecutionPlan._build_compute_job
+        # both run once per subnetwork (tens of thousands at CONUS scale); a
+        # label-based .loc / pandas Index.intersection on the full reach frame each
+        # time made plan construction O(jobs x frame) and dominated CONUS wall time.
+        # A precomputed column view + positional take, and a set intersection, are
+        # O(len(reaches)) per call.
+        cols = ["dt", "bw", "tw", "twcc", "dx", "n", "ncc", "cs", "s0", "alt"]
+        self._view = None if self.dataframe.empty else self.dataframe[cols]
+        self._index_set: set[ReachId] = set(self.dataframe.index)
+
     def generate_view(self, reaches: list[ReachId]) -> pd.DataFrame:
         """Subset data to a set of reaches."""
-        if self.dataframe.empty:
+        if self._view is None:
             return pd.DataFrame()
-        return self.dataframe.loc[
-            reaches, ["dt", "bw", "tw", "twcc", "dx", "n", "ncc", "cs", "s0", "alt"]
-        ]
+        # get_indexer accepts list-likes at runtime; the stub over-narrows to Index.
+        positions = self._view.index.get_indexer(reaches)  # pyright: ignore[reportArgumentType]
+        if (positions < 0).any():
+            missing = [r for r, p in zip(reaches, positions) if p < 0]
+            raise KeyError(f"reaches not in ReachData: {missing[:5]}")
+        return self._view.take(positions)
 
 
 @dataclass
@@ -339,28 +367,36 @@ class WaterbodyData:
     dataframe: pd.DataFrame
     types: pd.DataFrame
 
+    def __post_init__(self) -> None:
+        # Precompute the column subset AND the index as a set once. generate_view()
+        # and the per-job lake intersection in ExecutionPlan._build_compute_job both
+        # run once per subnetwork (tens of thousands at CONUS scale); a label-based
+        # .loc / pandas Index.intersection on the full frame each time made plan
+        # construction O(jobs x frame). A precomputed view + positional take, and a
+        # set intersection, are O(len(reaches)) per call.
+        cols = ["LkArea", "LkMxE", "OrificeA", "OrificeC", "OrificeE",
+                "WeirC", "WeirE", "WeirL", "ifd", "qd0", "h0"]
+        self._view = None if self.dataframe.empty else self.dataframe[cols]
+        self._index_set: set[ReachId] = set(self.dataframe.index)
+
     def generate_view(
         self, reaches: list[ReachId]
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Subset data to a set of reaches."""
-        if self.dataframe.empty:
+        if self._view is None:
             return pd.DataFrame(), pd.DataFrame()
-        return self.dataframe.loc[
-            reaches,
-            [
-                "LkArea",
-                "LkMxE",
-                "OrificeA",
-                "OrificeC",
-                "OrificeE",
-                "WeirC",
-                "WeirE",
-                "WeirL",
-                "ifd",
-                "qd0",
-                "h0",
-            ],
-        ], self.types.loc[reaches]
+        # Positional take instead of label .loc (see ReachData.generate_view). The
+        # dataframe and types frames are looked up independently in case their
+        # indexes differ in order; a -1 (missing label) raises rather than silently
+        # taking the last row, preserving the old .loc KeyError behaviour.
+        # get_indexer accepts list-likes at runtime; the stub over-narrows to Index.
+        positions = self._view.index.get_indexer(reaches)  # pyright: ignore[reportArgumentType]
+        types_positions = self.types.index.get_indexer(reaches)  # pyright: ignore[reportArgumentType]
+        if (positions < 0).any() or (types_positions < 0).any():
+            missing = [r for r, p in zip(reaches, positions) if p < 0]
+            missing += [r for r, p in zip(reaches, types_positions) if p < 0]
+            raise KeyError(f"waterbodies not in WaterbodyData: {missing[:5]}")
+        return self._view.take(positions), self.types.take(types_positions)
 
 
 @dataclass
@@ -373,39 +409,39 @@ class ForcingData:
     h0: pd.DataFrame
 
     @cached_property
-    def qlat_vals(self) -> np.ndarray:
-        return self.qlats.to_numpy(copy=False)
+    def qlat_vals(self) -> Float32Array:
+        return self.qlats.to_numpy()
 
     @cached_property
-    def qlat_idx(self) -> np.ndarray:
+    def qlat_idx(self) -> pd.Index:
         return self.qlats.index
 
     @cached_property
-    def qlat_cols(self) -> np.ndarray:
+    def qlat_cols(self) -> pd.Index:
         return self.qlats.columns
 
     @cached_property
-    def q0_vals(self) -> np.ndarray:
-        return self.q0.to_numpy(copy=False)
+    def q0_vals(self) -> Float32Array:
+        return self.q0.to_numpy()
 
     @cached_property
-    def q0_idx(self) -> np.ndarray:
+    def q0_idx(self) -> pd.Index:
         return self.q0.index
 
     @cached_property
-    def q0_cols(self) -> np.ndarray:
+    def q0_cols(self) -> pd.Index:
         return self.q0.columns
 
     @cached_property
-    def eloss_vals(self) -> np.ndarray:
-        return self.eloss.to_numpy(copy=False)
+    def eloss_vals(self) -> Float64Array:
+        return self.eloss.to_numpy()
 
     @cached_property
-    def eloss_idx(self) -> np.ndarray:
+    def eloss_idx(self) -> pd.Index:
         return self.eloss.index
 
     @cached_property
-    def eloss_cols(self) -> np.ndarray:
+    def eloss_cols(self) -> pd.Index:
         return self.eloss.columns
 
 
@@ -438,64 +474,64 @@ class ComputeInputs:
     qts_subdivisions: int
     reaches_wTypes: list[tuple[list[int], int]]
     upstream_connections: dict[int, list[int]]
-    data_idx: NDArray[np.int64]
-    data_cols: NDArray[np.object_]
-    data_values: NDArray[np.float32]
-    initial_conditions: NDArray[np.float32]
-    qlat_values: NDArray[np.float32]
-    eloss_values: NDArray[np.float32]
+    data_idx: Int64Array
+    data_cols: ObjectArray
+    data_values: Float32Array
+    initial_conditions: Float32Array
+    qlat_values: Float32Array
+    eloss_values: Float32Array
     ssout: float
     lake_numbers_col: list[int]
-    wbody_cols: NDArray[np.float64]
+    wbody_cols: Float64Array
     data_assimilation_parameters: dict[str, Any]
-    reservoir_types: NDArray[np.int32]
+    reservoir_types: Int32Array
     reservoir_type_specified: bool
     model_start_time: str
-    usgs_values: NDArray[np.float32]
-    usgs_positions: NDArray[np.int32]
-    usgs_positions_reach: NDArray[np.int32]
-    usgs_positions_gage: NDArray[np.int32]
-    lastobs_values_init: NDArray[np.float32]
-    time_since_lastobs_init: NDArray[np.float32]
+    usgs_values: Float32Array
+    usgs_positions: Int32Array
+    usgs_positions_reach: Int32Array
+    usgs_positions_gage: Int32Array
+    lastobs_values_init: Float32Array
+    time_since_lastobs_init: Float32Array
     da_decay_coefficient: float
-    reservoir_usgs_obs: NDArray[np.float32]
-    reservoir_usgs_wbody_idx: NDArray[np.int32]
-    reservoir_usgs_time: NDArray[np.float32]
-    reservoir_usgs_update_time: NDArray[np.float32]
-    reservoir_usgs_prev_persisted_flow: NDArray[np.float32]
-    reservoir_usgs_persistence_update_time: NDArray[np.float32]
-    reservoir_usgs_persistence_index: NDArray[np.float32]
-    reservoir_usace_obs: NDArray[np.float32]
-    reservoir_usace_wbody_idx: NDArray[np.int32]
-    reservoir_usace_time: NDArray[np.float32]
-    reservoir_usace_update_time: NDArray[np.float32]
-    reservoir_usace_prev_persisted_flow: NDArray[np.float32]
-    reservoir_usace_persistence_update_time: NDArray[np.float32]
-    reservoir_usace_persistence_index: NDArray[np.float32]
-    reservoir_usbr_obs: NDArray[np.float32]
-    reservoir_usbr_wbody_idx: NDArray[np.int32]
-    reservoir_usbr_time: NDArray[np.float32]
-    reservoir_usbr_update_time: NDArray[np.float32]
-    reservoir_usbr_prev_persisted_flow: NDArray[np.float32]
-    reservoir_usbr_persistence_update_time: NDArray[np.float32]
-    reservoir_usbr_persistence_index: NDArray[np.float32]
-    reservoir_rfc_obs: NDArray[np.float32]
-    reservoir_rfc_wbody_idx: NDArray[np.int32]
-    reservoir_rfc_totalCounts: NDArray[np.int32]
+    reservoir_usgs_obs: Float32Array
+    reservoir_usgs_wbody_idx: Int32Array
+    reservoir_usgs_time: Float32Array
+    reservoir_usgs_update_time: Float32Array
+    reservoir_usgs_prev_persisted_flow: Float32Array
+    reservoir_usgs_persistence_update_time: Float32Array
+    reservoir_usgs_persistence_index: Float32Array
+    reservoir_usace_obs: Float32Array
+    reservoir_usace_wbody_idx: Int32Array
+    reservoir_usace_time: Float32Array
+    reservoir_usace_update_time: Float32Array
+    reservoir_usace_prev_persisted_flow: Float32Array
+    reservoir_usace_persistence_update_time: Float32Array
+    reservoir_usace_persistence_index: Float32Array
+    reservoir_usbr_obs: Float32Array
+    reservoir_usbr_wbody_idx: Int32Array
+    reservoir_usbr_time: Float32Array
+    reservoir_usbr_update_time: Float32Array
+    reservoir_usbr_prev_persisted_flow: Float32Array
+    reservoir_usbr_persistence_update_time: Float32Array
+    reservoir_usbr_persistence_index: Float32Array
+    reservoir_rfc_obs: Float32Array
+    reservoir_rfc_wbody_idx: Int32Array
+    reservoir_rfc_totalCounts: Int32Array
     reservoir_rfc_file: list[str]
-    reservoir_rfc_use_forecast: NDArray[np.int32]
-    reservoir_rfc_timeseries_idx: NDArray[np.int32]
-    reservoir_rfc_update_time: NDArray[np.float32]
-    reservoir_rfc_da_timestep: NDArray[np.int32]
-    reservoir_rfc_persist_days: NDArray[np.int32]
-    great_lakes_idx: NDArray[np.int32]
-    great_lakes_times: NDArray[np.int32]
-    great_lakes_discharge: NDArray[np.float32]
-    great_lakes_param_idx: NDArray[np.int32]
-    great_lakes_param_prev_assim_flow: NDArray[np.float32]
-    great_lakes_param_prev_assim_times: NDArray[np.int32]
-    great_lakes_param_update_times: NDArray[np.int32]
-    great_lakes_climatology: NDArray[np.float32]
+    reservoir_rfc_use_forecast: Int32Array
+    reservoir_rfc_timeseries_idx: Int32Array
+    reservoir_rfc_update_time: Float32Array
+    reservoir_rfc_da_timestep: Int32Array
+    reservoir_rfc_persist_days: Int32Array
+    great_lakes_idx: Int32Array
+    great_lakes_times: Int32Array
+    great_lakes_discharge: Float32Array
+    great_lakes_param_idx: Int32Array
+    great_lakes_param_prev_assim_flow: Float32Array
+    great_lakes_param_prev_assim_times: Int32Array
+    great_lakes_param_update_times: Int32Array
+    great_lakes_climatology: Float32Array
     upstream_results: dict[int, Any] = field(default_factory=dict)
     assume_short_ts: bool = False
     return_courant: bool = False
@@ -510,12 +546,12 @@ class BoundaryConditionStore:
 
     bcs: dict[ReachId, BoundaryCondition]
 
-    def generate_view(self, reaches: list[ReachId]) -> dict[ReachId, BoundaryCondition]:
+    def generate_view(self, reaches: Iterable[ReachId]) -> dict[ReachId, BoundaryCondition]:
         """Return boundary conditions for the specified upstream reaches."""
         # TODO: add a view cache
         return {reach_id: self.bcs[reach_id] for reach_id in reaches}
 
-    def update(self, reach_id: ReachId, results: np.ndarray) -> None:
+    def update(self, reach_id: ReachId, results: Float32Array) -> None:
         """Store routing results for a tailwater to be used as an upstream boundary condition at the next routing level."""
         self.bcs[reach_id]["results"] = results
 
@@ -583,22 +619,20 @@ class ExecutionPlan:
         all_upstreams = set().union(*(graph.get(seg, ()) for seg in flat_reaches))
         offnetwork_upstreams = all_upstreams - flat_reaches
 
-        # Get data for offnetwork upstreams too
+        # Get data for offnetwork upstreams too. Keep flat_reaches a set -- its
+        # only consumers are the two intersections below.
         flat_reaches |= offnetwork_upstreams
-        flat_reaches = sorted(flat_reaches)
 
-        # subset waterbodies
-        lake_reaches = sorted(
-            list(waterbody_data.dataframe.index.intersection(flat_reaches))
-        )
+        # subset waterbodies -- intersect the precomputed index set rather than
+        # calling pandas Index.intersection(list) per job, which coerced the list
+        # to an Index and dominated CONUS plan-build wall (~22k subnetworks).
+        lake_reaches = sorted(waterbody_data._index_set & flat_reaches)
         waterbodies_df, waterbodies_types_df = waterbody_data.generate_view(
             lake_reaches
         )
 
         # subset reaches
-        river_reaches = sorted(
-            list(reach_data.dataframe.index.intersection(flat_reaches))
-        )
+        river_reaches = sorted(reach_data._index_set & flat_reaches)
         river_df = reach_data.generate_view(river_reaches)
 
         # Extend river_df with NaN rows for lake reaches so that data_idx
@@ -607,7 +641,7 @@ class ExecutionPlan:
         # including cases where the upstream is a reservoir. The old code
         # achieved this via param_df_sub.reindex(...+lake_segs).sort_index().
         if lake_reaches:
-            extended_index = np.sort(np.concatenate([river_df.index.values, lake_reaches]))
+            extended_index = np.sort(np.concatenate([river_df.index.to_numpy(), lake_reaches]))
             river_df = river_df.reindex(extended_index)
 
         # Create subnetwork instance
@@ -713,8 +747,8 @@ class ExecutionPlan:
                 ):
                     path_func = partial(
                         nhd_network.split_at_gages_waterbodies_and_junctions,
-                        set(assimilation_data.usgs_df.index.values),
-                        set(waterbody_data.dataframe.index.values),
+                        set(assimilation_data.usgs_df.index.to_numpy()),
+                        set(waterbody_data.dataframe.index.to_numpy()),
                         rconn_subn,
                     )
 
@@ -724,7 +758,7 @@ class ExecutionPlan:
                 ):
                     path_func = partial(
                         nhd_network.split_at_gages_and_junctions,
-                        set(assimilation_data.usgs_df.index.values),
+                        set(assimilation_data.usgs_df.index.to_numpy()),
                         rconn_subn,
                     )
 
@@ -780,17 +814,34 @@ class ExecutionPlan:
 
     def _init_boundary_conditions(self) -> None:
         """Pre-allocate boundary condition slots for every off-network upstream reach in the plan."""
-        partial_boundary_conditions = defaultdict(dict)
-        for batch in self.batches.values():
+        boundary_conditions: dict[ReachId, BoundaryCondition] = {}
+        claimed_level: dict[ReachId, RoutingLevel] = {}
+        for routing_level, batch in self.batches.items():
             for job in batch:
                 for upstream_reach in job.offnetwork_upstreams:
-                    position_index = job.river_df.index.get_loc(upstream_reach)
-                    partial_boundary_conditions[upstream_reach]["position_index"] = (
-                        position_index
+                    if upstream_reach in claimed_level:
+                        raise NotImplementedError(
+                            f"off-network upstream reach {upstream_reach} is "
+                            f"consumed by computation jobs at routing levels "
+                            f"{claimed_level[upstream_reach]} and {routing_level}. "
+                            "The boundary condition store holds a single "
+                            "position_index per reach, so a second consumer would "
+                            "fill its boundary row at the wrong position (silent "
+                            "numeric corruption). This arises on networks with "
+                            "flow divergences; store positions per job to "
+                            "support them."
+                        )
+                    claimed_level[upstream_reach] = routing_level
+                    # get_loc returns int for a unique scalar label (slice/mask
+                    # only for duplicate/monotonic-range labels, impossible here).
+                    position_index = cast(
+                        int, job.river_df.index.get_loc(upstream_reach)
                     )
-        self.boundary_conditions = BoundaryConditionStore(
-            dict(partial_boundary_conditions)
-        )
+                    boundary_conditions[upstream_reach] = {
+                        "results": None,
+                        "position_index": position_index,
+                    }
+        self.boundary_conditions = BoundaryConditionStore(boundary_conditions)
 
     def update_boundary_conditions(
         self, results: list[tuple], routing_level: RoutingLevel
@@ -801,7 +852,7 @@ class ExecutionPlan:
                 tw_results = results[job_ind][1][tw_result_ind]
                 self.boundary_conditions.update(tailwater, tw_results)
 
-    def export_job_list(self) -> None:
+    def export_job_list(self, path: str = "parallelization.parquet") -> None:
         """Useful for debugging."""
         out_dict = {"reach_id": [], "batch": [], "job_num": []}
         for routing_level, batch in self.batches.items():
@@ -811,7 +862,7 @@ class ExecutionPlan:
                         out_dict["reach_id"].append(reach)
                         out_dict["batch"].append(routing_level)
                         out_dict["job_num"].append(job_ind)
-        pd.DataFrame(out_dict).to_parquet("parallelization.parquet")
+        pd.DataFrame(out_dict).to_parquet(path)
 
 
 def _format_qlat_start_time(qlat_start_time):
@@ -842,8 +893,8 @@ def _build_reach_type_list(reach_list, wbodies_segs):
 
 
 def _reindex_via_take(values_arr, positions, fill_value=np.nan):
-    # Equivalent to df.reindex(<index whose .get_indexer is positions>).to_numpy(copy=False)
-    # given values_arr = df.to_numpy(copy=False). pd.api.extensions.take dispatches
+    # Equivalent to df.reindex(<index whose .get_indexer is positions>).to_numpy()
+    # given values_arr = df.to_numpy(). pd.api.extensions.take dispatches
     # to the pandas Cython take primitive (_take_nd_ndarray), which handles the
     # -1-means-missing semantics natively via allow_fill=True. ``values_arr`` must
     # be the cached ndarray view of the source DataFrame -- calling df.to_numpy()
@@ -1287,7 +1338,7 @@ def compute_log_mc(
         if (nH20_types>0):
             for nH20 in range(nH20_types):
                 preRunLog.write("Type: "+str(waterbody_types_df.value_counts().index[nH20][0]))
-                preRunLog.write("   Number of waterbodies: "+str(waterbody_types_df.value_counts().values[nH20])+'\n')
+                preRunLog.write("   Number of waterbodies: "+str(waterbody_types_df.value_counts().to_numpy()[nH20])+'\n')
         preRunLog.write("-----\n")
         preRunLog.write("Gages and relations with waterbodies:\n")
         preRunLog.write("Number of USGS gages in network: "+str(len(usgs_df.index))+'\n')
@@ -1440,7 +1491,10 @@ def build_compute_package(
         columns=forcing.eloss_cols,
     )
 
-    # Update h0
+    # Update h0. This in-place update of the job's waterbody frame is the
+    # run-set state-transfer mechanism: the execution plan (and its per-job
+    # frames) is reused across run sets, and each run set re-applies the
+    # network's current waterbody elevations here before packaging.
     job.waterbodies_df.update(forcing.h0)
 
     # Build streamflow DA dataframes
@@ -1512,40 +1566,39 @@ def build_compute_package(
         data_idx=job.river_reaches,
         data_cols=job.river_fields,
         data_values=job.river_values,
-        # to_numpy(dtype=..., copy=False) returns a view
-        # when the source already matches the requested
-        # dtype (q0 is float32 after
-        # build_channel_initial_state, qlats is float32
-        # after np.stack of CHRTOUT data); for eloss_df
-        # (built as pd.DataFrame(0.0, ...) which is
-        # float64) the copy still fires, same as the
-        # original .values.astype("float32") chain.
-        initial_conditions=q0_sub.to_numpy(dtype="float32", copy=False),
-        qlat_values=qlat_sub.to_numpy(dtype="float32", copy=False),
-        eloss_values=eloss_sub.to_numpy(dtype="float32", copy=False),
+        # to_numpy(dtype=...) does not force a copy (copy
+        # defaults to False), so it returns a view when the
+        # source already matches the requested dtype (q0 is
+        # float32 after build_channel_initial_state, qlats is
+        # float32 after np.stack of CHRTOUT data); for eloss_df
+        # (built as pd.DataFrame(0.0, ...) which is float64)
+        # the float64 -> float32 cast still forces a copy.
+        initial_conditions=q0_sub.to_numpy(dtype="float32"),
+        qlat_values=qlat_sub.to_numpy(dtype="float32"),
+        eloss_values=eloss_sub.to_numpy(dtype="float32"),
         ssout=config.ssout,
         lake_numbers_col=job.waterbody_reaches,
-        wbody_cols=job.waterbodies_df.values,
+        wbody_cols=job.waterbodies_df.to_numpy(dtype="float64"),  # kernel: const double[:,:]
         data_assimilation_parameters=config.data_assimilation_parameters,
         reservoir_types=job.waterbody_types,
         reservoir_type_specified=config.waterbody_type_specified,
         model_start_time=config.t0_str,
-        usgs_values=usgs_df_sub.values.astype("float32"),
+        usgs_values=usgs_df_sub.to_numpy(dtype="float32"),
         usgs_positions=np.array(da_positions_list_byseg, dtype="int32"),
         usgs_positions_reach=np.array(da_positions_list_byreach, dtype="int32"),
         usgs_positions_gage=np.array(da_positions_list_bygage, dtype="int32"),
         lastobs_values_init=lastobs_df_sub.get(
             "lastobs_discharge",
             pd.Series(index=lastobs_df_sub.index, name="Null", dtype="float32"),
-        ).values.astype("float32"),
+        ).to_numpy(dtype="float32"),
         time_since_lastobs_init=lastobs_df_sub.get(
             "time_since_lastobs",
             pd.Series(index=lastobs_df_sub.index, name="Null", dtype="float32"),
-        ).values.astype("float32"),
+        ).to_numpy(dtype="float32"),
         da_decay_coefficient=config.da_decay_coefficient,
         # USGS Hybrid Reservoir DA data
-        reservoir_usgs_obs=reservoir_usgs_df_sub.values.astype("float32"),
-        reservoir_usgs_wbody_idx=reservoir_usgs_df_sub.index.values.astype("int32"),
+        reservoir_usgs_obs=reservoir_usgs_df_sub.to_numpy(dtype="float32"),
+        reservoir_usgs_wbody_idx=reservoir_usgs_df_sub.index.to_numpy(dtype="int32"),
         reservoir_usgs_time=reservoir_usgs_df_time.astype("float32"),
         reservoir_usgs_update_time=reservoir_usgs_update_time.astype("float32"),
         reservoir_usgs_prev_persisted_flow=reservoir_usgs_prev_persisted_flow.astype(
@@ -1558,8 +1611,8 @@ def build_compute_package(
             "float32"
         ),
         # USACE Hybrid Reservoir DA data
-        reservoir_usace_obs=reservoir_usace_df_sub.values.astype("float32"),
-        reservoir_usace_wbody_idx=reservoir_usace_df_sub.index.values.astype("int32"),
+        reservoir_usace_obs=reservoir_usace_df_sub.to_numpy(dtype="float32"),
+        reservoir_usace_wbody_idx=reservoir_usace_df_sub.index.to_numpy(dtype="int32"),
         reservoir_usace_time=reservoir_usace_df_time.astype("float32"),
         reservoir_usace_update_time=reservoir_usace_update_time.astype("float32"),
         reservoir_usace_prev_persisted_flow=reservoir_usace_prev_persisted_flow.astype(
@@ -1572,8 +1625,8 @@ def build_compute_package(
             "float32"
         ),
         # USBR Hybrid Reservoir DA data
-        reservoir_usbr_obs=reservoir_usbr_df_sub.values.astype("float32"),
-        reservoir_usbr_wbody_idx=reservoir_usbr_df_sub.index.values.astype("int32"),
+        reservoir_usbr_obs=reservoir_usbr_df_sub.to_numpy(dtype="float32"),
+        reservoir_usbr_wbody_idx=reservoir_usbr_df_sub.index.to_numpy(dtype="int32"),
         reservoir_usbr_time=reservoir_usbr_df_time.astype("float32"),
         reservoir_usbr_update_time=reservoir_usbr_update_time.astype("float32"),
         reservoir_usbr_prev_persisted_flow=reservoir_usbr_prev_persisted_flow.astype(
@@ -1586,8 +1639,8 @@ def build_compute_package(
             "float32"
         ),
         # RFC Reservoir DA data
-        reservoir_rfc_obs=reservoir_rfc_df_sub.values.astype("float32"),
-        reservoir_rfc_wbody_idx=reservoir_rfc_df_sub.index.values.astype("int32"),
+        reservoir_rfc_obs=reservoir_rfc_df_sub.to_numpy(dtype="float32"),
+        reservoir_rfc_wbody_idx=reservoir_rfc_df_sub.index.to_numpy(dtype="int32"),
         reservoir_rfc_totalCounts=reservoir_rfc_totalCounts.astype("int32"),
         reservoir_rfc_file=reservoir_rfc_file,
         reservoir_rfc_use_forecast=reservoir_rfc_use_forecast.astype("int32"),
@@ -1596,14 +1649,14 @@ def build_compute_package(
         reservoir_rfc_da_timestep=reservoir_rfc_da_timestep.astype("int32"),
         reservoir_rfc_persist_days=reservoir_rfc_persist_days.astype("int32"),
         # Great Lakes DA data
-        great_lakes_idx=gl_df_sub.lake_id.values.astype("int32"),
-        great_lakes_times=gl_df_sub.time.values.astype("int32"),
-        great_lakes_discharge=gl_df_sub.Discharge.values.astype("float32"),
+        great_lakes_idx=gl_df_sub.lake_id.to_numpy(dtype="int32"),
+        great_lakes_times=gl_df_sub.time.to_numpy(dtype="int32"),
+        great_lakes_discharge=gl_df_sub.Discharge.to_numpy(dtype="float32"),
         great_lakes_param_idx=gl_parm_lake_id_sub.astype("int32"),
         great_lakes_param_prev_assim_flow=gl_param_flows_sub.astype("float32"),
         great_lakes_param_prev_assim_times=gl_param_time_sub.astype("int32"),
         great_lakes_param_update_times=gl_param_update_time_sub.astype("int32"),
-        great_lakes_climatology=gl_climatology_df_sub.values.astype("float32"),
+        great_lakes_climatology=gl_climatology_df_sub.to_numpy(dtype="float32"),
         upstream_results=interorder_boundaries,
         assume_short_ts=config.assume_short_ts,
         return_courant=config.return_courant,
@@ -1650,8 +1703,10 @@ def compute_routing(
 
                 jobs.append(delayed(config.compute_function)(**vars(package)))
 
-            # Compute and collect results
-            level_results = parallel(jobs)
+            # Compute and collect results. joblib's stub returns a
+            # list/generator union; with the default backend and no
+            # return_as override this is always a list of result tuples.
+            level_results = cast("list[tuple]", parallel(jobs))
             results.extend(level_results)
             if routing_level > 0:
                 execution_plan.update_boundary_conditions(level_results, routing_level)
@@ -1708,6 +1763,16 @@ def compute_nhd_routing_v02(
     qlat_add_loc: Literal["top", "middle", "bottom"] = "middle",
 ) -> tuple[RoutingResultsCollection, ExecutionPlan]:
     """Build typed routing objects from legacy flat arguments and delegate to compute_routing."""
+    if flowveldepth_interorder:
+        raise NotImplementedError(
+            "flowveldepth_interorder (inter-domain boundary exchange for coupled "
+            "BMI runs) is not supported by the refactored compute path. The "
+            "legacy implementation injected these values as upstream boundary "
+            "conditions and wrote tailwater results back into this dict; "
+            "silently ignoring them would route without the upstream inflow. "
+            "Wire the dict through ExecutionPlan.boundary_conditions to "
+            "support coupled runs."
+        )
     param_df["dt"] = dt
     param_df = param_df.astype("float32")
     config = ComputeConfig(
@@ -1754,10 +1819,14 @@ def compute_nhd_routing_v02(
         lastobs_df = lastobs_df,
     )
 
-    if subnetwork_list == [None, None, None]:
-        subnetwork_list = None
-    results, subnetwork_list = compute_routing(config, topology, reach_data, waterbody_data, forcing_data, assimilation_data, subnetwork_list)
-    return results, subnetwork_list
+    if isinstance(subnetwork_list, ExecutionPlan):
+        execution_plan = subnetwork_list
+    else:
+        # Legacy callers pass a [None, None, None] sentinel (or another
+        # placeholder list) on the first run set -> build a fresh plan.
+        execution_plan = None
+    results, execution_plan = compute_routing(config, topology, reach_data, waterbody_data, forcing_data, assimilation_data, execution_plan)
+    return results, execution_plan
 
 
 def compute_diffusive_routing(
@@ -1793,9 +1862,11 @@ def compute_diffusive_routing(
                     trib_segs = i[0][x]
                     trib_flow = i[1][x, ::3]
                 else:
-                    if trib_segs is None:
+                    # trib_segs and trib_flow are always set together; the
+                    # second check gives the type checker that invariant.
+                    if trib_segs is None or trib_flow is None:
                         trib_segs = i[0][x]
-                        trib_flow = i[1][x, ::3]                        
+                        trib_flow = i[1][x, ::3]
                     else:
                         trib_segs = np.append(trib_segs, i[0][x])
                         trib_flow = np.append(trib_flow, i[1][x, ::3], axis = 0)  
@@ -1908,7 +1979,7 @@ def compute_diffusive_routing(
 
 
 class _RoutingResultsParser:
-    def __init__(self, raw_results: tuple):
+    def __init__(self, raw_results: tuple | list):
         self._raw = raw_results
 
     def __getitem__(self, index: int):
@@ -1921,32 +1992,32 @@ class _RoutingResultsParser:
         return len(self._raw)
 
     @property
-    def ids(self) -> np.ndarray[tuple[int], np.intp]:
+    def ids(self) -> IntpArray:
         """Segment IDs as 1D array"""
         return self._raw[0]
 
-    def _append(self, a: np.ndarray, b: np.ndarray):
+    def _append(self, a: NDArray[Any], b: NDArray[Any]):
         axis = len(a.shape) - 1
         return np.concatenate([a, b], axis=axis)
 
-    def append(self, other: _RoutingResultsParser):
-        copy = list(self)
+    def append(self, other: Self):
+        copy: list[Any] = list(self)
         # skip first element as that is the ID
         for i in range(1, len(self)):
             copy[i] = self._append(self[i], other[i])
         return self.__class__(copy)
 
     @classmethod
-    def merge(cls, to_merge: list[_RoutingResultsParser]):
+    def merge(cls, to_merge: Sequence[Self]):
         size = len(to_merge[0])
-        data = [None] * size
+        data: list[Any] = [None] * size
         for i in range(size):
             data[i] = np.concatenate([r[i] for r in to_merge], axis=0)
         return cls(data)
 
-    def align_ids(self, source: _RoutingResultsParser):
+    def align_ids(self, source: Self):
         if self.ids.size and not np.array_equal(self.ids, source.ids):
-            copy = [None] * len(self)
+            copy: list[Any] = [None] * len(self)
             sorter = np.argsort(source.ids)
             for i, item in enumerate(self):
                 copy[i] = item[sorter]
@@ -1960,7 +2031,9 @@ class _RoutingResultsParser:
 
 
 class RoutingResultsCollection:
-    def __init__(self, results: Iterable[tuple]):
+    def __init__(self, results: Iterable[Any]):
+        # Each element is a raw kernel result tuple, or an existing
+        # RoutingResults (itself indexable), e.g. from append_timesteps.
         self.results = [RoutingResults(r) for r in results]
 
     def __getitem__(self, index: int):
@@ -1984,7 +2057,9 @@ class RoutingResultsCollection:
                 columns=columns,
             )
             dfs.append(df)
-        flowveldepth = pd.concat(dfs, copy=False)
+        # copy=False is valid in pandas 2.x (a no-op under copy-on-write) but
+        # absent from pandas-stubs' concat signature.
+        flowveldepth = pd.concat(dfs, copy=False)  # pyright: ignore[reportCallIssue]
         if drop_ql:
             flowveldepth = flowveldepth.drop(columns=[
                 col for col in flowveldepth.columns if col[1] == "ql"
@@ -2003,7 +2078,8 @@ class RoutingResultsCollection:
                 columns=columns,
             )
             dfs.append(df)
-        return pd.concat(dfs, copy=False)
+        # copy=False: see flow_velocity_depth (pandas-stubs gap).
+        return pd.concat(dfs, copy=False)  # pyright: ignore[reportCallIssue]
 
     def courant(self, nts: int):
         columns = pd.MultiIndex.from_product(
@@ -2017,7 +2093,8 @@ class RoutingResultsCollection:
                 columns=columns,
             )
             dfs.append(df)
-        return pd.concat(dfs, copy=False)
+        # copy=False: see flow_velocity_depth (pandas-stubs gap).
+        return pd.concat(dfs, copy=False)  # pyright: ignore[reportCallIssue]
 
     def nudge(self):
         return np.concatenate(
@@ -2055,9 +2132,12 @@ class RoutingResultsCollection:
 
 
 class RoutingResults(_RoutingResultsParser):
-    def align_ids(self, source: RoutingResults):
+    # Parser instances are only ever aligned/appended with their own kind
+    # (see append_timesteps), so narrowing the base's parameter is safe in
+    # practice even though it is not LSP-clean.
+    def align_ids(self, source: RoutingResults):  # pyright: ignore[reportIncompatibleMethodOverride]
         if not np.array_equal(self.ids, source.ids):
-            self = RoutingResults(list(self))
+            self = self.__class__(list(self))
             sorter = np.argsort(source.ids)
             self.ids = self.ids[sorter]
             self.flow = self.flow[sorter]
@@ -2072,8 +2152,8 @@ class RoutingResults(_RoutingResultsParser):
         self.great_lakes = self.great_lakes.align_ids(source.great_lakes)
         return self
 
-    def append(self, other: RoutingResults):
-        appended = RoutingResults(list(self))
+    def append(self, other: RoutingResults):  # pyright: ignore[reportIncompatibleMethodOverride]
+        appended = self.__class__(list(self))
         appended.flow = self._append(self.flow, other.flow)
         appended.lastobs = self.lastobs.append(other.lastobs)
         appended.usgs_reservoir = self.usgs_reservoir.append(other.usgs_reservoir)
@@ -2087,7 +2167,7 @@ class RoutingResults(_RoutingResultsParser):
         return appended
 
     @property
-    def ids(self) -> np.ndarray[tuple[int], np.intp]:
+    def ids(self) -> IntpArray:
         """Catchment IDs as 1D array"""
         return self._raw[0]
     @ids.setter
@@ -2095,7 +2175,7 @@ class RoutingResults(_RoutingResultsParser):
         self._set_index(value, 0)
 
     @property
-    def flow(self) -> np.ndarray[tuple[int], np.dtype[np.float32]]:
+    def flow(self) -> Float32Array:
         """Flow velocity depth 2D array: (num_ids, nts * 4)"""
         return self._raw[1]
     @flow.setter
@@ -2139,7 +2219,7 @@ class RoutingResults(_RoutingResultsParser):
         self._set_index(list(value), 6)
 
     @property
-    def upstream(self) -> np.ndarray[tuple[int], np.float32]:
+    def upstream(self) -> Float32Array:
         """Upstream 2D array: (num_ids, nts)"""
         return self._raw[7]
     @upstream.setter
@@ -2154,7 +2234,7 @@ class RoutingResults(_RoutingResultsParser):
         self._set_index(value, 8)
 
     @property
-    def nudge(self) -> np.ndarray[tuple[int, int], np.float32]:
+    def nudge(self) -> Float32Array:
         """Nudge 2D array: (num_ids, nts + 1)"""
         return self._raw[9]
     @nudge.setter
@@ -2171,51 +2251,51 @@ class RoutingResults(_RoutingResultsParser):
 
 class RoutingLastObs(_RoutingResultsParser):
     @property
-    def times(self) -> np.ndarray[tuple[int], np.float32]:
+    def times(self) -> Float32Array:
         return self._raw[1]
 
     @property
-    def values(self) -> np.ndarray[tuple[int], np.float32]:
+    def values(self) -> Float32Array:
         return self._raw[2]
 
 
 class RoutingReservoir(_RoutingResultsParser):
     @property
-    def update_times(self) -> np.ndarray[tuple[int], np.float32]:
+    def update_times(self) -> Float32Array:
         return self._raw[1]
 
     @property
-    def persisted_outflow(self) -> np.ndarray[tuple[int], np.float32]:
+    def persisted_outflow(self) -> Float32Array:
         return self._raw[2]
 
     @property
-    def persistence_index(self) -> np.ndarray[tuple[int], np.float32]:
+    def persistence_index(self) -> Float32Array:
         return self._raw[3]
 
     @property
-    def persistence_update_time(self) -> np.ndarray[tuple[int], np.float32]:
+    def persistence_update_time(self) -> Float32Array:
         return self._raw[4]
 
 
 class RoutingRfc(_RoutingResultsParser):
     @property
-    def update_times(self) -> np.ndarray[tuple[int], np.float32]:
+    def update_times(self) -> Float32Array:
         return self._raw[1]
 
     @property
-    def timeseries(self) -> np.ndarray[tuple[int], np.intp]:
+    def timeseries(self) -> IntpArray:
         return self._raw[2]
 
 
 class RoutingGreatLakes(_RoutingResultsParser):
     @property
-    def outflows(self) -> np.ndarray[tuple[int], np.float32]:
+    def outflows(self) -> Float32Array:
         return self._raw[1]
 
     @property
-    def timestamps(self) -> np.ndarray[tuple[int], np.intp]:
+    def timestamps(self) -> IntpArray:
         return self._raw[2]
 
     @property
-    def update_times(self) -> np.ndarray[tuple[int], np.intp]:
+    def update_times(self) -> IntpArray:
         return self._raw[3]
