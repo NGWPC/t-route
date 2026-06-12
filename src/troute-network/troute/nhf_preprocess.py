@@ -468,7 +468,11 @@ class NHFPreprocessMixin:
             else:
                 self.great_lakes_climatology_df = pd.DataFrame()
 
-            # Clean fp_id type
+            # Clean fp_id type. A few lakes have no fp_id (NaN) -- notably a Great
+            # Lake re-added by the deprecated gl_df concat above; drop those rows
+            # before the int cast. (The broader set of ~1300 NaN-fp_id lakes is
+            # being addressed separately upstream.)
+            self._waterbody_df = self._waterbody_df.dropna(subset=["fp_id"]).copy()
             self._waterbody_df["fp_id"] = self._waterbody_df["fp_id"].astype(int)
 
             # Condense flowpaths in a reservoir to single level pool node
@@ -485,8 +489,11 @@ class NHFPreprocessMixin:
                 data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
             ).sort_index()
 
-            # Add Great Lakes waterbody type (6)
-            self._waterbody_types_df.loc[gl_df.index, "reservoir_type"] = 6
+            # Add Great Lakes waterbody type (6), only for Great Lakes still in the
+            # waterbody set (a Great Lake with NaN fp_id was dropped above, so
+            # gl_df.index can reference rows no longer present).
+            gl_present = gl_df.index.intersection(self._waterbody_types_df.index)
+            self._waterbody_types_df.loc[gl_present, "reservoir_type"] = 6
 
             self._waterbody_type_specified = True
 
@@ -543,8 +550,20 @@ class NHFPreprocessMixin:
             dataframe. Default is ``"lake_id"``.
 
         """
-        # Until this is implemented in NHF, spoof here
-        lake_overlaps = self.waterbody_dataframe[["fp_id"]].reset_index().copy()
+        # Precompute the routing links of every waterbody flowpath ONCE. The
+        # original code re-scanned the full (multi-million-row) link table with
+        # `self.dataframe["fp_id"].isin(...)` and dropped from it once per
+        # waterbody -- O(n_links x n_waterbodies), tens of minutes at CONUS. A
+        # waterbody's links are exactly the links whose fp_id == its fp_id, so one
+        # isin (restricted to waterbody fps) plus one groupby gives an O(1) lookup.
+        wb_fp_ids = set(self.waterbody_dataframe["fp_id"].dropna())
+        wb_links = self.dataframe[self.dataframe["fp_id"].isin(wb_fp_ids)].reset_index()
+        links_by_fp = {fp: sub for fp, sub in wb_links.groupby("fp_id")}
+
+        # Build the connections graph from the full link table up front so the
+        # per-waterbody pops below are uniform; dataframe / zero_nodes removals are
+        # accumulated and applied once after the loop.
+        _ = self.connections
 
         # Sparse node remap (node_id -> waterbody headwater node) for links that
         # are absorbed into a waterbody; every other node maps to itself. Using a
@@ -554,28 +573,38 @@ class NHFPreprocessMixin:
         node_remap: dict[int, int] = {}
         df_rows = []
         index_vals = []
+        skipped_wb: list[int] = []
+        nodes_removed: list[int] = []
         downstream_groups = self.dataframe.groupby("downstream").groups
         for outlet_fp, wb_group in self.waterbody_dataframe.groupby("fp_id"):
             # Until this is implemented in NHF, spoof here
             wb_group["lake_order"] = np.arange(len(wb_group))
             wb_group = wb_group.sort_values("lake_order")
 
-            # Get all flowpaths associated with the waterbody(ies)
-            all_fp = lake_overlaps[lake_overlaps[lake_id_field].isin(wb_group.index.values)]
-            all_links = self.dataframe[self.dataframe["fp_id"].isin(all_fp["fp_id"])].reset_index()
+            # Routing links of this waterbody's flowpath (None if its flowpath was
+            # eliminated in discretization -> nothing to model as a reservoir).
+            all_links = links_by_fp.get(outlet_fp)
+            if all_links is None:
+                skipped_wb.extend(int(i) for i in wb_group.index.values)
+                continue
             ds_set = set(all_links["downstream"]).difference(all_links["up_node_id"])
             us_set = set(all_links["up_node_id"]).difference(all_links["downstream"])
             if len(ds_set) != 1 or len(us_set) != 1:
-                raise ValueError(f"Expected exactly one inlet/outlet for waterbody {outlet_fp}, got {len(us_set)} inlets and {len(ds_set)} outlets")
+                # This waterbody does not collapse to a single inlet -> outlet
+                # chain (its flowpath was eliminated/merged in discretization, or
+                # it spans a junction). Skip it: its links are left untouched in
+                # self.dataframe and route as plain MC channels. Mirrors the
+                # bandaid() fallback used for problematic NHD/HYFeatures lakes.
+                skipped_wb.extend(int(i) for i in wb_group.index.values)
+                continue
             ds, us = ds_set.pop(), us_set.pop()
 
-            # Remove references to those links
-            self.dataframe = self.dataframe.drop(all_links["up_node_id"])                
-            if self._connections is not None:
-                for i in all_links["up_node_id"]:
-                    # Remove connection
-                    self._connections.pop(i)
-            self.zero_nodes = list(set(self.zero_nodes).difference(all_links["up_node_id"].values))
+            # Remove references to those links. dataframe / zero_nodes removals are
+            # accumulated for a single post-loop drop; only the connections dict is
+            # updated per waterbody here (cheap O(group) dict pops).
+            nodes_removed.extend(int(i) for i in all_links["up_node_id"].values)
+            for i in all_links["up_node_id"]:
+                self._connections.pop(i)
 
             # Modify connections to use waterbodies instead
             for i in wb_group.index.values:
@@ -610,6 +639,21 @@ class NHFPreprocessMixin:
                 if moved is not None:
                     self._fp_outlet_crosswalk[wb_outlet].extend(moved)
 
+        # Apply the accumulated waterbody-link removals to the dataframe and
+        # zero_nodes in one shot (instead of one drop per waterbody).
+        if nodes_removed:
+            self.dataframe = self.dataframe.drop(nodes_removed)
+            self.zero_nodes = list(set(self.zero_nodes).difference(nodes_removed))
+
+        # Demote un-routable waterbodies to plain MC channels: drop them from the
+        # waterbody set so routing won't model them as reservoirs (their links are
+        # already left intact in self.dataframe).
+        if skipped_wb:
+            import sys as _sys
+            print(f"NHF reservoirs: demoted {len(skipped_wb)} waterbod(ies) to MC "
+                  f"channels (no single inlet/outlet chain)", file=_sys.stderr)
+            self.waterbody_dataframe = self.waterbody_dataframe.drop(skipped_wb)
+
         # Apply the sparse remap; unmapped nodes keep their own id (identity).
         if node_remap:
             vfp_nodes = pd.Series(self.vfp_nex_ids)
@@ -617,6 +661,26 @@ class NHFPreprocessMixin:
                 vfp_nodes.map(node_remap).fillna(vfp_nodes)
                 .to_numpy().astype(self.vfp_nex_ids.dtype)
             )
+            # Rebuild the connections graph after the per-waterbody rewiring:
+            #  - drop stale keys: downstream_groups is precomputed from the original
+            #    dataframe, so rewiring waterbody B can re-add another waterbody A's
+            #    already-removed link as a key (connections[i] = [ds_B]); such keys
+            #    have no routing data behind them and crash binary_find. A's outflow
+            #    still reaches downstream through A's own waterbody chain.
+            #  - redirect any edge still pointing at a removed waterbody link to its
+            #    replacement headwater (node_remap), so a waterbody draining into
+            #    another waterbody's now-removed inlet does not dangle, and
+            #  - drop edges that point at a network terminal: the rewiring sets
+            #    wb -> outlet directly, but extract_connections represents a
+            #    terminal-bound segment as having no downstream ([]); a terminal
+            #    left in as a value crashes subnetwork construction.
+            terminals = set(self._terminal_codes) if self._terminal_codes else set()
+            stale_keys = set(node_remap) - set(index_vals)
+            self._connections = {
+                k: [r for r in (node_remap.get(x, x) for x in v) if r not in terminals]
+                for k, v in self.connections.items()
+                if k not in stale_keys
+            }
         self._link_lake_crosswalk = None  # Handled by _fp_outlet_crosswalk
         self.waterbody_connections = {i: i for i in self.waterbody_dataframe.index}
 
