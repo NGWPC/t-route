@@ -297,12 +297,17 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # Make weights
         self.weights = np.nan_to_num(vfp_map["percentage_area_contribution"].to_numpy())
 
-        # In case NHF percents per div don't sum to 100, distribute remainder evenly
-        groups = vfp_map["div_id"].astype("int64").to_numpy()
-        known_sum = np.bincount(groups, weights=self.weights)
-        vfp_count = np.bincount(groups)
+        # In case NHF percents per div don't sum to 100, distribute remainder evenly.
+        # Factorize div_id to dense 0..K-1 group codes before bincount. div_id may be
+        # a large, sparse identifier (NHF >= 1.2.0 ids are ~1e15), and bincount on the
+        # raw values would allocate a max(div_id)-sized array. Indexing the per-group
+        # results back with `codes` is identical to indexing with the raw div_ids, so
+        # the result is unchanged on dense-id datasets (e.g. NHF 1.1.4).
+        codes, _ = pd.factorize(vfp_map["div_id"].astype("int64").to_numpy(), sort=False)
+        known_sum = np.bincount(codes, weights=self.weights)
+        vfp_count = np.bincount(codes)
         share = np.divide(1 - known_sum, vfp_count, out=np.zeros_like(vfp_count, dtype=float), where=vfp_count!=0)
-        self.weights += share[groups]
+        self.weights += share[codes]
 
         # Set class variables
         self.vfp_nex_ids = vfp_map["up_node_id"].to_numpy()

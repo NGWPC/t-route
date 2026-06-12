@@ -427,7 +427,14 @@ class NHFPreprocessMixin:
                     "WeirL",
                 ]
             ].copy()
-            self._waterbody_df[lake_id_field] = self._waterbody_df[lake_id_field].astype(int)
+            # lake_id is an integer in NHF 1.1.4 but text in >= 1.2.0, where a few
+            # rows are non-numeric/empty. Coerce and drop the un-parseable ones; on
+            # 1.1.4 this is a no-op (already integer, nothing coerced or dropped).
+            lake_ids = pd.to_numeric(self._waterbody_df[lake_id_field], errors="coerce")
+            if lake_ids.isna().any():
+                self._waterbody_df = self._waterbody_df[lake_ids.notna()].copy()
+                lake_ids = lake_ids[lake_ids.notna()]
+            self._waterbody_df[lake_id_field] = lake_ids.astype(int)
             self._waterbody_df = self.waterbody_dataframe.set_index(lake_id_field).drop_duplicates().sort_index()
 
             # Extract Great Lakes
@@ -539,8 +546,12 @@ class NHFPreprocessMixin:
         # Until this is implemented in NHF, spoof here
         lake_overlaps = self.waterbody_dataframe[["fp_id"]].reset_index().copy()
 
-        max_node_id = self.dataframe.index.max()
-        lookup = np.arange(max_node_id + 1)
+        # Sparse node remap (node_id -> waterbody headwater node) for links that
+        # are absorbed into a waterbody; every other node maps to itself. Using a
+        # dict instead of a dense np.arange(max_node_id + 1) lookup table avoids
+        # allocating a max(node_id)-sized array, which is fatal for large/sparse
+        # node ids (NHF >= 1.2.0). Behavior is identical on dense-id datasets.
+        node_remap: dict[int, int] = {}
         df_rows = []
         index_vals = []
         downstream_groups = self.dataframe.groupby("downstream").groups
@@ -583,17 +594,29 @@ class NHFPreprocessMixin:
             index_vals.append(head_id)
 
             # TODO: consider putting these within single condensed for loop with above.
-            # Reroute all div flows to headwater
-            for i in all_links["up_node_id"]:
-                lookup[i] = head_id
+            # Reroute all div flows to headwater (every up_node maps to the same
+            # head_id, so dict.fromkeys over the vectorized int list beats a
+            # per-element Python loop + int() cast).
+            node_remap.update(dict.fromkeys(all_links["up_node_id"].astype(int).tolist(), head_id))
 
-            # Remap outflow from waterbody to fps
-            for i in all_links["up_node_id"]:
-                if i in self._fp_outlet_crosswalk:
-                    self._fp_outlet_crosswalk[wb_group.index[0]].extend(self._fp_outlet_crosswalk[i])
-                    del self._fp_outlet_crosswalk[i]
+            # Remap outflow from waterbody links onto the waterbody's outlet
+            # crosswalk. pop() collapses the in/getitem/del triple lookup into one,
+            # and the target id is constant per waterbody so hoist it out. (A
+            # waterbody id is always > max(dataframe.index) >= every up_node_id, so
+            # the target is never itself one of the popped links.)
+            wb_outlet = wb_group.index[0]
+            for i in all_links["up_node_id"].astype(int).tolist():
+                moved = self._fp_outlet_crosswalk.pop(i, None)
+                if moved is not None:
+                    self._fp_outlet_crosswalk[wb_outlet].extend(moved)
 
-        self.vfp_nex_ids = lookup[self.vfp_nex_ids]
+        # Apply the sparse remap; unmapped nodes keep their own id (identity).
+        if node_remap:
+            vfp_nodes = pd.Series(self.vfp_nex_ids)
+            self.vfp_nex_ids = (
+                vfp_nodes.map(node_remap).fillna(vfp_nodes)
+                .to_numpy().astype(self.vfp_nex_ids.dtype)
+            )
         self._link_lake_crosswalk = None  # Handled by _fp_outlet_crosswalk
         self.waterbody_connections = {i: i for i in self.waterbody_dataframe.index}
 
