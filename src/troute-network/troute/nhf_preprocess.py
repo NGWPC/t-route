@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from itertools import starmap
 from typing import Optional
@@ -10,6 +11,13 @@ import pyogrio
 from troute.rfc_lake_gage_crosswalk import get_great_lakes_climatology
 import xarray as xr
 from joblib import Parallel, delayed
+
+LOG = logging.getLogger("TROUTE")
+
+# Great Lakes lake ids: present in the NHF lakes layer but carrying no
+# level-pool parameters (LkArea is NaN); their flows come exclusively from
+# data assimilation, so they are excluded from reservoir routing.
+GREAT_LAKES_IDS = (4800002, 4800004, 4800006, 4800007)
 
 # Channel-parameter columns of `flowpaths` consumed by the Muskingum-Cunge
 # kernel. Non-finite (NaN/Inf) values in any of these would propagate
@@ -350,6 +358,120 @@ def _groupby_to_list_dict(df, key_col, val_col):
     return {k.item(): g.tolist() for k, g in zip(unique_keys, groups)}
 
 
+def _clean_waterbodies(
+    waterbody_df: pd.DataFrame, lake_id_field: str = "lake_id"
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Step-by-step NHF waterbody cleanup, with every dropped category counted
+    and logged as a warning so data problems are visible instead of silently
+    filtered.
+
+    Steps, in order (mirroring the historical inline cleaning):
+      1. lake_id integrity: coerce to numeric (the column is text in
+         NHF >= 1.2.0) and drop rows whose lake_id cannot be parsed.
+      2. index + dedup: set lake_id as the index and drop duplicated rows
+         (pre-existing semantics: duplicates are judged on the parameter
+         columns only, since pandas ignores the index).
+      3. Great Lakes: extracted for the climatology / data-assimilation
+         wiring; they carry no level-pool parameters in NHF and are not
+         routed as reservoirs.
+      4. elevation consistency: OrificeE <= WeirE <= LkMxE must hold for
+         level-pool routing; violating lakes are dropped with a warning
+         (previously the whole run failed on the first violation).
+      5. fp_id anchoring: drop lakes with no fp_id -- they cannot be placed
+         on a routing flowpath (the hydrofabric fix for these is tracked
+         upstream).
+      6. parameter completeness: drop lakes missing any level-pool
+         parameter (this is where the Great Lakes fall out).
+
+    Returns ``(clean_df, gl_df)``: the routable waterbody table (integer
+    lake_id index, sorted, fp_id as int) and the raw Great Lakes rows.
+    """
+    n_raw = len(waterbody_df)
+
+    # 1. lake_id integrity
+    lake_ids = pd.to_numeric(waterbody_df[lake_id_field], errors="coerce")
+    n_bad_id = int(lake_ids.isna().sum())
+    if n_bad_id:
+        LOG.warning(
+            "waterbodies: dropped %d of %d lakes with a non-numeric or "
+            "missing lake_id", n_bad_id, n_raw,
+        )
+        waterbody_df = waterbody_df[lake_ids.notna()].copy()
+        lake_ids = lake_ids[lake_ids.notna()]
+    waterbody_df[lake_id_field] = lake_ids.astype(int)
+
+    # 2. index + dedup
+    waterbody_df = waterbody_df.set_index(lake_id_field)
+    n_before = len(waterbody_df)
+    waterbody_df = waterbody_df.drop_duplicates().sort_index()
+    n_dup = n_before - len(waterbody_df)
+    if n_dup:
+        LOG.warning("waterbodies: dropped %d duplicated parameter rows", n_dup)
+
+    # 3. Great Lakes
+    gl_df = waterbody_df[waterbody_df.index.isin(GREAT_LAKES_IDS)].copy()
+    if not gl_df.empty:
+        LOG.warning(
+            "waterbodies: %d Great Lakes present; they carry no level-pool "
+            "parameters and are excluded from reservoir routing (their flows "
+            "come from data assimilation; their flowpaths route as MC "
+            "channels)", len(gl_df),
+        )
+
+    # 4. elevation consistency: a level-pool reservoir violating
+    # OrificeE <= WeirE <= LkMxE is physically inconsistent and cannot be
+    # routed; drop it and warn instead of failing the whole run.
+    bad_elev = (waterbody_df["OrificeE"] > waterbody_df["WeirE"]) | (
+        waterbody_df["WeirE"] > waterbody_df["LkMxE"]
+    )
+    n_bad_elev = int(bad_elev.sum())
+    if n_bad_elev:
+        LOG.warning(
+            "waterbodies: dropped %d lakes with inconsistent elevations "
+            "(OrificeE <= WeirE <= LkMxE must hold for level-pool routing)",
+            n_bad_elev,
+        )
+        LOG.debug(
+            "inconsistent-elevation lake ids: %s",
+            waterbody_df.index[bad_elev].tolist(),
+        )
+        waterbody_df = waterbody_df[~bad_elev]
+
+    # 5. fp_id anchoring
+    fp_na = waterbody_df["fp_id"].isna()
+    n_no_fp = int(fp_na.sum())
+    if n_no_fp:
+        LOG.warning(
+            "waterbodies: dropped %d lakes with no fp_id (cannot be anchored "
+            "to a routing flowpath)", n_no_fp,
+        )
+        waterbody_df = waterbody_df[~fp_na]
+
+    # 6. parameter completeness
+    n_before = len(waterbody_df)
+    waterbody_df = waterbody_df.dropna()
+    n_no_param = n_before - len(waterbody_df)
+    if n_no_param:
+        LOG.warning(
+            "waterbodies: dropped %d lakes missing level-pool parameters",
+            n_no_param,
+        )
+
+    waterbody_df = waterbody_df.copy()
+    waterbody_df["fp_id"] = waterbody_df["fp_id"].astype(int)
+    summary = (
+        "waterbodies: %d of %d lakes retained for reservoir routing",
+        len(waterbody_df), n_raw,
+    )
+    if len(waterbody_df) < n_raw:
+        # Dropped lakes require special care from t-route consumers: their
+        # flowpaths route as plain MC channels, not reservoirs.
+        LOG.warning(*summary)
+    else:
+        LOG.info(*summary)
+    return waterbody_df, gl_df
+
+
 class NHFPreprocessMixin:
     """Mixin providing preprocessing methods for the NHF class."""
 
@@ -427,31 +549,11 @@ class NHFPreprocessMixin:
                     "WeirL",
                 ]
             ].copy()
-            # lake_id is an integer in NHF 1.1.4 but text in >= 1.2.0, where a few
-            # rows are non-numeric/empty. Coerce and drop the un-parseable ones; on
-            # 1.1.4 this is a no-op (already integer, nothing coerced or dropped).
-            lake_ids = pd.to_numeric(self._waterbody_df[lake_id_field], errors="coerce")
-            if lake_ids.isna().any():
-                self._waterbody_df = self._waterbody_df[lake_ids.notna()].copy()
-                lake_ids = lake_ids[lake_ids.notna()]
-            self._waterbody_df[lake_id_field] = lake_ids.astype(int)
-            self._waterbody_df = self.waterbody_dataframe.set_index(lake_id_field).drop_duplicates().sort_index()
-
-            # Extract Great Lakes
-            gl_df = self.waterbody_dataframe[self.waterbody_dataframe.index.isin([4800002, 4800004, 4800006, 4800007])].copy()
-
-            # Validate
-            rows = self._waterbody_df[self._waterbody_df["OrificeE"] > self._waterbody_df["WeirE"]]
-            if len(rows) > 0:
-                ids = rows[lake_id_field].values
-                raise ValueError(f"Orifice elevation must be less than or equal to weir elevation.  This was not the case at {ids}")
-            rows = self._waterbody_df[self._waterbody_df["WeirE"] > self._waterbody_df["LkMxE"]]
-            if len(rows) > 0:
-                ids = rows[lake_id_field].values
-                raise ValueError(f"Weir elevation must be less than or equal to maximum lake elevation.  This was not the case at {ids}")
-
-            # Drop any waterbodies that do not have parameters
-            self._waterbody_df = self.waterbody_dataframe.dropna()
+            # Step-by-step cleanup; every dropped category is counted and logged
+            # as a warning (see _clean_waterbodies).
+            self._waterbody_df, gl_df = _clean_waterbodies(
+                self._waterbody_df, lake_id_field
+            )
 
             # Add a large value to the lake_ids to create synthetic IDs and avoid conflicts.
             max_df_id = max(self.dataframe.index) + 1 if not self.dataframe.index.empty else 0
@@ -459,22 +561,13 @@ class NHFPreprocessMixin:
             self._waterbody_df = self._waterbody_df.rename_axis(lake_id_field)
             self._duplicate_ids_df = pd.DataFrame()  # Relic from how hyfeatures and NHD handled this. We add relationship to _fp_outlet_crosswalk 
 
-            # Do NOT re-add the Great Lakes to the routable waterbody set: the NHF
-            # lakes layer carries no level-pool parameters for them (LkArea is NaN,
-            # which is why dropna() removed them above), so they cannot be routed
-            # as reservoirs; their flowpaths route as plain MC channels instead.
-            # Newer versions of T-Route get Great Lakes flows exclusively from data
-            # assimilation, which only needs the climatology loaded here.
+            # The Great Lakes are not in the routable waterbody set (see
+            # _clean_waterbodies); only the climatology, which data assimilation
+            # consumes, is loaded here.
             if not gl_df.empty:
                 self.great_lakes_climatology_df = get_great_lakes_climatology()
             else:
                 self.great_lakes_climatology_df = pd.DataFrame()
-
-            # Clean fp_id type. A few lakes have no fp_id (NaN); drop those rows
-            # before the int cast. (The broader set of ~1300 NaN-fp_id lakes is
-            # being addressed separately upstream.)
-            self._waterbody_df = self._waterbody_df.dropna(subset=["fp_id"]).copy()
-            self._waterbody_df["fp_id"] = self._waterbody_df["fp_id"].astype(int)
 
             # Condense flowpaths in a reservoir to single level pool node
             self._refactor_reservoirs(lake_id_field)
@@ -650,9 +743,13 @@ class NHFPreprocessMixin:
         # waterbody set so routing won't model them as reservoirs (their links are
         # already left intact in self.dataframe).
         if skipped_wb:
-            import sys as _sys
-            print(f"NHF reservoirs: demoted {len(skipped_wb)} waterbod(ies) to MC "
-                  f"channels (no single inlet/outlet chain)", file=_sys.stderr)
+            LOG.warning(
+                "waterbodies: demoted %d lakes to MC channels (their links do "
+                "not form a single inlet -> outlet chain: the flowpath was "
+                "eliminated in discretization or spans a junction)",
+                len(skipped_wb),
+            )
+            LOG.debug("demoted waterbody ids: %s", sorted(skipped_wb))
             self.waterbody_dataframe = self.waterbody_dataframe.drop(skipped_wb)
 
         # Apply the sparse remap; unmapped nodes keep their own id (identity).
