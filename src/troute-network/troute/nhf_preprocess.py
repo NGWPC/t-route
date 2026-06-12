@@ -459,17 +459,18 @@ class NHFPreprocessMixin:
             self._waterbody_df = self._waterbody_df.rename_axis(lake_id_field)
             self._duplicate_ids_df = pd.DataFrame()  # Relic from how hyfeatures and NHD handled this. We add relationship to _fp_outlet_crosswalk 
 
-            # Add the Great Lakes to the connections dictionary and waterbody dataframe
-            # NOTE: This dataset never appears to be used.  Newer versions of T-Route CLI get great lakes flows 
-            # exclusively from data assimilation. Consider removing in future.
+            # Do NOT re-add the Great Lakes to the routable waterbody set: the NHF
+            # lakes layer carries no level-pool parameters for them (LkArea is NaN,
+            # which is why dropna() removed them above), so they cannot be routed
+            # as reservoirs; their flowpaths route as plain MC channels instead.
+            # Newer versions of T-Route get Great Lakes flows exclusively from data
+            # assimilation, which only needs the climatology loaded here.
             if not gl_df.empty:
-                self.waterbody_dataframe = pd.concat([self.waterbody_dataframe, gl_df])
                 self.great_lakes_climatology_df = get_great_lakes_climatology()
             else:
                 self.great_lakes_climatology_df = pd.DataFrame()
 
-            # Clean fp_id type. A few lakes have no fp_id (NaN) -- notably a Great
-            # Lake re-added by the deprecated gl_df concat above; drop those rows
+            # Clean fp_id type. A few lakes have no fp_id (NaN); drop those rows
             # before the int cast. (The broader set of ~1300 NaN-fp_id lakes is
             # being addressed separately upstream.)
             self._waterbody_df = self._waterbody_df.dropna(subset=["fp_id"]).copy()
