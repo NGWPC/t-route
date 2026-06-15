@@ -26,6 +26,31 @@ def get_upstream_fp_ids(gpkg_path: str, outlet_fp_id: int) -> list[int]:
     return [r[0] for r in rows]
 
 
+def get_downstream_fp_ids(gpkg_path: str, seed_fp_ids: list[int], max_depth: int) -> list[int]:
+    """Recursively find all fp_ids within ``max_depth`` hops downstream of the
+    seeds, following ``fp_to_id``. The inverse of :func:`get_upstream_fp_ids`,
+    used to carve a small domain below a set of features (e.g. the Great Lakes,
+    whose full upstream/downstream basin is far too large to subset by outlet).
+    """
+    seeds = ",".join(str(int(x)) for x in seed_fp_ids)
+    conn = sqlite3.connect(gpkg_path)
+    rows = conn.execute(
+        f"""
+        WITH RECURSIVE downstream(fp_id, depth) AS (
+            SELECT fp_id, 0 FROM flowpaths WHERE fp_id IN ({seeds})
+            UNION ALL
+            SELECT f.fp_to_id, d.depth + 1 FROM flowpaths f
+                JOIN downstream d ON f.fp_id = d.fp_id
+                WHERE f.fp_to_id IS NOT NULL AND d.depth < ?
+        )
+        SELECT DISTINCT fp_id FROM downstream
+        """,
+        (max_depth,),
+    ).fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
 def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFrame]:
     """Extract all layers for the given flowpath IDs."""
     fp_set = set(fp_ids)
