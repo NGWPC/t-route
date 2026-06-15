@@ -381,7 +381,7 @@ def _clean_waterbodies(
          on a routing flowpath (the hydrofabric fix for these is tracked
          upstream).
       6. parameter completeness: drop lakes missing any level-pool
-         parameter (this is where the Great Lakes fall out).
+         parameter.
 
     Returns ``(clean_df, gl_df)``: the routable waterbody table (integer
     lake_id index, sorted, fp_id as int) and the raw Great Lakes rows.
@@ -413,10 +413,19 @@ def _clean_waterbodies(
     if not gl_df.empty:
         LOG.warning(
             "waterbodies: %d Great Lakes present; they carry no level-pool "
-            "parameters and are excluded from reservoir routing (their flows "
-            "come from data assimilation; their flowpaths route as MC "
-            "channels)", len(gl_df),
+            "parameters and are handled separately from level-pool reservoirs "
+            "(modeled as reservoir_type 6 via data assimilation when Great "
+            "Lakes persistence DA is enabled, otherwise left out of the "
+            "reservoir set and routed as MC channels). See preprocess_waterbodies.",
+            len(gl_df),
         )
+        # Remove the Great Lakes from the level-pool routable set entirely. They
+        # re-enter only through _great_lakes_for_da (as reservoir_type 6, by
+        # original id). Doing this here -- rather than relying on the dropna in
+        # step 6 to drop them for missing parameters -- also prevents a Great Lake
+        # that happens to carry valid level-pool parameters from surviving,
+        # getting synthetic-renamed, and silently routing as a type-1 reservoir.
+        waterbody_df = waterbody_df[~waterbody_df.index.isin(GREAT_LAKES_IDS)]
 
     # 4. elevation consistency: a level-pool reservoir violating
     # OrificeE <= WeirE <= LkMxE is physically inconsistent and cannot be
@@ -470,6 +479,46 @@ def _clean_waterbodies(
     else:
         LOG.info(*summary)
     return waterbody_df, gl_df
+
+
+def _great_lakes_for_da(gl_df, data_assimilation_parameters):
+    """Select the Great Lakes to include in the routable waterbody set as
+    ``reservoir_type`` 6 (data-assimilation driven), and report whether Great
+    Lakes persistence DA is enabled.
+
+    The Great Lakes carry no level-pool parameters, so they can only be modeled
+    as type-6 reservoirs whose flows come from data assimilation. They are
+    included only when Great Lakes persistence DA is enabled; otherwise
+    ``compute.py`` demotes the type-6 reservoirs to level pool and the kernel
+    crashes on their missing parameters (with DA off their flowpaths still route
+    as MC channels). Only Great Lakes with an ``fp_id`` can be anchored to a
+    flowpath; their ``fp_id`` is cast to int to match the link table.
+
+    Parameters
+    ----------
+    gl_df : pandas.DataFrame
+        Great Lakes rows extracted in :func:`_clean_waterbodies` (original
+        lake-id index, level-pool parameter columns, possibly NaN ``fp_id``).
+    data_assimilation_parameters : dict
+        The network's data-assimilation configuration.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, bool]
+        ``(anchored_gl_df, gl_da_enabled)`` -- the Great Lakes to re-add (empty
+        when DA is disabled or none can be anchored) and the DA-enabled flag.
+    """
+    gl_da_enabled = bool(
+        data_assimilation_parameters.get("reservoir_da", {})
+        .get("reservoir_persistence_da", {})
+        .get("reservoir_persistence_greatLake", False)
+    )
+    if not gl_da_enabled or gl_df.empty:
+        return gl_df.iloc[0:0].copy(), gl_da_enabled
+    anchored = gl_df[gl_df["fp_id"].notna()].copy()
+    if not anchored.empty:
+        anchored["fp_id"] = anchored["fp_id"].astype(int)
+    return anchored, gl_da_enabled
 
 
 class NHFPreprocessMixin:
@@ -561,10 +610,36 @@ class NHFPreprocessMixin:
             self._waterbody_df = self._waterbody_df.rename_axis(lake_id_field)
             self._duplicate_ids_df = pd.DataFrame()  # Relic from how hyfeatures and NHD handled this. We add relationship to _fp_outlet_crosswalk 
 
-            # The Great Lakes are not in the routable waterbody set (see
-            # _clean_waterbodies); only the climatology, which data assimilation
-            # consumes, is loaded here.
-            if not gl_df.empty:
+            # Great Lakes handling. They carry no level-pool parameters (LkArea
+            # is NaN), so they can only be modeled as reservoir_type 6 driven by
+            # data assimilation. Include them in the routable waterbody set ONLY
+            # when Great Lakes persistence DA is enabled:
+            #   * with GL DA: re-add them with their ORIGINAL ids. Those ids
+            #     (~4.8e6) sit far below the synthetic id range (~max network
+            #     node id, ~1e15), so they do not collide with network nodes, and
+            #     keeping them lets the type-6 path in compute.py match the
+            #     climatology / observations by lake id. They flow through
+            #     _refactor_reservoirs like any waterbody (added as reservoir
+            #     nodes if their flowpath forms a single inlet -> outlet chain,
+            #     demoted with a warning otherwise).
+            #   * without GL DA: leave them out. compute.py would otherwise demote
+            #     the type-6 reservoirs to level pool and the kernel would crash on
+            #     their missing parameters; their flowpaths still route as MC
+            #     channels.
+            # A Great Lake with no fp_id (e.g. 4800007) cannot be anchored to a
+            # flowpath and is left out regardless.
+            gl_anchored, gl_da_enabled = _great_lakes_for_da(
+                gl_df, self.data_assimilation_parameters
+            )
+            if gl_da_enabled and not gl_df.empty:
+                n_unanchored = len(gl_df) - len(gl_anchored)
+                if n_unanchored:
+                    LOG.warning(
+                        "waterbodies: %d Great Lake(s) have no fp_id and cannot "
+                        "be anchored for reservoir_type 6 DA", n_unanchored,
+                    )
+                if not gl_anchored.empty:
+                    self._waterbody_df = pd.concat([self._waterbody_df, gl_anchored])
                 self.great_lakes_climatology_df = get_great_lakes_climatology()
             else:
                 self.great_lakes_climatology_df = pd.DataFrame()
@@ -583,9 +658,13 @@ class NHFPreprocessMixin:
                 data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
             ).sort_index()
 
-            # Add Great Lakes waterbody type (6), only for Great Lakes still in the
-            # waterbody set (a Great Lake with NaN fp_id was dropped above, so
-            # gl_df.index can reference rows no longer present).
+            # Mark the Great Lakes as reservoir_type 6, matched by ORIGINAL id.
+            # When GL DA is enabled they were re-added above and survive here as
+            # type 6 (so compute.py can link climatology/observations); when GL DA
+            # is disabled they are absent and the intersection is empty (they stay
+            # out of the reservoir set). A GL that was demoted in
+            # _refactor_reservoirs (no single inlet -> outlet chain) is likewise
+            # absent here and not marked type 6.
             gl_present = gl_df.index.intersection(self._waterbody_types_df.index)
             self._waterbody_types_df.loc[gl_present, "reservoir_type"] = 6
 
