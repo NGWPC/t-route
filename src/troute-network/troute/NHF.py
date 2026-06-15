@@ -392,7 +392,20 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             self._dataframe['divide_id'].values,
             self._dataframe.index.values
         ))
-        keys = np.array([mapping_dict[key] for key in ds_AET[col_idx].values])
+        # Vectorized divide_id -> flowpath-id lookup (replaces a per-element
+        # Python loop over the full forcing). map() yields NaN for any divide_id
+        # absent from the crosswalk; guard explicitly so a missing id still fails
+        # loudly (as the comprehension's KeyError did) instead of silently
+        # reindexing to zero at the reindex() below.
+        divide_ids = ds_AET[col_idx].values
+        mapped = pd.Series(divide_ids).map(mapping_dict)
+        if mapped.isna().any():
+            missing = pd.unique(divide_ids[mapped.isna().to_numpy()])
+            raise KeyError(
+                f"{len(missing)} ET divide_id(s) absent from the "
+                f"divide_id->flowpath crosswalk, e.g. {list(missing[:10])}"
+            )
+        keys = mapped.to_numpy()
 
         time_strings = pd.to_datetime(ds_AET.time.values).strftime('%Y%m%d%H%M')
         aet_df = pd.DataFrame(
