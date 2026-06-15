@@ -315,8 +315,15 @@ python ../generate_diagnostics.py --file retro.yaml
 
 The great lakes test uses data assimilation to force discharges out of the great lakes with no inflows.  The test script checks whether outflows at all reaches are similar to the forced values after some stabilization time.
 
+A small domain (the three fp_id-bearing Great Lakes -- 4800002/4800004/4800006; Lake Ontario/4800007 has no fp_id and is forced via the Ontario outflow file -- plus a few downstream hops, carved from NHF 1.2.0) is committed at `domain/nhf.gpkg`, so the test runs out of the box:
 
 ```console
 cd test/nhf/great_lakes
 python run_test.py
+```
+
+The Great Lakes basin is far too large to subset by outlet, so the domain is a downstream slice.  To regenerate it from a newer NHF release:
+
+```console
+python build_domain.py --source-gpkg /path/to/nhf.gpkg
 ```
