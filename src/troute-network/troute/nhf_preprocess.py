@@ -358,167 +358,6 @@ def _groupby_to_list_dict(df, key_col, val_col):
     return {k.item(): g.tolist() for k, g in zip(unique_keys, groups)}
 
 
-def _clean_waterbodies(
-    waterbody_df: pd.DataFrame, lake_id_field: str = "lake_id"
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Step-by-step NHF waterbody cleanup, with every dropped category counted
-    and logged as a warning so data problems are visible instead of silently
-    filtered.
-
-    Steps, in order (mirroring the historical inline cleaning):
-      1. lake_id integrity: coerce to numeric (the column is text in
-         NHF >= 1.2.0) and drop rows whose lake_id cannot be parsed.
-      2. index + dedup: set lake_id as the index and drop duplicated rows
-         (pre-existing semantics: duplicates are judged on the parameter
-         columns only, since pandas ignores the index).
-      3. Great Lakes: extracted for the climatology / data-assimilation
-         wiring; they carry no level-pool parameters in NHF and are not
-         routed as reservoirs.
-      4. elevation consistency: OrificeE <= WeirE <= LkMxE must hold for
-         level-pool routing; violating lakes are dropped with a warning
-         (previously the whole run failed on the first violation).
-      5. fp_id anchoring: drop lakes with no fp_id -- they cannot be placed
-         on a routing flowpath (the hydrofabric fix for these is tracked
-         upstream).
-      6. parameter completeness: drop lakes missing any level-pool
-         parameter.
-
-    Returns ``(clean_df, gl_df)``: the routable waterbody table (integer
-    lake_id index, sorted, fp_id as int) and the raw Great Lakes rows.
-    """
-    n_raw = len(waterbody_df)
-
-    # 1. lake_id integrity
-    lake_ids = pd.to_numeric(waterbody_df[lake_id_field], errors="coerce")
-    n_bad_id = int(lake_ids.isna().sum())
-    if n_bad_id:
-        LOG.warning(
-            "waterbodies: dropped %d of %d lakes with a non-numeric or "
-            "missing lake_id", n_bad_id, n_raw,
-        )
-        waterbody_df = waterbody_df[lake_ids.notna()].copy()
-        lake_ids = lake_ids[lake_ids.notna()]
-    waterbody_df[lake_id_field] = lake_ids.astype(int)
-
-    # 2. index + dedup
-    waterbody_df = waterbody_df.set_index(lake_id_field)
-    n_before = len(waterbody_df)
-    waterbody_df = waterbody_df.drop_duplicates().sort_index()
-    n_dup = n_before - len(waterbody_df)
-    if n_dup:
-        LOG.warning("waterbodies: dropped %d duplicated parameter rows", n_dup)
-
-    # 3. Great Lakes
-    gl_df = waterbody_df[waterbody_df.index.isin(GREAT_LAKES_IDS)].copy()
-    if not gl_df.empty:
-        LOG.warning(
-            "waterbodies: %d Great Lakes present; they carry no level-pool "
-            "parameters and are handled separately from level-pool reservoirs "
-            "(modeled as reservoir_type 6 via data assimilation when Great "
-            "Lakes persistence DA is enabled, otherwise left out of the "
-            "reservoir set and routed as MC channels). See preprocess_waterbodies.",
-            len(gl_df),
-        )
-        # Remove the Great Lakes from the level-pool routable set entirely. They
-        # re-enter only through _great_lakes_for_da (as reservoir_type 6, by
-        # original id). Doing this here -- rather than relying on the dropna in
-        # step 6 to drop them for missing parameters -- also prevents a Great Lake
-        # that happens to carry valid level-pool parameters from surviving,
-        # getting synthetic-renamed, and silently routing as a type-1 reservoir.
-        waterbody_df = waterbody_df[~waterbody_df.index.isin(GREAT_LAKES_IDS)]
-
-    # 4. elevation consistency: a level-pool reservoir violating
-    # OrificeE <= WeirE <= LkMxE is physically inconsistent and cannot be
-    # routed; drop it and warn instead of failing the whole run.
-    bad_elev = (waterbody_df["OrificeE"] > waterbody_df["WeirE"]) | (
-        waterbody_df["WeirE"] > waterbody_df["LkMxE"]
-    )
-    n_bad_elev = int(bad_elev.sum())
-    if n_bad_elev:
-        LOG.warning(
-            "waterbodies: dropped %d lakes with inconsistent elevations "
-            "(OrificeE <= WeirE <= LkMxE must hold for level-pool routing)",
-            n_bad_elev,
-        )
-        LOG.debug(
-            "inconsistent-elevation lake ids: %s",
-            waterbody_df.index[bad_elev].tolist(),
-        )
-        waterbody_df = waterbody_df[~bad_elev]
-
-    # 5. fp_id anchoring
-    fp_na = waterbody_df["fp_id"].isna()
-    n_no_fp = int(fp_na.sum())
-    if n_no_fp:
-        LOG.warning(
-            "waterbodies: dropped %d lakes with no fp_id (cannot be anchored "
-            "to a routing flowpath)", n_no_fp,
-        )
-        waterbody_df = waterbody_df[~fp_na]
-
-    # 6. parameter completeness
-    n_before = len(waterbody_df)
-    waterbody_df = waterbody_df.dropna()
-    n_no_param = n_before - len(waterbody_df)
-    if n_no_param:
-        LOG.warning(
-            "waterbodies: dropped %d lakes missing level-pool parameters",
-            n_no_param,
-        )
-
-    waterbody_df = waterbody_df.copy()
-    waterbody_df["fp_id"] = waterbody_df["fp_id"].astype(int)
-    summary = (
-        "waterbodies: %d of %d lakes retained for reservoir routing",
-        len(waterbody_df), n_raw,
-    )
-    if len(waterbody_df) < n_raw:
-        # Dropped lakes require special care from t-route consumers: their
-        # flowpaths route as plain MC channels, not reservoirs.
-        LOG.warning(*summary)
-    else:
-        LOG.info(*summary)
-    return waterbody_df, gl_df
-
-
-def _great_lakes_for_da(gl_df: pd.DataFrame, data_assimilation_parameters: dict) -> tuple[pd.DataFrame, bool]:
-    """Select the Great Lakes to include in the routable waterbody set as
-    ``reservoir_type`` 6 (data-assimilation driven), and report whether Great
-    Lakes persistence DA is enabled.
-
-    The Great Lakes carry no level-pool parameters, so they can only be modeled
-    as type-6 reservoirs whose flows come from data assimilation. They are
-    included only when Great Lakes persistence DA is enabled; otherwise
-    ``compute.py`` demotes the type-6 reservoirs to level pool and the kernel
-    crashes on their missing parameters (with DA off their flowpaths still route
-    as MC channels). Only Great Lakes with an ``fp_id`` can be anchored to a
-    flowpath; their ``fp_id`` is cast to int to match the link table.
-
-    Parameters
-    ----------
-    gl_df : pandas.DataFrame
-        Great Lakes rows extracted in :func:`_clean_waterbodies` (original
-        lake-id index, level-pool parameter columns, possibly NaN ``fp_id``).
-    data_assimilation_parameters : dict
-        The network's data-assimilation configuration.
-
-    Returns
-    -------
-    tuple[pandas.DataFrame, bool]
-        ``(anchored_gl_df, gl_da_enabled)`` -- the Great Lakes to re-add (empty
-        when DA is disabled or none can be anchored) and the DA-enabled flag.
-    """
-    gl_da_enabled = bool(
-        data_assimilation_parameters.get("reservoir_da", {})
-        .get("reservoir_persistence_da", {})
-        .get("reservoir_persistence_greatLake", False)
-    )
-    if not gl_da_enabled or gl_df.empty:
-        return gl_df.iloc[0:0].copy(), gl_da_enabled
-    anchored = gl_df[gl_df["fp_id"].notna()].copy()
-    if not anchored.empty:
-        anchored["fp_id"] = anchored["fp_id"].astype(int)
-    return anchored, gl_da_enabled
 
 
 class NHFPreprocessMixin:
@@ -580,80 +419,7 @@ class NHFPreprocessMixin:
             self._poi_nex_dict = None
 
     def preprocess_waterbodies(self, lakes):
-        if not lakes.empty:
-            # Formate waterbodies df
-            lake_id_field = "lake_id"
-            self._waterbody_df = lakes[
-                [
-                    lake_id_field,
-                    "fp_id",
-                    "ifd",
-                    "LkArea",
-                    "LkMxE",
-                    "OrificeA",
-                    "OrificeC",
-                    "OrificeE",
-                    "WeirC",
-                    "WeirE",
-                    "WeirL",
-                ]
-            ].copy()
-            # Step-by-step cleanup; every dropped category is counted and logged
-            # as a warning (see _clean_waterbodies).
-            self._waterbody_df, gl_df = _clean_waterbodies(
-                self._waterbody_df, lake_id_field
-            )
-
-            # Add a large value to the lake_ids to create synthetic IDs and avoid conflicts.
-            max_df_id = max(self.dataframe.index) + 1 if not self.dataframe.index.empty else 0
-            self._waterbody_df.index = np.arange(len(self._waterbody_df)) + max_df_id
-            self._waterbody_df = self._waterbody_df.rename_axis(lake_id_field)
-            self._duplicate_ids_df = pd.DataFrame()  # Relic from how hyfeatures and NHD handled this. We add relationship to _fp_outlet_crosswalk 
-
-            # Process great lakes reaches, if necessary
-            gl_anchored, gl_da_enabled = _great_lakes_for_da(
-                gl_df, self.data_assimilation_parameters
-            )
-            if gl_da_enabled and not gl_df.empty:
-                n_unanchored = len(gl_df) - len(gl_anchored)
-                if n_unanchored:
-                    LOG.warning(
-                        "waterbodies: %d Great Lake(s) have no fp_id and cannot "
-                        "be anchored for reservoir_type 6 DA", n_unanchored,
-                    )
-                if not gl_anchored.empty:
-                    self._waterbody_df = pd.concat([self._waterbody_df, gl_anchored])
-                self.great_lakes_climatology_df = get_great_lakes_climatology()
-            else:
-                self.great_lakes_climatology_df = pd.DataFrame()
-
-            # Condense flowpaths in a reservoir to single level pool node
-            self._refactor_reservoirs(lake_id_field)
-
-            # Add lat, lon, and crs columns for LAKEOUT files:
-            lakeout = self.output_parameters.get("lakeout_output", None)
-            if lakeout:
-                raise NotImplementedError("The lakeout feature has not been developed for NHF.")
-
-            
-
-            self._waterbody_types_df = pd.DataFrame(
-                data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
-            ).sort_index()
-
-            # Mark the Great Lakes as reservoir_type 6, matched by ORIGINAL id.
-            # When GL DA is enabled they were re-added above and survive here as
-            # type 6 (so compute.py can link climatology/observations); when GL DA
-            # is disabled they are absent and the intersection is empty (they stay
-            # out of the reservoir set). A GL that was demoted in
-            # _refactor_reservoirs (no single inlet -> outlet chain) is likewise
-            # absent here and not marked type 6.
-            gl_present = gl_df.index.intersection(self._waterbody_types_df.index)
-            self._waterbody_types_df.loc[gl_present, "reservoir_type"] = 6
-
-            self._waterbody_type_specified = True
-
-        else:
+        if lakes.empty:
             self.data_assimilation_parameters["reservoir_da"]["reservoir_persistence_da"][
                 "reservoir_persistence_usgs"
             ] = False
@@ -669,17 +435,253 @@ class NHFPreprocessMixin:
             self.data_assimilation_parameters["reservoir_da"]["reservoir_rfc_da"]["reservoir_rfc_forecasts"] = False
             self.waterbody_parameters["break_network_at_waterbodies"] = False
 
-            self._waterbody_df = pd.DataFrame()
-            self._waterbody_types_df = pd.DataFrame()
-            self._waterbody_connections = {}
-            self._waterbody_type_specified = False
-            self._link_lake_crosswalk = None
+            self.waterbody_dataframe = pd.DataFrame()
+            self.waterbody_types_df = pd.DataFrame()
+            self.waterbody_connections = {}
+            self.waterbody_type_specified = False
+            self.link_lake_crosswalk = None
             self._duplicate_ids_df = pd.DataFrame()
             self.great_lakes_climatology_df = pd.DataFrame()
+            
+            return
+        
+        # Eager failure for the LAKEOUT file initialization
+        if self.output_parameters.get("lakeout_output", None):
+            raise NotImplementedError("The lakeout feature has not been developed for NHF.")
 
+        # Relic from how hyfeatures and NHD handled this. We add relationship to _fp_outlet_crosswalk 
+        self._duplicate_ids_df = pd.DataFrame()  
+
+        # Formulate waterbodies df
+        lake_id_field = "lake_id"
+        self.waterbody_dataframe = lakes[
+            [
+                lake_id_field,
+                "fp_id",
+                "ifd",
+                "LkArea",
+                "LkMxE",
+                "OrificeA",
+                "OrificeC",
+                "OrificeE",
+                "WeirC",
+                "WeirE",
+                "WeirL",
+            ]
+        ].copy()
+        # self.waterbody_dataframe[lake_id_field] = self.waterbody_dataframe[lake_id_field].astype(int)
+        # self.waterbody_dataframe = self.waterbody_dataframe.set_index(lake_id_field)
+
+        # Split out Great Lakes, if present. They get handled separately later.
+        gl_df = self._pop_great_lakes(lake_id_field)
+
+        # Step-by-step cleanup; every dropped category is counted and logged as a warning.
+        self._clean_waterbodies(lake_id_field)
+
+        # Process great lakes reaches, if necessary.
+        self._process_great_lakes(gl_df)
+
+        # Condense flowpaths in a reservoir to single level pool node
+        self._refactor_reservoirs()
+
+        # Create waterbody_dataframe
+        self.waterbody_types_dataframe = self.waterbody_dataframe[["reservoir_type"]].copy()
+        self.waterbody_dataframe = self.waterbody_dataframe.drop(columns=["reservoir_type"])
+        self._waterbody_type_specified = True
+            
+    def _pop_great_lakes(self, lake_id_field: str) -> pd.DataFrame:
+        """Remove any Great Lakes from the waterbodies df and return."""
+        # Make Great Lakes df
+        gl_df = self.waterbody_dataframe[self.waterbody_dataframe[lake_id_field].astype(int).isin(GREAT_LAKES_IDS)].copy()
+        gl_df[lake_id_field] = gl_df[lake_id_field].astype(int)
+        gl_df = gl_df.set_index(lake_id_field)
+        gl_df["reservoir_type"] = 6
+
+        # Remove from waterbodies
+        if not gl_df.empty:
+            LOG.warning(
+                "waterbodies: %d Great Lakes present; They are handled "
+                "separately from level-pool reservoirs (modeled as "
+                "reservoir_type 6 via data assimilation when Great Lakes "
+                "persistence DA is enabled, otherwise left out of the reservoir"
+                "set and routed as MC channels). See preprocess_waterbodies.",
+                len(gl_df),
+            )
+            # Remove the Great Lakes from the level-pool routable set entirely. They
+            # re-enter only through _great_lakes_for_da (as reservoir_type 6, by
+            # original id).
+            to_drop = set(self.waterbody_dataframe.index).intersection(GREAT_LAKES_IDS)
+            self.waterbody_dataframe = self.waterbody_dataframe.drop(to_drop)
+        return gl_df
+
+    def _clean_waterbodies(self, lake_id_field: str = "lake_id") -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Step-by-step NHF waterbody cleanup, with every dropped category counted
+        and logged as a warning so data problems are visible instead of silently
+        filtered.
+
+        Steps, in order (mirroring the historical inline cleaning):
+        1. lake_id integrity: coerce to numeric (the column is text in
+            NHF >= 1.2.0) and drop rows whose lake_id cannot be parsed.
+        2. index + dedup: set lake_id as the index and drop duplicated rows
+            (pre-existing semantics: duplicates are judged on the parameter
+            columns only, since pandas ignores the index).
+        3. Great Lakes: extracted for the climatology / data-assimilation
+            wiring; they carry no level-pool parameters in NHF and are not
+            routed as reservoirs.
+        4. elevation consistency: OrificeE <= WeirE <= LkMxE must hold for
+            level-pool routing; violating lakes are dropped with a warning
+            (previously the whole run failed on the first violation).
+        5. fp_id anchoring: drop lakes with no fp_id -- they cannot be placed
+            on a routing flowpath (the hydrofabric fix for these is tracked
+            upstream).
+        6. parameter completeness: drop lakes missing any level-pool
+            parameter.
+
+        Returns ``(clean_df, gl_df)``: the routable waterbody table (integer
+        lake_id index, sorted, fp_id as int) and the raw Great Lakes rows.
+        """
+        n_raw = len(self.waterbody_dataframe)
+
+        # 1. lake_id integrity
+        lake_ids = pd.to_numeric(self.waterbody_dataframe[lake_id_field], errors="coerce")
+        n_bad_id = int(lake_ids.isna().sum())
+        if n_bad_id:
+            LOG.warning(
+                "waterbodies: dropped %d of %d lakes with a non-numeric or "
+                "missing lake_id", n_bad_id, n_raw,
+            )
+            self.waterbody_dataframe = self.waterbody_dataframe[lake_ids.notna()].copy()
+            lake_ids = lake_ids[lake_ids.notna()]
+        self.waterbody_dataframe[lake_id_field] = lake_ids.astype(int)
+
+        # 2. index + dedup
+        self.waterbody_dataframe = self.waterbody_dataframe.set_index(lake_id_field)
+        n_before = len(self.waterbody_dataframe)
+        self.waterbody_dataframe = self.waterbody_dataframe.drop_duplicates().sort_index()
+        n_dup = n_before - len(self.waterbody_dataframe)
+        if n_dup:
+            LOG.warning("waterbodies: dropped %d duplicated parameter rows", n_dup)
+
+        # 3. elevation consistency: a level-pool reservoir violating
+        # OrificeE <= WeirE <= LkMxE is physically inconsistent and cannot be
+        # routed; drop it and warn instead of failing the whole run.
+        bad_elev = (self.waterbody_dataframe["OrificeE"] > self.waterbody_dataframe["WeirE"]) | (
+            self.waterbody_dataframe["WeirE"] > self.waterbody_dataframe["LkMxE"]
+        )
+        n_bad_elev = int(bad_elev.sum())
+        if n_bad_elev:
+            LOG.warning(
+                "waterbodies: dropped %d lakes with inconsistent elevations "
+                "(OrificeE <= WeirE <= LkMxE must hold for level-pool routing)",
+                n_bad_elev,
+            )
+            LOG.debug(
+                "inconsistent-elevation lake ids: %s",
+                self.waterbody_dataframe.index[bad_elev].tolist(),
+            )
+            self.waterbody_dataframe = self.waterbody_dataframe[~bad_elev]
+
+        # 5. fp_id anchoring
+        fp_na = self.waterbody_dataframe["fp_id"].isna()
+        n_no_fp = int(fp_na.sum())
+        if n_no_fp:
+            LOG.warning(
+                "waterbodies: dropped %d lakes with no fp_id (cannot be anchored "
+                "to a routing flowpath)", n_no_fp,
+            )
+            self.waterbody_dataframe = self.waterbody_dataframe[~fp_na]
+
+        # 6. parameter completeness
+        n_before = len(self.waterbody_dataframe)
+        self.waterbody_dataframe = self.waterbody_dataframe.dropna()
+        n_no_param = n_before - len(self.waterbody_dataframe)
+        if n_no_param:
+            LOG.warning(
+                "waterbodies: dropped %d lakes missing level-pool parameters",
+                n_no_param,
+            )
+
+        self.waterbody_dataframe = self.waterbody_dataframe.copy()
+        self.waterbody_dataframe["fp_id"] = self.waterbody_dataframe["fp_id"].astype(int)
+        summary = (
+            "waterbodies: %d of %d lakes retained for reservoir routing",
+            len(self.waterbody_dataframe), n_raw,
+        )
+        if len(self.waterbody_dataframe) < n_raw:
+            # Dropped lakes require special care from t-route consumers: their
+            # flowpaths route as plain MC channels, not reservoirs.
+            LOG.warning(*summary)
+        else:
+            LOG.info(*summary)
+
+        # 7.  rename to avoid name conflicts
+        # Add a large value to the lake_ids to create synthetic IDs and avoid conflicts.
+        max_df_id = max(self.dataframe.index) + 1 if not self.dataframe.index.empty else 0
+        self.waterbody_dataframe.index = np.arange(len(self.waterbody_dataframe)) + max_df_id
+        self.waterbody_dataframe = self.waterbody_dataframe.rename_axis(lake_id_field)
+
+        # 8. Set reservoir type to 1
+        self.waterbody_dataframe["reservoir_type"] = 1
+
+
+    def _process_great_lakes(self, gl_df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
+        """Select the Great Lakes to include in the routable waterbody set as
+        ``reservoir_type`` 6 (data-assimilation driven), and report whether Great
+        Lakes persistence DA is enabled.
+
+        The Great Lakes carry no level-pool parameters, so they can only be modeled
+        as type-6 reservoirs whose flows come from data assimilation. They are
+        included only when Great Lakes persistence DA is enabled; otherwise
+        ``compute.py`` demotes the type-6 reservoirs to level pool and the kernel
+        crashes on their missing parameters (with DA off their flowpaths still route
+        as MC channels). Only Great Lakes with an ``fp_id`` can be anchored to a
+        flowpath; their ``fp_id`` is cast to int to match the link table.
+
+        Parameters
+        ----------
+        gl_df : pandas.DataFrame
+            Great Lakes rows extracted in :func:`_clean_waterbodies` (original
+            lake-id index, level-pool parameter columns, possibly NaN ``fp_id``).
+        data_assimilation_parameters : dict
+            The network's data-assimilation configuration.
+
+        Returns
+        -------
+        tuple[pandas.DataFrame, bool]
+            ``(anchored_gl_df, gl_da_enabled)`` -- the Great Lakes to re-add (empty
+            when DA is disabled or none can be anchored) and the DA-enabled flag.
+        """
+        # Check if data assimilation will be run (required for Great Lakes)
+        gl_da_enabled = bool(
+            self.data_assimilation_parameters.get("reservoir_da", {})
+            .get("reservoir_persistence_da", {})
+            .get("reservoir_persistence_greatLake", False)
+        )
+        if not gl_da_enabled or gl_df.empty:
+            self.great_lakes_climatology_df = pd.DataFrame()
+            return
+        
+        # Check that all great lakes are anchored to a flowpath.
+        n_init = len(gl_df)
+        gl_df = gl_df[gl_df["fp_id"].notna()].copy()
+        if not gl_df.empty:
+            gl_df["fp_id"] = gl_df["fp_id"].astype(int)
+        n_unanchored = n_init - len(gl_df)
+        if n_unanchored:
+            LOG.warning(
+                "waterbodies: %d Great Lake(s) have no fp_id and cannot "
+                "be anchored for reservoir_type 6 DA", n_unanchored,
+            )
+        
+        # Add valid great lakes back to waterbodies and get climatology for them
+        if not gl_df.empty:
+            self._waterbody_df = pd.concat([self._waterbody_df, gl_df])
+            self.great_lakes_climatology_df = get_great_lakes_climatology()
+        else:
+            self.great_lakes_climatology_df = pd.DataFrame()
 
     
-    def _refactor_reservoirs(self, lake_id_field: str = "lake_id"):
+    def _refactor_reservoirs(self):
         """Refactor network connectivity to explicitly represent reservoirs (waterbodies) and their interactions with flowpaths and links.
 
         Conceptual model:
@@ -851,10 +853,11 @@ class NHFPreprocessMixin:
         wb_index = self.waterbody_dataframe.index.tolist()
         self.waterbody_connections = dict(zip(wb_index, wb_index))
 
-        row_df = pd.DataFrame(df_rows, index=index_vals)
-        row_df.index.name = self.dataframe.index.name
-        row_df = row_df.astype(self.dataframe.dtypes.to_dict())
-        self.dataframe = pd.concat([self.dataframe, row_df])
+        if len(df_rows) > 0:
+            row_df = pd.DataFrame(df_rows, index=index_vals)
+            row_df.index.name = self.dataframe.index.name
+            row_df = row_df.astype(self.dataframe.dtypes.to_dict())
+            self.dataframe = pd.concat([self.dataframe, row_df])
 
 
     def preprocess_data_assimilation(
@@ -1017,45 +1020,3 @@ class NHFPreprocessMixin:
         self._usace_lake_gage_crosswalk = pd.DataFrame()
         self._usbr_lake_gage_crosswalk = pd.DataFrame()
         self._rfc_lake_gage_crosswalk = pd.DataFrame()
-
-    ######################################################################
-    # FIXME Temporary solution to hydrofabric issues.
-    def bandaid(
-        self,
-    ):
-        # Identify waterbody IDs that have problematic data. There are underlying stream
-        # segments that should be referenced to the waterbody ID, but are not. This causes
-        # our connections dictionary to have multiple downstream segments for waterbodies which
-        # is not allowed:
-        conn_df = self.dataframe.reset_index()[["key", "downstream"]]
-        lake_id = self.waterbody_dataframe.index.unique()
-
-        wbody_conn_df = self.dataframe["waterbody"].dropna().astype(int).reset_index()
-        wbody_conn_df = wbody_conn_df[wbody_conn_df["waterbody"].isin(lake_id)]
-
-        conn_df2 = (
-            conn_df.merge(wbody_conn_df, on="key", how="left")
-            .assign(key=lambda x: x["waterbody"].fillna(x["key"]))
-            .drop("waterbody", axis=1)
-            .merge(wbody_conn_df.rename(columns={"key": "downstream"}), on="downstream", how="left")
-            .assign(downstream=lambda x: x["waterbody"].fillna(x["downstream"]))
-            .drop("waterbody", axis=1)
-            .drop_duplicates()
-            .query("key != downstream")
-            .astype(int)
-        )
-
-        # Find missing segments
-        bad_lake_ids = conn_df2.loc[conn_df2.duplicated(subset=["key"])].key.unique()
-        # Drop waterbodies that are problematic. Instead t-route will simply treat them as
-        # flowpaths and run MC routing.
-        self._waterbody_df = self.waterbody_dataframe.drop(bad_lake_ids)
-
-        # This chunk replaces waterbody_id 1711354 with 1710676. I don't know where the
-        # former came from, but the latter is listed in the flowpath_attributes table
-        # and exists in NWMv2.1 LAKEPARM file. See hydrofabric github issue 16:
-        # https://github.com/NOAA-OWP/hydrofabric/issues/16
-        self._dataframe["waterbody"] = self._dataframe["waterbody"].replace("1711354", "1710676")
-        self._waterbody_df.rename(index={1711354: 1710676}, inplace=True)
-
-    #######################################################################

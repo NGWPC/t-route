@@ -305,6 +305,10 @@ class AbstractNetwork(ABC):
     @property
     def waterbody_types_dataframe(self):
         return self._waterbody_types_df
+
+    @waterbody_types_dataframe.setter
+    def waterbody_types_dataframe(self, val):
+        self._waterbody_types_df = val
     
     @property
     def waterbody_type_specified(self):
@@ -312,9 +316,17 @@ class AbstractNetwork(ABC):
             self._waterbody_type_specified = False
         return self._waterbody_type_specified
     
+    @waterbody_type_specified.setter
+    def waterbody_type_specified(self, value):
+        self._waterbody_type_specified = value
+    
     @property
     def link_lake_crosswalk(self):
         return self._link_lake_crosswalk
+
+    @link_lake_crosswalk.setter
+    def link_lake_crosswalk(self, value):
+        self._link_lake_crosswalk = value
 
     @property
     def connections(self):
