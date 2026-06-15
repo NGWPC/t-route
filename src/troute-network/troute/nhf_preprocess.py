@@ -481,7 +481,7 @@ def _clean_waterbodies(
     return waterbody_df, gl_df
 
 
-def _great_lakes_for_da(gl_df, data_assimilation_parameters):
+def _great_lakes_for_da(gl_df: pd.DataFrame, data_assimilation_parameters: dict) -> tuple[pd.DataFrame, bool]:
     """Select the Great Lakes to include in the routable waterbody set as
     ``reservoir_type`` 6 (data-assimilation driven), and report whether Great
     Lakes persistence DA is enabled.
@@ -610,24 +610,7 @@ class NHFPreprocessMixin:
             self._waterbody_df = self._waterbody_df.rename_axis(lake_id_field)
             self._duplicate_ids_df = pd.DataFrame()  # Relic from how hyfeatures and NHD handled this. We add relationship to _fp_outlet_crosswalk 
 
-            # Great Lakes handling. They carry no level-pool parameters (LkArea
-            # is NaN), so they can only be modeled as reservoir_type 6 driven by
-            # data assimilation. Include them in the routable waterbody set ONLY
-            # when Great Lakes persistence DA is enabled:
-            #   * with GL DA: re-add them with their ORIGINAL ids. Those ids
-            #     (~4.8e6) sit far below the synthetic id range (~max network
-            #     node id, ~1e15), so they do not collide with network nodes, and
-            #     keeping them lets the type-6 path in compute.py match the
-            #     climatology / observations by lake id. They flow through
-            #     _refactor_reservoirs like any waterbody (added as reservoir
-            #     nodes if their flowpath forms a single inlet -> outlet chain,
-            #     demoted with a warning otherwise).
-            #   * without GL DA: leave them out. compute.py would otherwise demote
-            #     the type-6 reservoirs to level pool and the kernel would crash on
-            #     their missing parameters; their flowpaths still route as MC
-            #     channels.
-            # A Great Lake with no fp_id (e.g. 4800007) cannot be anchored to a
-            # flowpath and is left out regardless.
+            # Process great lakes reaches, if necessary
             gl_anchored, gl_da_enabled = _great_lakes_for_da(
                 gl_df, self.data_assimilation_parameters
             )
