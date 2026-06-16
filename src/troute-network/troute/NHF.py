@@ -2,7 +2,6 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 import time
 from pathlib import Path
-from pprint import pformat
 from typing import Any
 
 import numpy as np
@@ -42,6 +41,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         "_upstream_inflow_df",
         "_nexus_virtual_seg_ids",
         "_fp_outlet_crosswalk",
+        "_fp_id_to_initial_nodes",
+        "_flowpaths_df",
     ]
 
     def __init__(
@@ -191,6 +192,29 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             reference_flowpaths=reference_flowpaths,
             discretization_len_m=discretization_len_m,
         )
+        # Build a map from fp_id -> (up_virtual_nex_id, dn_virtual_nex_id, segment_order)
+        # from the pre-aggregation virtual flowpath topology.  This is needed by
+        # _refactor_reservoirs to locate waterbody flowpaths that were merged
+        # away during short-reach aggregation.
+        _vfp = virtual_flowpaths.dropna(subset=["up_virtual_nex_id"]).copy()
+        _vfp["up_virtual_nex_id"] = _vfp["up_virtual_nex_id"].astype(int)
+        _initial = pd.merge(
+            _vfp[["virtual_fp_id", "up_virtual_nex_id", "dn_virtual_nex_id"]],
+            reference_flowpaths[["fp_id", "virtual_fp_id", "segment_order"]].drop_duplicates(),
+            on="virtual_fp_id",
+        )
+        self._fp_id_to_initial_nodes = {
+            int(row["fp_id"]): (
+                int(row["up_virtual_nex_id"]),
+                int(row["dn_virtual_nex_id"]),
+                int(row["segment_order"]),
+            )
+            for _, row in _initial.iterrows()
+        }
+        # Store flowpaths so _refactor_reservoirs can look up channel params
+        # when recreating aggregated-away waterbody links.
+        self._flowpaths_df = flowpaths
+
         self._connections = None  # Forces recomputation on first call to self.connections
         self._terminal_codes = set(self._dataframe["downstream"]).difference(self._dataframe.index)  # Outlets
         self._build_fp_outlet_crosswalk(reference_flowpaths, virtual_flowpaths)
