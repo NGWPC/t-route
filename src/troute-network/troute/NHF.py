@@ -12,6 +12,7 @@ from .AbstractNetwork import AbstractNetwork
 from troute.nhf_discretize import discretize_flowpaths
 
 from troute.nhf_preprocess import (
+    LEVEL_POOL_PARAMS,
     NHFPreprocessMixin,
     read_geo_file,
     read_qlat_file,
@@ -522,7 +523,7 @@ def _force_headwater_routing(
     )
 
     # Force routing on headwater vfps with waterbodies
-    waterbody_vfps = waterbodies["virtual_fp_id"].dropna().astype(int).values
+    waterbody_vfps = waterbodies.dropna(subset=LEVEL_POOL_PARAMS)["virtual_fp_id"].astype(int).values
     forced_vfps.extend(list(set(headwater_vfps).intersection(waterbody_vfps)))
 
     # In the future, could add more conditions here

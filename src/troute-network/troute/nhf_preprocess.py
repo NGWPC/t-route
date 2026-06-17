@@ -28,6 +28,20 @@ _FLOWPATHS_CHANNEL_COLS = (
 )
 _BAD_FPID_PREVIEW_LIMIT = 10
 LAKE_ID_FIELD = "lake_id"
+LEVEL_POOL_PARAMS = [
+                LAKE_ID_FIELD,
+                "fp_id",
+                "virtual_fp_id",
+                "ifd",
+                "LkArea",
+                "LkMxE",
+                "OrificeA",
+                "OrificeC",
+                "OrificeE",
+                "WeirC",
+                "WeirE",
+                "WeirL",
+            ]
 
 def _validate_flowpaths_channel_params(flowpaths):
     """Raise if any MC-kernel channel parameter is non-finite (NaN/Inf)."""
@@ -587,20 +601,7 @@ class NHFPreprocessMixin:
         if not lakes.empty:
             # Step-by-step cleanup; every dropped category is counted and logged
             # as a warning (see _clean_waterbodies).
-            self.waterbody_dataframe = lakes[[
-                LAKE_ID_FIELD,
-                "fp_id",
-                "virtual_fp_id",
-                "ifd",
-                "LkArea",
-                "LkMxE",
-                "OrificeA",
-                "OrificeC",
-                "OrificeE",
-                "WeirC",
-                "WeirE",
-                "WeirL",
-            ]]
+            self.waterbody_dataframe = lakes[LEVEL_POOL_PARAMS]
             self._waterbody_df, gl_df = _clean_waterbodies(
                 self._waterbody_df, LAKE_ID_FIELD
             )
