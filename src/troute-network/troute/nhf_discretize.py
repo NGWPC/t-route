@@ -118,6 +118,7 @@ def discretize_flowpaths(
     discretization_len_m: float = 300.0,
     aggregate_short_reaches: bool = True,
     export_links_nodes_gpkg_path: Union[None, str] = None,
+    protected_fp_ids: set[int] | None = None,
 ) -> tuple[pd.DataFrame, dict[int, int], dict[int, int]]:
     """Discretize flowpaths into uniform-length links and resolve short reaches.
 
@@ -172,7 +173,9 @@ def discretize_flowpaths(
     
     links = _load_initial_links(virtual_flowpaths, reference_flowpaths)
     if aggregate_short_reaches:
-        links, merged_node_crosswalk = _aggregate_links(links, discretization_len_m)
+        links, merged_node_crosswalk = _aggregate_links(
+            links, discretization_len_m, protected_fp_ids,
+        )
     else:
         merged_node_crosswalk = {}
     links = _discretize_links(links, discretization_len_m, cur_node_id)  
@@ -293,7 +296,8 @@ def _load_initial_links(
     )
 
 def _aggregate_links(
-    links: LinkArrays, discretization_len_m: float
+    links: LinkArrays, discretization_len_m: float,
+    protected_fp_ids: set[int] | None = None,
 ) -> tuple[LinkArrays, dict[int, int]]:
     """Merge links shorter than threshold into upstream neighbors.
 
@@ -315,6 +319,8 @@ def _aggregate_links(
     short_mask = links.length < discretization_len_m
     has_us = np.array([u in dn_index for u in links.up_node_id], dtype=bool)
     short_mask &= has_us
+    if protected_fp_ids:
+        short_mask &= ~np.isin(links.fp_id, list(protected_fp_ids))
     
     # Mark merged so we can remove them later (currently non removed)
     active = np.ones(len(links.length), dtype=bool)
@@ -330,6 +336,10 @@ def _aggregate_links(
             continue
         length = links.length[idx]
         if length >= discretization_len_m:
+            continue
+        # Never merge away a protected flowpath link. Right now these are
+        # just short flowpaths associated with waterbodies
+        if protected_fp_ids and links.fp_id[idx] in protected_fp_ids:
             continue
         
         # Get link info

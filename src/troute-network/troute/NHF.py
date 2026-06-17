@@ -2,7 +2,6 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 import time
 from pathlib import Path
-from pprint import pformat
 from typing import Any
 
 import numpy as np
@@ -110,7 +109,14 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
                 virtual_flowpaths, reference_flowpaths, waterbodies
             )
             discretization_len = self.supernetwork_parameters.get("nhf_discretization_len", 300.0)
-            self.preprocess_network(flowpaths, reference_flowpaths, virtual_flowpaths, discretization_len)
+            # Create a list of waterbody associated flowpaths that can be used
+            # to protect waterbody-bearing flowpaths from being aggregated away
+            # during short-reach discretization
+            wb_fp_ids = set(waterbodies["fp_id"].dropna().astype(int).values)
+            self.preprocess_network(
+                flowpaths, reference_flowpaths, virtual_flowpaths,
+                discretization_len, protected_fp_ids=wb_fp_ids,
+            )
 
             self.crosswalk_nex_flowpath_poi(
                 virtual_flowpaths,
@@ -183,13 +189,14 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         """Map outlet link_id -> fp_id for reindexing outputs."""
         return self._fp_outlet_crosswalk
 
-    def preprocess_network(self, flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, discretization_len_m=300.0):
+    def preprocess_network(self, flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, discretization_len_m=300.0, protected_fp_ids: set[int] | None = None):
         """Create routing links (self._dataframe) and weighting data to assign fp flows to links."""
         self._dataframe, self.nexus_remapping = discretize_flowpaths(
             flowpaths=flowpaths,
             virtual_flowpaths=virtual_flowpaths,
             reference_flowpaths=reference_flowpaths,
             discretization_len_m=discretization_len_m,
+            protected_fp_ids=protected_fp_ids,
         )
         self._connections = None  # Forces recomputation on first call to self.connections
         self._terminal_codes = set(self._dataframe["downstream"]).difference(self._dataframe.index)  # Outlets
