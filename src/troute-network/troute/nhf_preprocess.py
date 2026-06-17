@@ -731,7 +731,6 @@ class NHFPreprocessMixin:
         index_vals = []
         skipped_wb: list[int] = []
         nodes_removed: list[int] = []
-        recreated_nodes: set[int] = set()
         downstream_groups = self.dataframe.groupby("downstream").groups
         for outlet_fp, wb_group in self.waterbody_dataframe.groupby("fp_id"):
             # Until this is implemented in NHF, spoof here
@@ -742,59 +741,8 @@ class NHFPreprocessMixin:
             # eliminated in discretization -> nothing to model as a reservoir).
             all_links = links_by_fp.get(outlet_fp)
             if all_links is None:
-                # If the waterbody's flowpath links were aggregated away during
-                # short-reach discretization, try to recreate a synthetic link
-                # from the pre-aggregation virtual-flowpath topology so the
-                # waterbody can still be refactored as a reservoir.
-                fp_to_init = getattr(self, '_fp_id_to_initial_nodes', {})
-                flowpaths_df = getattr(self, '_flowpaths_df', None)
-                if (
-                    outlet_fp in fp_to_init
-                    and flowpaths_df is not None
-                ):
-                    orig_up_nex, orig_dn_nex, seg_order = fp_to_init[outlet_fp]
-                    nexus_remap = getattr(self, 'nexus_remapping', {})
-                    if orig_up_nex in nexus_remap and orig_up_nex not in self.dataframe.index:
-                        fp_rows = flowpaths_df[flowpaths_df['fp_id'] == outlet_fp]
-                        if not fp_rows.empty:
-                            fp_row = fp_rows.iloc[0]
-                            # The downstream nexus may also have been merged away
-                            # during short-reach aggregation; follow the remap
-                            # chain to find the node that survives in the df.
-                            dn_nex = int(orig_dn_nex)
-                            while dn_nex in nexus_remap:
-                                dn_nex = int(nexus_remap[dn_nex])
-                            self.dataframe.loc[int(orig_up_nex)] = {
-                                'fp_id': int(outlet_fp),
-                                'downstream': dn_nex,
-                                'segment_order': int(seg_order),
-                                'dx': float(fp_row['length_km']) * 1000.0,
-                                'n': float(fp_row['n']),
-                                'mainstem': int(fp_row['mainstem_lp']),
-                                'tw': float(fp_row['topwdth']),
-                                's0': float(fp_row['slope']),
-                                'ncc': float(fp_row['ncc']),
-                                'bw': float(fp_row['btmwdth']),
-                                'musx': float(fp_row['musx']),
-                                'cs': float(fp_row['chslp']),
-                                'twcc': float(fp_row['topwdthcc']),
-                                'musk': int(fp_row['musk']),
-                                'alt': 0,
-                            }
-                            # Register the recreated link in the connections
-                            # graph so the pop / rewiring below works.
-                            self._connections[int(orig_up_nex)] = [dn_nex]
-                            # Track this node so it gets a zero-q lat entry
-                            recreated_nodes.add(int(orig_up_nex))
-                            # Refresh links_by_fp for this fp_id so the
-                            # ds_set/us_set check below resolves correctly
-                            links_by_fp[outlet_fp] = self.dataframe[
-                                self.dataframe["fp_id"] == outlet_fp
-                            ].reset_index()
-                            all_links = links_by_fp.get(outlet_fp)
-                if all_links is None:
-                    skipped_wb.extend(wb_group.index.astype(int).tolist())
-                    continue
+                skipped_wb.extend(wb_group.index.astype(int).tolist())
+                continue
             ds_set = set(all_links["downstream"]).difference(all_links["up_node_id"])
             us_set = set(all_links["up_node_id"]).difference(all_links["downstream"])
             if len(ds_set) != 1 or len(us_set) != 1:
@@ -902,16 +850,6 @@ class NHFPreprocessMixin:
         # faster than a comprehension iterating the Index.
         wb_index = self.waterbody_dataframe.index.tolist()
         self.waterbody_connections = dict(zip(wb_index, wb_index))
-
-        # Recreated headwater nodes (from link-recreation in the
-        # aggregated-away-flowpath branch) also need a qlat entry.
-        # They exist in the dataframe but have no vfp_nex_ids mapping,
-        # so the qlat expansion won't produce an entry for them.
-        # Adding them to zero_nodes gives a zero-q lat default.
-        if recreated_nodes:
-            self.zero_nodes = list(
-                set(self.zero_nodes).union(recreated_nodes)
-            )
 
         row_df = pd.DataFrame(df_rows, index=index_vals)
         row_df.index.name = self.dataframe.index.name
