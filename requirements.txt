@@ -1,7 +1,7 @@
 pip>=22.1.0
 setuptools>=70,<82
 wheel
-numpy>=2
+numpy==1.26.4
 Cython>3,!=3.0.4
 pandas<3
 xarray
