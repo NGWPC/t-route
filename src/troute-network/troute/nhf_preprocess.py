@@ -161,8 +161,7 @@ LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
     ("virtual_nexus", None, True),
     (
         "lakes", 
-        [LAKE_ID_FIELD, "fp_id", "virtual_fp_id", "ifd", "LkArea", "LkMxE", "OrificeA",
-         "OrificeC", "OrificeE", "WeirC", "WeirE", "WeirL", "hy_id", "ref_fp_id"], 
+        LEVEL_POOL_PARAMS + ["hy_id", "ref_fp_id"], 
         True),
     ("gages", None, True),
     ("hydrolocations", None, True),
