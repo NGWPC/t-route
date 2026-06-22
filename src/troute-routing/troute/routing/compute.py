@@ -766,12 +766,14 @@ class ExecutionPlan:
                     not waterbody_data.dataframe.empty
                     and assimilation_data.usgs_df.empty
                 ):
-                    # Fast path: dfs_decomposition's path_func=None inlines
-                    # the equivalent of partial(split_at_junction, rconn_subn).
-                    path_func = None
+                    path_func = partial(
+                        nhd_network.split_at_waterbodies_and_junctions,
+                        set(waterbody_data.dataframe.index.to_numpy()),
+                        rconn_subn,
+                    )
 
                 else:
-                    path_func = partial(nhd_network.split_at_junction, rconn_subn)
+                    path_func = None
                 computable_routing_paths[level][partition_tailwater] = (
                     nhd_network.dfs_decomposition(rconn_subn, path_func)
                 )
