@@ -21,6 +21,7 @@ so they are reproducible on any host that runs Docker.
 | `compare_runs.py` | The baseline-vs-candidate comparison + gating step behind `regression_check.sh`; also runnable by hand on any two result tags. |
 | `run_matrix.sh`, `summarize_matrix.py` | Build and run the three-way study matrix (baseline / after-py39 / after-py311) and print the code-vs-Python attribution table behind `RESULTS.md`. |
 | `prep_ohio_data.py`, `prep_conus.py` | Build the Tier A and Tier C input data from the NHF v1.1.4 CONUS GeoPackage. |
+| `run_conus_lakes.py` | **NHF release validation.** Routes a CONUS geopackage as-is (read-only, lakes kept) and verifies finite output; the waterbody warnings during the network build are the per-release lake census. Exit code is CI-friendly. |
 | `sweep_max_loop_size.py` | Runs Tier A across a sweep of `max_loop_size` values, captures wall/CPU/RSS per point, writes `results/max_loop_size_sweep.json`. Backs the operational deployment recommendation on chunk sizing. |
 | `plot_max_loop_size.py` | Renders the sweep JSON to `figures/max_loop_size_sweep.png`. |
 | `data/`, `golden/` | Input GeoPackages and reference output netCDFs (gitignored; build locally). |
@@ -285,6 +286,25 @@ To run benchmarks from inside VS Code:
 If `TROUTE_HYDROFABRIC_DIR` is unset, the container still starts
 with `/hydrofabric` mapped to the empty `/tmp/troute-no-hydrofabric`
 directory; only the benchmark prep scripts will complain.
+
+## Validating a new NHF release (lakes included)
+
+The performance tiers above intentionally empty the lakes layer; to check
+whether a new NextGen Hydrofabric release still routes through t-route with
+waterbodies enabled, run:
+
+```bash
+python benchmark/run_conus_lakes.py --src /path/to/nhf_conus.gpkg
+```
+
+The script reads the geopackage read-only (no copy, no data repair), builds
+the full network with `break_network_at_waterbodies: True`, routes a short
+window, and exits non-zero if the run crashes, produces non-finite output, or
+the data fails the channel-parameter pre-checks. The warnings emitted during
+the network build report, per category and with counts, every lake that could
+not be modeled as a reservoir (non-numeric lake_id, no fp_id, missing
+level-pool parameters, no single inlet -> outlet chain) -- treat them as the
+release's lake census. Needs ~16 GB RAM and a few minutes.
 
 ## Checking your changes for regressions
 

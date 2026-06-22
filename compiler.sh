@@ -126,9 +126,9 @@ fi
 if [[ "$build_framework" == true ]]; then
   cd $REPOROOT/src/troute-network
   if [[ ${WITH_EDITABLE} == true ]]; then
-    pip install --no-build-isolation --config-setting='--build-option=--use-cython' --editable . --config-setting='editable_mode=compat' || exit
+    USE_CYTHON=1 pip install --no-build-isolation --config-setting='--build-option=--use-cython' --editable . --config-setting='editable_mode=compat' || exit
   else
-    pip install --no-build-isolation --config-setting='--build-option=--use-cython' . || exit
+    USE_CYTHON=1 pip install --no-build-isolation --config-setting='--build-option=--use-cython' . || exit
   fi
 fi
 
@@ -138,9 +138,9 @@ if [[ "$build_routing" == true ]]; then
     rm -rf build
     
     if [[ ${WITH_EDITABLE} == true ]]; then
-        $PIP_CMD install --no-build-isolation --config-setting='--build-option=--use-cython' --editable . --config-setting='editable_mode=compat' || exit
+        USE_CYTHON=1 $PIP_CMD install --no-build-isolation --config-setting='--build-option=--use-cython' --editable . --config-setting='editable_mode=compat' || exit
     else
-        $PIP_CMD install --no-build-isolation --config-setting='--build-option=--use-cython' . || exit
+        USE_CYTHON=1 $PIP_CMD install --no-build-isolation --config-setting='--build-option=--use-cython' . || exit
     fi
 fi
 

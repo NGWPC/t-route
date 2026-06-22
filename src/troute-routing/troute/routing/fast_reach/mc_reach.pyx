@@ -505,7 +505,7 @@ cpdef object compute_network_structured(
         for idx, val in enumerate(tmp["results"]):
             flowveldepth_nd[fill_index, (idx//qvd_ts_w) + 1, idx%qvd_ts_w] = val
             if data_idx[fill_index]  in lake_numbers_col:
-                res_idx = binary_find(lake_numbers_col, [data_idx[fill_index]])
+                res_idx = binary_find(lake_numbers_col, [data_idx[fill_index]])[0]
                 flowveldepth_nd[fill_index, 0, 0] = wbody_parameters[res_idx, 9] # TODO ref dataframe column label
             else:
                 flowveldepth_nd[fill_index, 0, 0] = init_array[fill_index, 0] # initial flow condition

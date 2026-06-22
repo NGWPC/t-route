@@ -24,24 +24,9 @@ except ImportError:
 _VAR_NAME_UNITS_MAP = {
     BmiVars.CATCHMENT_VALUE: ['streamflow_cms', 'm3 s-1'],
     BmiVars.NEXUS_VALUE: ['streamflow_cms', 'm3 s-1'],
-    BmiVars.CHANNEL_WATER_RATE: ['streamflow_cms', 'm3 s-1'],
-    BmiVars.CHANNEL_WATER_SPEED: ['streamflow_ms', 'm s-1'],
-    BmiVars.CHANNEL_WATER_DEPTH: ['streamflow_m', 'm'],
-    BmiVars.LAKE_WATER_INCOMING: ['waterbody_cms', 'm3 s-1'],
-    BmiVars.LAKE_WATER_OUTGOING: ['waterbody_cms', 'm3 s-1'],
-    BmiVars.LAKE_WATER_ELEVATION: ['waterbody_m', 'm'],
 }
 
-_OUTPUT_VAR_NAMES = [
-    BmiVars.CHANNEL_WATER_ID,
-    BmiVars.CHANNEL_WATER_RATE,
-    BmiVars.CHANNEL_WATER_SPEED,
-    BmiVars.CHANNEL_WATER_DEPTH,
-    BmiVars.LAKE_WATER_ID,
-    BmiVars.LAKE_WATER_INCOMING,
-    BmiVars.LAKE_WATER_OUTGOING,
-    BmiVars.LAKE_WATER_ELEVATION,
-]
+_OUTPUT_VAR_NAMES = []
 
 _INPUT_VAR_NAMES = [
     BmiVars.CATCHMENT_ID,
@@ -110,14 +95,6 @@ class BmiTroute(Bmi):
             BmiVars.CATCHMENT_ID: np.zeros(0, dtype=np.int64),
             BmiVars.CATCHMENT_VALUE: np.zeros(0, dtype=np.double),
             BmiVars.UPSTREAM_ID: np.zeros(0, dtype=int),
-            BmiVars.CHANNEL_WATER_ID: np.zeros(0, dtype=np.int64),
-            BmiVars.CHANNEL_WATER_RATE: np.zeros(0, dtype=np.float32),
-            BmiVars.CHANNEL_WATER_SPEED: np.zeros(0, dtype=np.float32),
-            BmiVars.CHANNEL_WATER_DEPTH: np.zeros(0, dtype=np.float32),
-            BmiVars.LAKE_WATER_ID: np.zeros(0, dtype=np.int64),
-            BmiVars.LAKE_WATER_INCOMING: np.zeros(0, dtype=np.float32),
-            BmiVars.LAKE_WATER_OUTGOING: np.zeros(0, dtype=np.float32),
-            BmiVars.LAKE_WATER_ELEVATION: np.zeros(0, dtype=np.float32),
         }
         self._free_serialized()
 
