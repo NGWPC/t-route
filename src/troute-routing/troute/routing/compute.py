@@ -406,7 +406,7 @@ class ForcingData:
     qlats: pd.DataFrame
     q0: pd.DataFrame
     eloss: pd.DataFrame
-    h0: pd.DataFrame
+    wbody_init: pd.DataFrame
 
     @cached_property
     def qlat_vals(self) -> Float32Array:
@@ -1497,7 +1497,7 @@ def build_compute_package(
     # run-set state-transfer mechanism: the execution plan (and its per-job
     # frames) is reused across run sets, and each run set re-applies the
     # network's current waterbody elevations here before packaging.
-    job.waterbodies_df.update(forcing.h0)
+    job.waterbodies_df.update(forcing.wbody_init)
 
     # Build streamflow DA dataframes
     usgs_df_sub, lastobs_df_sub, da_positions_list_byseg = _prep_da_dataframes(
@@ -1803,8 +1803,8 @@ def compute_nhd_routing_v02(
     )
     reach_data = ReachData(param_df)
     waterbody_data = WaterbodyData(waterbodies_df, waterbody_types_df)
-    wbody_h0 = waterbodies_df[["h0"]]
-    forcing_data = ForcingData(qlats, q0, eloss_df, wbody_h0)
+    wbody_init = waterbodies_df[["h0", "qd0"]]
+    forcing_data = ForcingData(qlats, q0, eloss_df, wbody_init)
     assimilation_data = AssimilationData(
         reservoir_usgs_df = reservoir_usgs_df,
         reservoir_usgs_param_df = reservoir_usgs_param_df,
