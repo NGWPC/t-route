@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1
+# Reproduces: numpy 1.26.4 is NOT usable on Python 3.14 (must be compiled from
+# source, and that build miscomputes at scale), while it works on Python 3.11
+# (where a wheel exists).
+#
+# Build arg PYVER selects the interpreter. numpy 1.26.4 is pinned; on 3.11 pip
+# installs the manylinux WHEEL, on 3.14 (no wheel) pip COMPILES it from source.
+# Everything else (this repo's source, the build steps) is identical.
+#
+#   docker build -f docker/Dockerfile.numpy-from-source-test --build-arg PYVER=3.11 -t troute-np-py311 .
+#   docker build -f docker/Dockerfile.numpy-from-source-test --build-arg PYVER=3.14 -t troute-np-py314 .
+#
+# A self-contained correctness check (check_numpy_py314.py, repo root) runs at
+# the end of the build: it PASSES on 3.11 and FAILS on 3.14, with no t-route data.
+# (It lives at the root, not docker/, because docker/ is in .dockerignore.)
+ARG PYVER=3.11
+FROM python:${PYVER}-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc g++ gfortran make cmake git pkg-config \
+        libopenblas-dev liblapack-dev \
+        libnetcdf-dev libnetcdff-dev netcdf-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3 -m venv "$VIRTUAL_ENV"
+ENV PATH="$VIRTUAL_ENV/bin:$PATH" \
+    NETCDF="/usr/include"
+
+# RUN_NUMPY_CHECK=1 (default) runs the correctness check at the end of the build,
+# so the py3.14 build FAILS (that is the proof). Set 0 to build the py3.14 image
+# anyway (e.g. to run the full CONUS case, which then crashes at runtime).
+ARG RUN_NUMPY_CHECK=1
+
+WORKDIR /t-route
+
+# numpy 1.26.4: py3.11 -> manylinux wheel; py3.14 -> compiled from source.
+RUN python -m pip install --upgrade pip && \
+    python -m pip install "numpy==1.26.4" && \
+    python -c "import numpy,sys;print('BUILT py',sys.version.split()[0],'numpy',numpy.__version__)"
+
+COPY requirements.txt .
+RUN python -m pip install -r requirements.txt && python -m pip install matplotlib psutil
+
+COPY . .
+RUN ./compiler.sh no-e
+
+# Self-contained correctness check (no t-route data). PASS on 3.11, FAIL on 3.14.
+# Gated so the py3.14 image can still be built (RUN_NUMPY_CHECK=0) for CONUS.
+RUN if [ "$RUN_NUMPY_CHECK" = "1" ]; then python check_numpy_py314.py; fi
+
+ENTRYPOINT ["/opt/venv/bin/python", "-m", "nwm_routing"]
