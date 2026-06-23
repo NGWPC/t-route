@@ -530,8 +530,10 @@ def _force_headwater_routing(
     )
 
     # Force routing on headwater vfps with waterbodies
+    numeric_lake_id = pd.to_numeric(waterbodies["lake_id"], errors="coerce")
+    _waterbodies = waterbodies.loc[numeric_lake_id.notna()].copy()
     _required_lp_fields = list(set(LEVEL_POOL_PARAMS).difference(["fp_id"]))
-    waterbody_vfps = waterbodies.dropna(subset=_required_lp_fields)["virtual_fp_id"].astype(int).values
+    waterbody_vfps = _waterbodies.dropna(subset=_required_lp_fields)["virtual_fp_id"].astype(int).values
     forced_vfps.extend(list(set(headwater_vfps).intersection(waterbody_vfps)))
 
     # In the future, could add more conditions here
