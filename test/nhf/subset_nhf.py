@@ -1,7 +1,7 @@
 import argparse
 import sqlite3
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import geopandas as gpd
 import pandas as pd
@@ -56,10 +56,28 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
     fp_set = set(fp_ids)
     layers = [name for name, _ in pyogrio.list_layers(gpkg_path)]
 
+    def _in_clause(values) -> Optional[str]:
+        cleaned = []
+        for value in values:
+            if pd.isna(value):
+                continue
+            cleaned.append(int(value))
+        if not cleaned:
+            return None
+        unique_vals = sorted(set(cleaned))
+        return "(" + ",".join(str(v) for v in unique_vals) + ")"
+
+    def _read_layer(layer_name: str, where_sql: str):
+        return gpd.read_file(gpkg_path, sql=f'SELECT * FROM "{layer_name}" WHERE {where_sql}')
+
+    nex_ids: set[int] = set()
+    vfp_ids: set[int] = set()
+    lake_ids: set[int] = set()
+
     # Flowpaths
     if "flowpaths" in layers:
-        fp = gpd.read_file(gpkg_path, layer="flowpaths")
-        fp = fp[fp["fp_id"].isin(fp_set)]
+        fp_clause = _in_clause(fp_set)
+        fp = _read_layer("flowpaths", f"fp_id IN {fp_clause}" if fp_clause else "1=0")
         print(f"  flowpaths: {len(fp)}")
     else:
         print("  no flowpaths layer, skipping")
@@ -67,8 +85,8 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
 
     # Divides (div_id == fp_id)
     if "divides" in layers:
-        div = gpd.read_file(gpkg_path, layer="divides")
-        div = div[div["div_id"].isin(fp_set)]
+        fp_clause = _in_clause(fp_set)
+        div = _read_layer("divides", f"div_id IN {fp_clause}" if fp_clause else "1=0")
         print(f"  divides: {len(div)}")
     else:
         print("  no divides layer, skipping")
@@ -76,10 +94,11 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
 
     # Nexus: collect all nex_ids referenced by selected flowpaths
     if "nexus" in layers:
-        nex_ids = set(fp["dn_nex_id"].dropna().astype(int))
-        nex_ids |= set(fp["up_nex_id"].dropna().astype(int))
-        nex = gpd.read_file(gpkg_path, layer="nexus")
-        nex = nex[nex["nex_id"].isin(nex_ids)]
+        if fp is not None and not fp.empty:
+            nex_ids = set(fp["dn_nex_id"].dropna().astype(int))
+            nex_ids |= set(fp["up_nex_id"].dropna().astype(int))
+        nex_clause = _in_clause(nex_ids)
+        nex = _read_layer("nexus", f"nex_id IN {nex_clause}" if nex_clause else "1=0")
         print(f"  nexus: {len(nex)}")
     else:
         print("  no nexus layer, skipping")
@@ -87,8 +106,8 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
 
     # Reference flowpaths: by div_id
     if "reference_flowpaths" in layers:
-        ref_fp = gpd.read_file(gpkg_path, layer="reference_flowpaths")
-        ref_fp = ref_fp[ref_fp["div_id"].isin(fp_set)]
+        fp_clause = _in_clause(fp_set)
+        ref_fp = _read_layer("reference_flowpaths", f"div_id IN {fp_clause}" if fp_clause else "1=0")
         print(f"  reference_flowpaths: {len(ref_fp)} ({ref_fp['virtual_fp_id'].notna().sum()} VFP rows)")
     else:
         print("  no reference_flowpaths layer, skipping")
@@ -96,9 +115,10 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
 
     # Virtual flowpaths: by virtual_fp_id from reference_flowpaths
     if "virtual_flowpaths" in layers:
-        vfp_ids = set(ref_fp.loc[ref_fp["virtual_fp_id"].notna(), "virtual_fp_id"].astype(int))
-        vfp = gpd.read_file(gpkg_path, layer="virtual_flowpaths")
-        vfp = vfp[vfp["virtual_fp_id"].isin(vfp_ids)]
+        if ref_fp is not None and not ref_fp.empty:
+            vfp_ids = set(ref_fp.loc[ref_fp["virtual_fp_id"].notna(), "virtual_fp_id"].astype(int))
+        vfp_clause = _in_clause(vfp_ids)
+        vfp = _read_layer("virtual_flowpaths", f"virtual_fp_id IN {vfp_clause}" if vfp_clause else "1=0")
         print(f"  virtual_flowpaths: {len(vfp)}")
     else:
         print("  no virtual_flowpaths layer, skipping")
@@ -106,9 +126,11 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
 
     # Virtual nexus: from dn_virtual_nex_id of selected VFPs
     if "virtual_nexus" in layers:
-        vnex_ids = set(vfp["dn_virtual_nex_id"].dropna().astype(int))
-        vnex = gpd.read_file(gpkg_path, layer="virtual_nexus")
-        vnex = vnex[vnex["virtual_nex_id"].isin(vnex_ids)]
+        vnex_ids = set()
+        if vfp is not None and not vfp.empty:
+            vnex_ids = set(vfp["dn_virtual_nex_id"].dropna().astype(int))
+        vnex_clause = _in_clause(vnex_ids)
+        vnex = _read_layer("virtual_nexus", f"virtual_nex_id IN {vnex_clause}" if vnex_clause else "1=0")
         print(f"  virtual_nexus: {len(vnex)}")
     else:
         print("  no virtual_nexus layer, skipping")
@@ -116,8 +138,8 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
 
     # Hydrolocations: by dn_nex_id
     if "hydrolocations" in layers:
-        hydroloc = gpd.read_file(gpkg_path, layer="hydrolocations")
-        hydroloc = hydroloc[hydroloc["dn_nex_id"].isin(nex_ids)]
+        nex_clause = _in_clause(nex_ids)
+        hydroloc = _read_layer("hydrolocations", f"dn_nex_id IN {nex_clause}" if nex_clause else "1=0")
         print(f"  hydrolocations: {len(hydroloc)}")
     else:
         print("  no hydrolocations layer, skipping")
@@ -125,8 +147,8 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
 
     # Waterbodies: by fp_id
     if "waterbodies" in layers:
-        wb = gpd.read_file(gpkg_path, layer="waterbodies")
-        wb = wb[wb["fp_id"].isin(fp_set)]
+        fp_clause = _in_clause(fp_set)
+        wb = _read_layer("waterbodies", f"fp_id IN {fp_clause}" if fp_clause else "1=0")
         print(f"  waterbodies: {len(wb)}")
     else:
         print("  no waterbodies layer, skipping")
@@ -134,9 +156,9 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
 
     # lakes: by virtual_fp_id
     if "lakes" in layers:
-        lk = gpd.read_file(gpkg_path, layer="lakes")
-        lk = lk[lk["virtual_fp_id"].isin(vfp_ids)]
-        lake_ids = lk["nhf_lake_id"].values
+        vfp_clause = _in_clause(vfp_ids)
+        lk = _read_layer("lakes", f"virtual_fp_id IN {vfp_clause}" if vfp_clause else "1=0")
+        lake_ids = set(lk["nhf_lake_id"].dropna().astype(int).tolist())
         print(f"  lakes: {len(lk)}")
     else:
         print("  no lakes layer, skipping")
@@ -144,17 +166,17 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
 
     # reservoir_da: by nhf_lake_id
     if "reservoir_da" in layers:
-        rda = gpd.read_file(gpkg_path, layer="reservoir_da")
-        rda = rda[rda["nhf_lake_id"].isin(lake_ids)]
+        lake_clause = _in_clause(lake_ids)
+        rda = _read_layer("reservoir_da", f"nhf_lake_id IN {lake_clause}" if lake_clause else "1=0")
         print(f"  reservoir_da: {len(rda)}")
     else:
         print("  no reservoir_da layer, skipping")
-        lk = None
+        rda = None
 
     # Gages: by fp_id
     if "gages" in layers:
-        gages = gpd.read_file(gpkg_path, layer="gages")
-        gages = gages[gages["fp_id"].isin(fp_set)]
+        fp_clause = _in_clause(fp_set)
+        gages = _read_layer("gages", f"fp_id IN {fp_clause}" if fp_clause else "1=0")
         print(f"  gages: {len(gages)}")
     else:
         print("  no gages layer, skipping")
@@ -170,6 +192,7 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
         "hydrolocations": hydroloc,
         "waterbodies": wb,
         "lakes": lk,
+        "reservoir_da": rda,
         "gages": gages,
     }
 

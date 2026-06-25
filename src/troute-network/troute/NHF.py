@@ -96,8 +96,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             gages = nhf["gages"]
             reference_flowpaths = nhf["reference_flowpaths"]
             virtual_flowpaths = nhf["virtual_flowpaths"]
-            virtual_nexus = nhf["virtual_nexus"]
             hydrolocations = nhf["hydrolocations"]
+            reservoir_da = nhf["reservoir_da"]
 
             # Preprocess network objects
             (
@@ -129,15 +129,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             # Preprocess waterbody objects
             self.preprocess_waterbodies(waterbodies)
 
-            # Preprocess data assimilation objects #TODO: Move to DataAssimilation.py?
-            self.preprocess_data_assimilation(
-                flowpaths,
-                reference_flowpaths,
-                virtual_flowpaths,
-                virtual_nexus,
-                waterbodies,
-                gages
-            )
+            # Preprocess data assimilation objects
+            self.preprocess_data_assimilation(reservoir_da)
 
 
         if self.verbose:

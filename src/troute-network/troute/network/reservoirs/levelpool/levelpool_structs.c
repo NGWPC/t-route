@@ -70,7 +70,7 @@ extern void assim(void* handle, float *updated_elevation,
  * Notes
  *
  */
-void init_levelpool_reach(_Reach* reach, int lake_number,
+void init_levelpool_reach(_Reach* reach, long lake_number,
                      float dam_length, float area, float max_depth, 
                      float orifice_area, float orifice_coefficient, 
                      float orifice_elevation, float weir_coefficient, 

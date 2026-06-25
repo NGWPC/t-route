@@ -18,7 +18,7 @@ extern void run_hybrid(void* handle, float *inflow, float *lateral_inflow,
 
 extern void free_hybrid(void* handle);
 
-init_hybrid_reach(_Reach* reach, int lake_number,
+init_hybrid_reach(_Reach* reach, long lake_number,
                           float dam_length, float area, float max_depth,
                           float orifice_area, float orifice_coefficient, float orifice_elevation,
                           float weir_coefficient, float weir_elevation, float weir_length,
