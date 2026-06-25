@@ -705,11 +705,6 @@ class NHFPreprocessMixin:
             the appropriate waterbody link (``wb_link``).
             7. Redirect all lateral inflows (qlats) from ``all_fp`` to ``qlat_link``.
 
-        Parameters
-        ----------
-        lake_id_field : str, optional
-            Column name used to uniquely identify waterbodies in the input
-            dataframe. Default is ``"lake_id"``.
 
         """
         # Precompute the routing links of every waterbody flowpath ONCE. The

@@ -11,6 +11,7 @@ from .AbstractNetwork import AbstractNetwork
 from troute.nhf_discretize import discretize_flowpaths
 
 from troute.nhf_preprocess import (
+    LAKE_ID_FIELD,
     LEVEL_POOL_PARAMS,
     NHFPreprocessMixin,
     read_geo_file,
@@ -523,7 +524,7 @@ def _force_headwater_routing(
     )
 
     # Force routing on headwater vfps with waterbodies
-    numeric_lake_id = pd.to_numeric(waterbodies["lake_id"], errors="coerce")
+    numeric_lake_id = pd.to_numeric(waterbodies[LAKE_ID_FIELD], errors="coerce")
     _waterbodies = waterbodies.loc[numeric_lake_id.notna()].copy()
     _required_lp_fields = list(set(LEVEL_POOL_PARAMS).difference(["fp_id"]))
     waterbody_vfps = _waterbodies.dropna(subset=_required_lp_fields)["virtual_fp_id"].astype(int).values
