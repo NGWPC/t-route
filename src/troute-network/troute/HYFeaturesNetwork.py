@@ -132,8 +132,20 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
             lakes["lake_id"] = lakes["lake_id"].astype(int)
             lakes = lakes.merge(hydro[["hl_link", "id", "hl_reference"]], left_on="lake_id", right_on="hl_link", how="left")
 
-        # add hl_uri to nexus
-        nexus = nexus.merge(hydro[["nex_id", "hl_uri"]], left_on="id", right_on="nex_id", how="left")
+        # hydrolocations may call the nexus key "nex_id" or simply "id"
+        if "nex_id" in hydro.columns:
+            right_col = "nex_id"
+        elif "id" in hydro.columns:
+            right_col = "id"
+        else:
+            raise KeyError("HYFeaturesNetwork: hydrolocations layer missing expected nexus id column. available: " + ", ".join(list(hydro.columns)))
+
+        # normalize to 'nex_id' for downstream code, then merge to get hl_uri for nexus
+        if right_col != "nex_id":
+            hydro = hydro.rename(columns={right_col: "nex_id"})
+
+        if not nexus.empty: 
+            nexus = nexus.merge(hydro[["nex_id", "hl_uri"]], left_on="id", right_on="nex_id", how="left")
 
     return flowpaths, lakes, network, nexus
 
@@ -646,7 +658,13 @@ class HYFeaturesNetwork(AbstractNetwork):
             self._duplicate_ids_df = pd.DataFrame()
             self._gl_climatology_df = pd.DataFrame()
 
-        self._dataframe = self.dataframe.drop("waterbody", axis=1).drop_duplicates()
+        # drop 'waterbody' if present; avoid KeyError when it's missing
+        if "waterbody" in self.dataframe.columns:
+            self._dataframe = self.dataframe.drop(columns=["waterbody"]).drop_duplicates()
+        else:
+            #import warnings
+            #warnings.warn("HYFeaturesNetwork: 'waterbody' column not present; skipping drop")
+            self._dataframe = self.dataframe.drop_duplicates()
 
     def preprocess_data_assimilation(self, network):
         if not network.empty:

@@ -22,7 +22,7 @@ elif os.environ.get("USE_CYTHON"):
     USE_CYTHON = True
 else:
     USE_CYTHON = False
-
+USE_CYTHON = True
 ext = "pyx" if USE_CYTHON else "c"
 
 # adapted from https://stackoverflow.com/a/5192738/489116 and https://stackoverflow.com/a/32192172/489116
