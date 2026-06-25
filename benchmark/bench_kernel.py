@@ -36,7 +36,7 @@ import numpy as np
 
 BENCH_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BENCH_DIR))
-from harvest_kernel_inputs import CALLS_PKL, summarize_result  # noqa: E402
+from harvest_kernel_inputs import CALLS_PKL, summarize_result, qlat_from_call  # noqa: E402
 
 RESULTS_DIR = BENCH_DIR / "results"
 
@@ -129,7 +129,7 @@ def main() -> int:
                  "python benchmark/harvest_kernel_inputs.py")
     payload = pickle.load(open(CALLS_PKL, "rb"))
     calls = payload["calls"]
-    invocations = sum(int(c["args"][9].size) for c in calls)
+    invocations = sum(int(qlat_from_call(c["args"], c["kwargs"]).size) for c in calls)
     print(f"loaded {len(calls)} call(s) "
           f"({payload['n_calls_kept']}/{payload['n_calls_total']} from harvest), "
           f"{invocations:,} kernel invocations / iteration")
@@ -137,7 +137,7 @@ def main() -> int:
     from troute.routing.fast_reach.mc_reach import compute_network_structured
 
     samples: list[float] = []
-    last_results = None
+    last_results: list = []
     for i in range(args.warmup + args.runs):
         elapsed, results = replay_once(calls, compute_network_structured)
         if i >= args.warmup:
@@ -166,6 +166,12 @@ def main() -> int:
           f"(worst sampled rel drift {worst_rel:.3e}, gate {REL_DRIFT_GATE:.0e})")
     for line in report:
         print(f"  {line}")
+    print("  reading the numbers: the ms above are the kernel-only replay time")
+    print(f"  per iteration over the harvested {invocations:,} MC-kernel")
+    print("  invocations, with no IO/joblib/Python pipeline, so a lower value")
+    print("  means a faster kernel. 'rel drift' is a sanity check of the replayed")
+    print("  output vs the harvested baseline (should be ~0 for an unchanged")
+    print("  kernel); bench_e2e.py is the authoritative full-output gate.")
 
     print("\nRESULTS.md kernel column:")
     print(f"  median {stats['median']*1000:.2f} ms   ({status})")

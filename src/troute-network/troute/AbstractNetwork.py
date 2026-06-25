@@ -742,11 +742,14 @@ class AbstractNetwork(ABC):
                     self.waterbody_dataframe, waterbodies_initial_states_df, on=index_id
                 )
             else:
-                self._waterbody_df = pd.DataFrame()
+                self._waterbody_df = pd.DataFrame(columns=["qd0", "h0"])
             LOG.debug(
                 "waterbody initial states complete in %s seconds."\
                 % (time.time() - start_time))
             start_time = time.time()
+
+        else:
+            self._waterbody_df = pd.DataFrame(columns=["qd0", "h0"])
 
         #----------------------------------------------------------------------------
         # Assemble channel initial states (flow and depth)

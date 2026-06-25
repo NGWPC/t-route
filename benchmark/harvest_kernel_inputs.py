@@ -76,6 +76,18 @@ def summarize_result(result) -> list[dict]:
     return summary
 
 
+def qlat_from_call(call_args, call_kwargs):
+    """Return the kernel's qlat_values argument regardless of call convention.
+
+    Legacy compute.py passes the kernel inputs positionally (qlat_values is
+    index 9). The refactored compute.py calls ``compute_func(**vars(package))``,
+    so every argument arrives in call_kwargs and call_args is empty.
+    """
+    if len(call_args) > 9:
+        return call_args[9]
+    return call_kwargs.get("qlat_values")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -89,8 +101,8 @@ def main() -> int:
     if not (DATA_DIR / "MANIFEST.json").exists():
         sys.exit("ERROR: benchmark dataset missing. Run prep_ohio_data.py first.")
 
-    work = Path(tempfile.mkdtemp(prefix="harvest_"))
-    out_dir = work / "out"
+    tmpdir = Path(tempfile.mkdtemp(prefix="harvest_"))
+    out_dir = tmpdir / "out"
     out_dir.mkdir()
     config = resolved_config(out_dir, args.nts)
 
@@ -106,7 +118,7 @@ def main() -> int:
     def recording_wrapper(*call_args, **call_kwargs):
         nonlocal n_seen
         n_seen += 1
-        qlat = call_args[9]  # qlat_values: (segments, chunk-steps)
+        qlat = qlat_from_call(call_args, call_kwargs)  # (segments, chunk-steps)
         work = int(getattr(qlat, "size", 0))
         smallest_kept = min((c[0] for c in captured), default=-1)
         keep = len(captured) < args.max_calls or work > smallest_kept
@@ -140,12 +152,12 @@ def main() -> int:
 
     size_mb = CALLS_PKL.stat().st_size / (1024 * 1024)
     for i, (work, snap) in enumerate(captured):
-        qlat = snap["args"][9]
+        qlat = qlat_from_call(snap["args"], snap["kwargs"])
         print(f"  kept call {i}: qlat_values shape={getattr(qlat, 'shape', '?')}"
               f"  ({work} kernel invocations)")
     print(f"\nKept {len(calls)}/{n_seen} call(s) -> {CALLS_PKL} ({size_mb:.1f} MB)")
     import shutil
-    shutil.rmtree(work, ignore_errors=True)
+    shutil.rmtree(tmpdir, ignore_errors=True)
     return 0
 
 
