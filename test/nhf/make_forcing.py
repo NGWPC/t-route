@@ -274,14 +274,14 @@ def main():
 
     parser.add_argument(
         "--generate-reference-data",
-        default=True,
+        action="store_true",
         help="Generate reference data (USGS and retrospective outputs) for testing.",
     )
 
     parser.add_argument(
         "--add-runout-period",
-        default=True,
-        help="Generate reference data (USGS and retrospective outputs) for testing.",
+        action="store_true",
+        help="Add a runout period after the primary simulation window.",
     )
 
     args = parser.parse_args()
