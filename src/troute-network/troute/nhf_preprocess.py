@@ -162,7 +162,7 @@ LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
     (
         "lakes", 
         LEVEL_POOL_PARAMS + ["hy_id", "ref_fp_id"], 
-        True),
+        False),
     ("gages", None, True),
     ("hydrolocations", None, True),
 ]
@@ -598,9 +598,18 @@ class NHFPreprocessMixin:
 
     def preprocess_waterbodies(self, lakes):
         if not lakes.empty:
+            # Add lat, lon, and crs columns for LAKEOUT files:
+            if self.output_parameters.get("lakeout_output", None):
+                lakes = lakes.to_crs(crs=4326)
+                lakes["crs"] = 4326  # Why you need to list crs when your coordinate keys are lat/lon eludes me...
+                lakes["lon"] = lakes.geometry.x
+                lakes["lat"] = lakes.geometry.y
+                lake_cols = LEVEL_POOL_PARAMS + ["crs", "lat", "lon"]
+            else:
+                lake_cols = LEVEL_POOL_PARAMS
             # Step-by-step cleanup; every dropped category is counted and logged
             # as a warning (see _clean_waterbodies).
-            self.waterbody_dataframe = lakes[LEVEL_POOL_PARAMS]
+            self.waterbody_dataframe = lakes[lake_cols]
             self._waterbody_df, gl_df = _clean_waterbodies(
                 self._waterbody_df, LAKE_ID_FIELD
             )
@@ -630,13 +639,6 @@ class NHFPreprocessMixin:
 
             # Condense flowpaths in a reservoir to single level pool node
             self._refactor_reservoirs()
-
-            # Add lat, lon, and crs columns for LAKEOUT files:
-            lakeout = self.output_parameters.get("lakeout_output", None)
-            if lakeout:
-                raise NotImplementedError("The lakeout feature has not been developed for NHF.")
-
-            
 
             self._waterbody_types_df = pd.DataFrame(
                 data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
