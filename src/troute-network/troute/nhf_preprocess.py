@@ -861,8 +861,22 @@ class NHFPreprocessMixin:
         self.dataframe = pd.concat([self.dataframe, row_df])
 
     def preprocess_data_assimilation(self, reservoir_da: pd.DataFrame):
+        if reservoir_da.empty or self.waterbody_dataframe.empty:
+            self._gages = {}
+            self._usgs_lake_gage_crosswalk = pd.DataFrame()
+            self._usace_lake_gage_crosswalk = pd.DataFrame()
+            self._usbr_lake_gage_crosswalk = pd.DataFrame()
+            self._rfc_lake_gage_crosswalk = pd.DataFrame()
+            return
 
         ### reservoir_da validation and formatting ###
+
+        if RECORD_LAKE_ID_FIELD not in self.waterbody_dataframe.columns:
+            raise KeyError(f"Column {RECORD_LAKE_ID_FIELD} must be in waterbody_dataframe, but only got {self.waterbody_dataframe.columns.to_list()}.")
+        if LAKE_ID_FIELD not in self.waterbody_dataframe.columns:
+            raise KeyError(f"Column {LAKE_ID_FIELD} must be in waterbody_dataframe, but only got {self.waterbody_dataframe.columns.to_list()}.")
+        if LAKE_ID_FIELD not in reservoir_da.columns:
+            raise KeyError(f"Column {LAKE_ID_FIELD} must be in reservoir_da, but only got {reservoir_da.columns.to_list()}.")
         reservoir_da[LAKE_ID_FIELD] = reservoir_da[LAKE_ID_FIELD].astype(int)
 
         # In NHF, the reservoir_da table is one-to-one with lakes table.
