@@ -314,7 +314,7 @@ accuracy regressions. One script does the whole thing:
 
 ```bash
 # one-time: build the data the harness replays (see "Set up the input data" above)
-python benchmark/prep_ohio_data.py --src /path/to/nhf_1.1.4.gpkg
+python benchmark/prep_ohio_data.py --src /path/to/nhf_1.2.1.gpkg
 python benchmark/harvest_kernel_inputs.py
 
 # compare your working tree vs development (Tier A + Tier B)
