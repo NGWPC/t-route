@@ -495,28 +495,28 @@ class ComputeInputs:
     time_since_lastobs_init: Float32Array
     da_decay_coefficient: float
     reservoir_usgs_obs: Float32Array
-    reservoir_usgs_wbody_idx: Int32Array
+    reservoir_usgs_wbody_idx: Int64Array
     reservoir_usgs_time: Float32Array
     reservoir_usgs_update_time: Float32Array
     reservoir_usgs_prev_persisted_flow: Float32Array
     reservoir_usgs_persistence_update_time: Float32Array
     reservoir_usgs_persistence_index: Float32Array
     reservoir_usace_obs: Float32Array
-    reservoir_usace_wbody_idx: Int32Array
+    reservoir_usace_wbody_idx: Int64Array
     reservoir_usace_time: Float32Array
     reservoir_usace_update_time: Float32Array
     reservoir_usace_prev_persisted_flow: Float32Array
     reservoir_usace_persistence_update_time: Float32Array
     reservoir_usace_persistence_index: Float32Array
     reservoir_usbr_obs: Float32Array
-    reservoir_usbr_wbody_idx: Int32Array
+    reservoir_usbr_wbody_idx: Int64Array
     reservoir_usbr_time: Float32Array
     reservoir_usbr_update_time: Float32Array
     reservoir_usbr_prev_persisted_flow: Float32Array
     reservoir_usbr_persistence_update_time: Float32Array
     reservoir_usbr_persistence_index: Float32Array
     reservoir_rfc_obs: Float32Array
-    reservoir_rfc_wbody_idx: Int32Array
+    reservoir_rfc_wbody_idx: Int64Array
     reservoir_rfc_totalCounts: Int32Array
     reservoir_rfc_file: list[str]
     reservoir_rfc_use_forecast: Int32Array
