@@ -29,8 +29,10 @@ _FLOWPATHS_CHANNEL_COLS = (
 _BAD_FPID_PREVIEW_LIMIT = 10
 LAKE_ID_FIELD = "nhf_lake_id"
 RECORD_LAKE_ID_FIELD = "og_" + LAKE_ID_FIELD
-LEVEL_POOL_PARAMS = [
+NATIVE_LAKE_ID_FIELD = "lake_id"  # Index of lake in its source dataset
+WATERBODY_DF_FIELDS = [
                 LAKE_ID_FIELD,
+                NATIVE_LAKE_ID_FIELD,
                 "fp_id",
                 "virtual_fp_id",
                 "ifd",
@@ -164,7 +166,7 @@ LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
     ("virtual_nexus", None, True),
     (
         "lakes", 
-        LEVEL_POOL_PARAMS + ["hy_id", "ref_fp_id"], 
+        WATERBODY_DF_FIELDS + ["hy_id", "ref_fp_id"], 
         True),
     ("gages", None, True),
     ("hydrolocations", None, True),
@@ -430,7 +432,8 @@ def _clean_waterbodies(
         LOG.warning("waterbodies: dropped %d duplicated parameter rows", n_dup)
 
     # 3. Great Lakes
-    gl_df = waterbody_df[waterbody_df.index.isin(GREAT_LAKES_IDS)].copy()
+    gl_mask = waterbody_df[NATIVE_LAKE_ID_FIELD].isin(GREAT_LAKES_IDS)
+    gl_df = waterbody_df[gl_mask].copy()
     if not gl_df.empty:
         LOG.warning(
             "waterbodies: %d Great Lakes present; they carry no level-pool "
@@ -446,7 +449,7 @@ def _clean_waterbodies(
         # step 6 to drop them for missing parameters -- also prevents a Great Lake
         # that happens to carry valid level-pool parameters from surviving,
         # getting synthetic-renamed, and silently routing as a type-1 reservoir.
-        waterbody_df = waterbody_df[~waterbody_df.index.isin(GREAT_LAKES_IDS)]
+        waterbody_df = waterbody_df[~gl_mask]
 
     # 4. elevation consistency: a level-pool reservoir violating
     # OrificeE <= WeirE <= LkMxE is physically inconsistent and cannot be
@@ -604,7 +607,7 @@ class NHFPreprocessMixin:
         if not lakes.empty:
             # Step-by-step cleanup; every dropped category is counted and logged
             # as a warning (see _clean_waterbodies).
-            self.waterbody_dataframe = lakes[LEVEL_POOL_PARAMS]
+            self.waterbody_dataframe = lakes[WATERBODY_DF_FIELDS]
             self._waterbody_df, gl_df = _clean_waterbodies(
                 self._waterbody_df, LAKE_ID_FIELD
             )
