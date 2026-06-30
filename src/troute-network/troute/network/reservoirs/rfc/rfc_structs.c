@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stdint.h>
 #include "logger.h"
 #include "../../reach_structs.h"
 #include <stdio.h>
@@ -8,7 +9,7 @@ extern void* get_rfc_handle();
 extern void init_rfc(void* handle, float *water_elevation, float *lake_area, float *weir_elevation,
                     float *weir_coefficient, float *weir_length, float *dam_length, float *orifice_elevation,
                     float *orifice_coefficient, float *orifice_area, float *max_depth, 
-                    float *initial_fractional_depth, int *lake_number, int *reservoir_type, 
+                    float *initial_fractional_depth, int64_t *lake_number, int *reservoir_type, 
                     char *reservoir_parameter_file, char *start_date, char *time_series_path, 
                     int *forecast_lookback_hours);
 

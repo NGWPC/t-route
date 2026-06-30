@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <stdint.h>
 #include "logger.h"
 #include "../../reach_structs.h"
 #include <stdio.h>
@@ -8,7 +9,7 @@ extern void* get_hybrid_handle();
 extern void init_hybrid(void* handle, float *water_elevation, float *lake_area, float *weir_elevation,
                     float *weir_coefficient, float *weir_length, float *dam_length, float *orifice_elevation,
                     float *orifice_coefficient, float *orifice_area, float *max_depth, 
-                    float *initial_fractional_depth, int *lake_number, int *reservoir_type, 
+                    float *initial_fractional_depth, int64_t *lake_number, int *reservoir_type, 
                     char *reservoir_parameter_file, char *start_date, char *usgs_timeslice_path, 
                     char *usace_timeslice_path, int *observation_lookback_hours,
                     int *observation_update_time_interval_seconds);
