@@ -432,7 +432,7 @@ def _clean_waterbodies(
         LOG.warning("waterbodies: dropped %d duplicated parameter rows", n_dup)
 
     # 3. Great Lakes
-    gl_mask = waterbody_df[NATIVE_LAKE_ID_FIELD].isin(GREAT_LAKES_IDS)
+    gl_mask = waterbody_df[NATIVE_LAKE_ID_FIELD].astype("int64").isin(GREAT_LAKES_IDS)
     gl_df = waterbody_df[gl_mask].copy()
     if not gl_df.empty:
         LOG.warning(
@@ -631,7 +631,15 @@ class NHFPreprocessMixin:
                         "be anchored for reservoir_type 6 DA", n_unanchored,
                     )
                 if not gl_anchored.empty:
-                    self._waterbody_df = pd.concat([self._waterbody_df, gl_anchored])
+                    # Set nhf_lake_id values to lake_id values,
+                    # because those have been hard coded throughout this repo.
+                    gl_anchored.index = gl_anchored[NATIVE_LAKE_ID_FIELD].astype(int)
+                    gl_anchored.index.name = self.waterbody_dataframe.index.name
+                    gl_anchored[RECORD_LAKE_ID_FIELD] = gl_anchored.index.astype(int)
+                    collision_mask = self.waterbody_dataframe.index.isin(gl_anchored.index)
+                    if collision_mask.any():
+                        raise RuntimeError(f"Name collision: nhf_lake_id values of {GREAT_LAKES_IDS} are reserved, but received {self._waterbody_df.loc[collision_mask].index.values}")
+                    self.waterbody_dataframe = pd.concat([self.waterbody_dataframe, gl_anchored])
                 self.great_lakes_climatology_df = get_great_lakes_climatology()
             else:
                 self.great_lakes_climatology_df = pd.DataFrame()
@@ -882,6 +890,11 @@ class NHFPreprocessMixin:
             raise KeyError(f"Column {LAKE_ID_FIELD} must be in reservoir_da, but only got {reservoir_da.columns.to_list()}.")
         reservoir_da[LAKE_ID_FIELD] = reservoir_da[LAKE_ID_FIELD].astype(int)
 
+        # Process great lakes
+        gl_present = reservoir_da[NATIVE_LAKE_ID_FIELD].astype("int64").isin(GREAT_LAKES_IDS)
+        if gl_present.any():
+            reservoir_da.loc[gl_present, LAKE_ID_FIELD] = reservoir_da.loc[gl_present, NATIVE_LAKE_ID_FIELD].astype(int)
+
         # In NHF, the reservoir_da table is one-to-one with lakes table.
         if not reservoir_da[LAKE_ID_FIELD].is_unique:
             raise ValueError(
@@ -903,7 +916,7 @@ class NHFPreprocessMixin:
 
         # Format reservoir_da table
         reservoir_da = reservoir_da[
-            [LAKE_ID_FIELD, RESERVOIR_DA_SITE_ID_FIELD, RESERVOIR_DA_SITE_TYPE_FIELD]
+            [LAKE_ID_FIELD, NATIVE_LAKE_ID_FIELD, RESERVOIR_DA_SITE_ID_FIELD, RESERVOIR_DA_SITE_TYPE_FIELD]
         ]
         reservoir_da = reservoir_da.set_index(LAKE_ID_FIELD, drop=True)
         reservoir_da = reservoir_da.rename(
@@ -928,7 +941,11 @@ class NHFPreprocessMixin:
             .get("reservoir_persistence_da", {})
             .get("reservoir_persistence_usgs", False)
         )
-        usgs_indices = reservoir_da[reservoir_da["reservoir_type"] == 2].index.values
+        type_2_mask = (reservoir_da["reservoir_type"] == 2)
+        great_lake_mask = reservoir_da[NATIVE_LAKE_ID_FIELD].isin(["4800002", "4800004"])
+        usgs_mask = type_2_mask | great_lake_mask
+        usgs_indices = reservoir_da[usgs_mask].index.values
+        # Also add some Great Lakes gages, if present
         self.usgs_lake_gage_crosswalk = (
             reservoir_da.loc[usgs_indices, RESERVOIR_DA_SITE_ID_FIELD]
             .reset_index()
