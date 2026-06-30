@@ -319,6 +319,7 @@ A small domain (the three fp_id-bearing Great Lakes -- 4800002/4800004/4800006; 
 
 ```console
 cd test/nhf/great_lakes
+python build_domain.py --source-gpkg /path/to/hydrofabric.gpkg --out-gpkg domain/nhf.gpkg 
 python run_test.py
 ```
 
