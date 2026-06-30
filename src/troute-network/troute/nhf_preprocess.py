@@ -873,7 +873,7 @@ class NHFPreprocessMixin:
             return
 
         ### reservoir_da validation and formatting ###
-
+        reservoir_da = reservoir_da.copy()
         if RECORD_LAKE_ID_FIELD not in self.waterbody_dataframe.columns:
             raise KeyError(f"Column {RECORD_LAKE_ID_FIELD} must be in waterbody_dataframe, but only got {self.waterbody_dataframe.columns.to_list()}.")
         if  self.waterbody_dataframe.index.name != LAKE_ID_FIELD:
