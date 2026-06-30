@@ -940,7 +940,6 @@ class NHFPreprocessMixin:
                 RESERVOIR_DA_SITE_ID_FIELD: "usgs_gage_id",
             }
         )
-        self.usgs_lake_gage_crosswalk = self.usgs_lake_gage_crosswalk
         if not usgs_da:
             self.waterbody_dataframe.loc[usgs_indices, "reservoir_type"] = 1
 
