@@ -34,10 +34,10 @@ RESERVOIR_SITE_NOS = {
 }
 # Immediately downstream flowpath fp_id for each reservoir (derived from nexus table).
 RESERVOIR_DN_FP = {
-    1276675272336236: 1276675272336236,
-    1276673989193624: 1276673989193624,
-    1276672890005227: 1276672890005227,
-    1276185235011805: 1276185235011805,
+    1276675272336236: 1276674107160768,
+    1276673989193624: 1276673989391626,
+    1276672890005227: 1276672844213843,
+    1276185235011805: 1276185303862487,
 }
 DA_TYPE_LOOKUP = {2: "usgs_da", 3: "usace_da", 4: "rfc_da", 7: "usbr_da"}
 DA_TIMESLICE_SUFFIX = {2: "usgsTimeSlice", 3: "usaceTimeSlice", 7: "usbrTimeSlice"}
@@ -379,7 +379,7 @@ def review_results(run_context: RunContext):
         )
 
 
-def main():
+def test_reservoir_da():
     run_context = RunContext()
     subset_nhf(run_context)
     modify_lakes_table(run_context)
@@ -391,4 +391,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    test_reservoir_da()
