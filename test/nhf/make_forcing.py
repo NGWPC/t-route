@@ -195,6 +195,8 @@ def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: 
         reference_dir = None
     if add_runout_period:
         runout_time = int(((end_dt - start_dt) / 2).total_seconds() / 3600)
+    else:
+        runout_time = 0
 
     create_forcing_dataset(
         t_start=start_dt,
@@ -279,8 +281,8 @@ def main():
     )
 
     parser.add_argument(
-        "--add-runout-period",
-        action="store_true",
+        "--no-runout-period",
+        action="store_false",
         help="Add a runout period after the primary simulation window.",
     )
 
@@ -293,7 +295,7 @@ def main():
         run_id=args.run_id,
         hf_file=args.hf_file,
         generate_reference_data=args.generate_reference_data,
-        add_runout_period=args.add_runout_period,
+        add_runout_period=args.no_runout_period,
     )
 
 
