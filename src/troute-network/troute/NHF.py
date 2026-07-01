@@ -11,7 +11,8 @@ from .AbstractNetwork import AbstractNetwork
 from troute.nhf_discretize import discretize_flowpaths
 
 from troute.nhf_preprocess import (
-    LEVEL_POOL_PARAMS,
+    LAKE_ID_FIELD,
+    WATERBODY_DF_FIELDS,
     NHFPreprocessMixin,
     read_geo_file,
     read_qlat_file,
@@ -96,8 +97,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             gages = nhf["gages"]
             reference_flowpaths = nhf["reference_flowpaths"]
             virtual_flowpaths = nhf["virtual_flowpaths"]
-            virtual_nexus = nhf["virtual_nexus"]
             hydrolocations = nhf["hydrolocations"]
+            reservoir_da = nhf["reservoir_da"]
 
             # Preprocess network objects
             (
@@ -129,15 +130,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             # Preprocess waterbody objects
             self.preprocess_waterbodies(waterbodies)
 
-            # Preprocess data assimilation objects #TODO: Move to DataAssimilation.py?
-            self.preprocess_data_assimilation(
-                flowpaths,
-                reference_flowpaths,
-                virtual_flowpaths,
-                virtual_nexus,
-                waterbodies,
-                gages
-            )
+            # Preprocess data assimilation objects
+            self.preprocess_data_assimilation(reservoir_da)
 
 
         if self.verbose:
@@ -530,9 +524,9 @@ def _force_headwater_routing(
     )
 
     # Force routing on headwater vfps with waterbodies
-    numeric_lake_id = pd.to_numeric(waterbodies["lake_id"], errors="coerce")
+    numeric_lake_id = pd.to_numeric(waterbodies[LAKE_ID_FIELD], errors="coerce")
     _waterbodies = waterbodies.loc[numeric_lake_id.notna()].copy()
-    _required_lp_fields = list(set(LEVEL_POOL_PARAMS).difference(["fp_id"]))
+    _required_lp_fields = list(set(WATERBODY_DF_FIELDS).difference(["fp_id"]))
     waterbody_vfps = _waterbodies.dropna(subset=_required_lp_fields)["virtual_fp_id"].astype(int).values
     forced_vfps.extend(list(set(headwater_vfps).intersection(waterbody_vfps)))
 

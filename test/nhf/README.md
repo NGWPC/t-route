@@ -28,8 +28,8 @@ To make a new forcing dataset, you must start with the NHF (or a subset of the N
  - case-id: the name of the subdirectory of `test/nhf/` where the run data will be placed
  - hf-file: name of the NHF geopackage.  This file must be in the directory `test/nhf/{case-id}/domain`.
  - run-id: the ID of the run.  There may be multiple events per case that you want to run, and this field allows the events to be distinguished.
- - generate-reference-data: Whether or not to export retrospective data and USGS observed data at any gages in the NHF area.  If true, these data may be used in the `generate_diagnostics.py` to plot at-gage comparisons between the retrospective, observed, and NHF datasets.
- - add-runout-period: If true, an additional one half of the simulation time is added after end-time. In this time window all qlat values are set to zero. This option allows water to move through the network and will generally provide a better estimate of volume conservation.
+ - generate-reference-data: Whether or not to export retrospective data and USGS observed data at any gages in the NHF area.  If passed, these data may be used in the `generate_diagnostics.py` to plot at-gage comparisons between the retrospective, observed, and NHF datasets. Omitting this argument defaults to False
+ - no-runout-period: If not passed, an additional one half of the simulation time is added after end-time. In this time window all qlat values are set to zero. This option allows water to move through the network and will generally provide a better estimate of volume conservation.
 
 ## Diagnostic Details
 
@@ -319,6 +319,7 @@ A small domain (the three fp_id-bearing Great Lakes -- 4800002/4800004/4800006; 
 
 ```console
 cd test/nhf/great_lakes
+python build_domain.py --source-gpkg /path/to/hydrofabric.gpkg --out-gpkg domain/nhf.gpkg 
 python run_test.py
 ```
 

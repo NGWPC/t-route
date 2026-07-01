@@ -52,7 +52,7 @@ MANIFEST = DATA_DIR / "MANIFEST.json"
 # upstream contributing area is the canonical nhf_subset_ohio dataset
 # (11,327 flowpaths, ~80,000 km² total drainage area) used for Tier A
 # timing.
-DEFAULT_TAILWATER_FPID = 1725641
+DEFAULT_TAILWATER_FPID = 1275377122765895
 
 # MC-kernel channel-parameter columns guarded by troute's load-time
 # validator; kept in sync with troute.nhf_preprocess._FLOWPATHS_CHANNEL_COLS.
@@ -178,6 +178,15 @@ def carve_upstream_of(src: Path, dst: Path, tailwater_fpid: int
         cur.execute("DELETE FROM lakes")
         deleted_per_table["lakes"] = before
         print(f"  lakes: emptied ({before} rows; routed as MC channels)")
+
+    # Similarly, drop reservoir_da table for NHF v1.2.1+
+    if cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reservoir_da'"
+    ).fetchone():
+        before = cur.execute("SELECT count(*) FROM reservoir_da").fetchone()[0]
+        cur.execute("DELETE FROM reservoir_da")
+        deleted_per_table["reservoir_da"] = before
+        print("  reservoir_da: emptied")
 
     # 2. divides joins through div_id. Build keep_div from flowpaths.div_id.
     cur.execute(
