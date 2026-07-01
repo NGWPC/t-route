@@ -855,10 +855,11 @@ class NHFPreprocessMixin:
         wb_index = self.waterbody_dataframe.index.tolist()
         self.waterbody_connections = dict(zip(wb_index, wb_index))
 
-        row_df = pd.DataFrame(df_rows, index=index_vals)
-        row_df.index.name = self.dataframe.index.name
-        row_df = row_df.astype(self.dataframe.dtypes.to_dict())
-        self.dataframe = pd.concat([self.dataframe, row_df])
+        if df_rows:
+            row_df = pd.DataFrame(df_rows, index=index_vals)
+            row_df.index.name = self.dataframe.index.name
+            row_df = row_df.astype(self.dataframe.dtypes.to_dict())
+            self.dataframe = pd.concat([self.dataframe, row_df])
 
 
     def preprocess_data_assimilation(
