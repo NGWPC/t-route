@@ -432,7 +432,8 @@ def _clean_waterbodies(
         LOG.warning("waterbodies: dropped %d duplicated parameter rows", n_dup)
 
     # 3. Great Lakes
-    gl_mask = waterbody_df[NATIVE_LAKE_ID_FIELD].astype("int64").isin(GREAT_LAKES_IDS)
+    gl_str = [str(i) for i in GREAT_LAKES_IDS]
+    gl_mask = waterbody_df[NATIVE_LAKE_ID_FIELD].astype(str).isin(gl_str)
     gl_df = waterbody_df[gl_mask].copy()
     if not gl_df.empty:
         LOG.warning(
@@ -891,7 +892,8 @@ class NHFPreprocessMixin:
         reservoir_da[LAKE_ID_FIELD] = reservoir_da[LAKE_ID_FIELD].astype(int)
 
         # Process great lakes
-        gl_present = reservoir_da[NATIVE_LAKE_ID_FIELD].astype("int64").isin(GREAT_LAKES_IDS)
+        gl_str = [str(i) for i in GREAT_LAKES_IDS]
+        gl_present = reservoir_da[NATIVE_LAKE_ID_FIELD].astype(str).isin(gl_str)
         if gl_present.any():
             reservoir_da.loc[gl_present, LAKE_ID_FIELD] = reservoir_da.loc[gl_present, NATIVE_LAKE_ID_FIELD].astype(int)
 
