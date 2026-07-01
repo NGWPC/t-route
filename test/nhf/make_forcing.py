@@ -1,7 +1,25 @@
-"""Generate channel forcing files for a CONUS test case using retrospective data, and create a config YAML for running the test case."""
+"""Generate channel forcing files and a config YAML for running an NHF test case.
+
+Three forcing modes are available via --forcing-mode:
+
+  retro   (default) Pull lateral inflows from the NWM v3.0 retrospective Zarr
+            store on S3.  Requires --start-time, --end-time, and an NHF gpkg
+            with a ``reference_flowpaths`` layer.
+
+  pulse   Apply a synthetic unit-hydrograph pulse scaled to --peak-qlat
+            (m³/s, default 10 000) uniformly across all reaches.  The pulse
+            shape is a 22-step rising/falling limb padded with leading zeros
+            and a long recession tail.  Only --start-time is used to set the
+            output filename timestamps.
+
+  constant  Apply a constant qlat of --constant-qlat (m³/s, default 1.0)
+            to every reach for every timestep in the [start-time, end-time]
+            window.
+"""
 import argparse
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Union
+from typing import Literal, Union
 
 import geopandas as gpd
 import numpy as np
@@ -12,9 +30,184 @@ import xarray as xr
 import yaml
 from dataretrieval import nwis
 
+### CONSTANT DEFINITION ###
+
 RETRO_PATH = "s3://noaa-nwm-retrospective-3-0-pds/CONUS/zarr/chrtout.zarr"
 RETROSPECTIVE_LATERAL_FIELD = "q_lateral"
 RETROSPECTIVE_FLOW_FIELD = "streamflow"
+
+# Unit-hydrograph shape shared by pulse forcing
+_PULSE_SHAPE = np.array([
+    0.0, 0.03, 0.10, 0.19, 0.31, 0.47, 0.66, 0.82, 0.93, 0.99,
+    1.00, 0.99, 0.93, 0.86, 0.78, 0.68, 0.56, 0.42, 0.27, 0.18,
+    0.08, 0.03,
+])
+_PULSE_SHAPE = np.concatenate([np.zeros(3), _PULSE_SHAPE, np.zeros(25)])
+
+### CONFIGURATION DATA CLASS ###
+
+@dataclass
+class ForcingConfig:
+    """All parameters needed to build a forcing dataset and config YAML."""
+
+    case_id: str
+    hf_file: str
+    run_id: str = "retro"
+    start_time: str = "2009-12-12 00:00"
+    end_time:   str = "2009-12-29 00:00"
+    forcing_mode: Literal["retro", "pulse", "constant"] = "retro"
+
+    # retro options
+    generate_reference_data: bool = False
+    add_runout_period:        bool = False
+    # pulse options
+    peak_qlat: float = 10_000.0
+    # constant options
+    constant_qlat: float = 1.0
+
+    # path management
+    base_dir: Path = field(default_factory=lambda: Path(__file__).parent)
+
+    @property
+    def start_dt(self) -> pd.Timestamp:
+        """Parsed start time as a pandas Timestamp."""
+        return pd.to_datetime(self.start_time)
+
+    @property
+    def end_dt(self) -> pd.Timestamp:
+        """Parsed end time as a pandas Timestamp."""
+        return pd.to_datetime(self.end_time)
+
+    @property
+    def run_dir(self) -> Path:
+        """Root directory for this case (base_dir / case_id)."""
+        return self.base_dir / self.case_id
+
+    @property
+    def forcing_subdir(self) -> str:
+        """Name of the forcing subdirectory within run_dir."""
+        return f"channel_forcing_{self.run_id}"
+
+    @property
+    def config_path(self) -> Path:
+        """Path to the generated t-route config YAML."""
+        return self.run_dir / f"{self.run_id}.yaml"
+
+    @property
+    def forcing_dir(self) -> Path:
+        """Absolute path to the directory where forcing CSVs will be written."""
+        return self.run_dir / self.forcing_subdir
+
+    @property
+    def hf_path(self) -> Path:
+        """Absolute path to the hydrofabric geopackage."""
+        return self.run_dir / "domain" / self.hf_file
+
+    @property
+    def output_dir(self) -> str:
+        """Output directory string written into the config YAML."""
+        return f"output_{self.run_id}/"
+
+    @property
+    def hf_path_relative(self) -> str:
+        """Hydrofabric path relative to run_dir, as used in the config YAML."""
+        return f"domain/{self.hf_file}"
+
+    @property
+    def qlat_input_folder(self) -> str:
+        """Forcing folder path with trailing slash, as used in the config YAML."""
+        return f"{self.forcing_subdir}/"
+
+    @property
+    def restart_time(self) -> str:
+        """start_dt formatted as the config YAML restart datetime string."""
+        return self.start_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    @property
+    def reference_dir(self) -> Path | None:
+        """Path for reference output files, or None if not requested."""
+        return (self.run_dir / self.run_id) if self.generate_reference_data else None
+
+    @property
+    def runout_time(self) -> int:
+        """Extra hours of zero-qlat runout appended after end_time."""
+        if self.add_runout_period:
+            return int(((self.end_dt - self.start_dt) / 2).total_seconds() / 3600)
+        return 0
+
+    @property
+    def nts(self) -> int:
+        """Total number of 5-minute model timesteps."""
+        dt = 300
+        sim_time = (self.end_dt - self.start_dt).total_seconds()
+        if self.forcing_mode != "pulse" and self.add_runout_period:
+            sim_time += (self.runout_time + 1) * 3600
+        return int(sim_time / dt)
+
+
+def create_pulse_forcing_dataset(
+    t_start: str,
+    forcing_dir: str,
+    hydrofabric_path: str,
+    t_end: str | None = None,
+    peak_qlat: float = 10_000.0,
+    forcing_file_pattern: str = "CHRTOUT_DOMAIN1",
+) -> None:
+    """Write per-timestep CSVs driven by a synthetic pulse scaled to *peak_qlat*.
+
+    The pulse is applied uniformly to every reach in the hydrofabric.  When
+    *t_end* is provided the unit-hydrograph shape is linearly interpolated to
+    span exactly the [t_start, t_end] window; otherwise the native shape length
+    determines the number of timesteps.
+    """
+    forcing_dir = Path(forcing_dir)
+    forcing_dir.mkdir(parents=True, exist_ok=True)
+
+    fps = gpd.read_file(hydrofabric_path, layer="flowpaths", ignore_geometry=True)
+    feature_ids = fps["fp_id"].values
+
+    if t_end is not None:
+        times = pd.date_range(t_start, t_end, freq="h")
+        n = len(times)
+        # Linearly interpolate the unit-hydrograph shape to n samples
+        xp = np.linspace(0, 1, len(_PULSE_SHAPE))
+        xi = np.linspace(0, 1, n)
+        shape = np.interp(xi, xp, _PULSE_SHAPE)
+    else:
+        times = pd.date_range(t_start, periods=len(_PULSE_SHAPE), freq="h")
+        shape = _PULSE_SHAPE
+
+    inflows = shape * peak_qlat
+
+    for t, q in zip(times, inflows):
+        t_str = t.strftime("%Y%m%d%H%M")
+        df = pd.DataFrame({"feature_id": feature_ids, t_str: q})
+        df.to_csv(forcing_dir / f"{t_str}.{forcing_file_pattern}.csv", index=False, float_format="%.15g")
+        print(f"Processing time step {t}...")
+
+
+def create_constant_forcing_dataset(
+    t_start: str,
+    t_end: str,
+    forcing_dir: str,
+    hydrofabric_path: str,
+    constant_qlat: float = 1.0,
+    forcing_file_pattern: str = "CHRTOUT_DOMAIN1",
+) -> None:
+    """Write per-timestep CSVs with a constant *constant_qlat* at every reach."""
+    forcing_dir = Path(forcing_dir)
+    forcing_dir.mkdir(parents=True, exist_ok=True)
+
+    fps = gpd.read_file(hydrofabric_path, layer="flowpaths", ignore_geometry=True)
+    feature_ids = fps["fp_id"].values
+
+    times = pd.date_range(t_start, t_end, freq="h")
+    for t in times:
+        t_str = t.strftime("%Y%m%d%H%M")
+        df = pd.DataFrame({"feature_id": feature_ids, t_str: constant_qlat})
+        df.to_csv(forcing_dir / f"{t_str}.{forcing_file_pattern}.csv", index=False, float_format="%.15g")
+        print(f"Processing time step {t}...")
+
 
 def create_forcing_dataset(t_start: str, t_end: str, forcing_dir: str, hydrofabric_path: str, retrospective_path: str, forcing_file_pattern: str = "CHRTOUT_DOMAIN1", generate_reference_data: bool = False, reference_dir: Union[str, None] = None, runout_time: int = 0):
     """Create a dataset of channel forcing files from retrospective data."""
@@ -178,68 +371,53 @@ def make_config_yaml(config_path: str, hydrofabric_path: str, qlat_input_folder:
     with open(config_path, 'w') as f:
         yaml.dump(config_dict, f)
 
-def build_forcing_dataset(start_time: str, end_time: str, case_id: str, run_id: str, hf_file: str, generate_reference_data: bool = False, add_runout_period: bool = False):
-    """Build the forcing dataset and config YAML for a given case and run."""
-    start_dt = pd.to_datetime(start_time)
-    end_dt = pd.to_datetime(end_time)
-    run_dir = Path(__file__).parent / case_id
-    forcing_subdir = f"channel_forcing_{run_id}"
-    config_path = run_dir / f"{run_id}.yaml"
-    forcing_dir = run_dir / forcing_subdir
-    hf_path = run_dir / "domain" / hf_file
-    output_dir = f"output_{run_id}/"
-    if generate_reference_data:
-        reference_dir = run_dir / run_id
-        reference_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        reference_dir = None
-    if add_runout_period:
-        runout_time = int(((end_dt - start_dt) / 2).total_seconds() / 3600)
-    else:
-        runout_time = 0
+def build_forcing_dataset(cfg: ForcingConfig) -> None:
+    """Build the forcing dataset and config YAML described by config."""
+    if cfg.generate_reference_data and cfg.reference_dir is not None:
+        cfg.reference_dir.mkdir(parents=True, exist_ok=True)
 
-    create_forcing_dataset(
-        t_start=start_dt,
-        t_end=end_dt,
-        forcing_dir=forcing_dir,
-        hydrofabric_path=hf_path,
-        retrospective_path=RETRO_PATH,
-        generate_reference_data=generate_reference_data,
-        reference_dir=reference_dir,
-        runout_time=runout_time,
-    )
-    dt = 300 # could be an input argument if we want to vary it across runs
-    sim_time = (end_dt - start_dt).total_seconds()
-    if add_runout_period:
-        sim_time += (runout_time + 1) * 3600
-    nts = int(sim_time / dt)
+    if cfg.forcing_mode == "retro":
+        create_forcing_dataset(
+            t_start=cfg.start_dt,
+            t_end=cfg.end_dt,
+            forcing_dir=cfg.forcing_dir,
+            hydrofabric_path=cfg.hf_path,
+            retrospective_path=RETRO_PATH,
+            generate_reference_data=cfg.generate_reference_data,
+            reference_dir=cfg.reference_dir,
+            runout_time=cfg.runout_time,
+        )
+    elif cfg.forcing_mode == "pulse":
+        create_pulse_forcing_dataset(
+            t_start=cfg.start_dt,
+            t_end=cfg.end_dt,
+            forcing_dir=cfg.forcing_dir,
+            hydrofabric_path=cfg.hf_path,
+            peak_qlat=cfg.peak_qlat,
+        )
+    elif cfg.forcing_mode == "constant":
+        create_constant_forcing_dataset(
+            t_start=cfg.start_dt,
+            t_end=cfg.end_dt,
+            forcing_dir=cfg.forcing_dir,
+            hydrofabric_path=cfg.hf_path,
+            constant_qlat=cfg.constant_qlat,
+        )
+    else:
+        raise ValueError(f"Unknown forcing_mode '{cfg.forcing_mode}'. Choose retro, pulse, or constant.")
 
     make_config_yaml(
-        config_path=config_path,
-        hydrofabric_path=f"domain/{hf_file}",
-        qlat_input_folder=f"{forcing_subdir}/",
-        nts=nts,
-        restart_time=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
-        output_dir=output_dir
+        config_path=cfg.config_path,
+        hydrofabric_path=cfg.hf_path_relative,
+        qlat_input_folder=cfg.qlat_input_folder,
+        nts=cfg.nts,
+        restart_time=cfg.restart_time,
+        output_dir=cfg.output_dir,
     )
 
-def conecuh_retro():
-    """Generate forcing files and config yaml for December 2009 floods."""
-    start_time = "2009-12-12"
-    end_time = "2009-12-29"
-    case_id = "conecuh_case"
-    run_id = "retro"
-    hf_file =  "02374250.gpkg"
-
-    build_forcing_dataset(
-        start_time=start_time,
-        end_time=end_time,
-        case_id=case_id,
-        run_id=run_id,
-        hf_file=hf_file,
-    )
 
 def main():
+    """Enter via CLI."""
     parser = argparse.ArgumentParser(
         description="Generate forcing dataset and config YAML for a case."
     )
@@ -286,17 +464,48 @@ def main():
         help="Add a runout period after the primary simulation window.",
     )
 
+    parser.add_argument(
+        "--forcing-mode",
+        default="retro",
+        choices=["retro", "pulse", "constant"],
+        help=(
+            "Forcing generation mode. "
+            "'retro' (default): pull lateral inflows from the NWM v3 retrospective store. "
+            "'pulse': apply a synthetic unit-hydrograph pulse to all reaches. "
+            "'constant': apply a constant qlat to all reaches for every timestep."
+        ),
+    )
+
+    parser.add_argument(
+        "--peak-qlat",
+        type=float,
+        default=10_000.0,
+        help="Peak discharge (m³/s) for the synthetic pulse. Only used when --forcing-mode=pulse.",
+    )
+
+    parser.add_argument(
+        "--constant-qlat",
+        type=float,
+        default=1.0,
+        help="Constant lateral inflow (m³/s) per reach. Only used when --forcing-mode=constant.",
+    )
+
     args = parser.parse_args()
 
-    build_forcing_dataset(
+    cfg = ForcingConfig(
+        case_id=args.case_id,
+        hf_file=args.hf_file,
+        run_id=args.run_id,
         start_time=args.start_time,
         end_time=args.end_time,
-        case_id=args.case_id,
-        run_id=args.run_id,
-        hf_file=args.hf_file,
+        forcing_mode=args.forcing_mode,
         generate_reference_data=args.generate_reference_data,
         add_runout_period=args.no_runout_period,
+        peak_qlat=args.peak_qlat,
+        constant_qlat=args.constant_qlat,
     )
+
+    build_forcing_dataset(cfg)
 
 
 if __name__ == "__main__":

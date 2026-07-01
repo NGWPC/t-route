@@ -1,18 +1,22 @@
+"""Setup helpers for the four_lakes reservoir DA test case.
+
+Provides all data-generation and configuration functions needed to prepare
+the test inputs.  Imported by both ``prep_tests.py`` (preprocessing) and
+``test_reservoir_da.py`` (test execution).
+"""
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
-import subprocess
-from typing import Any
 
 import numpy as np
 import pandas as pd
 import xarray as xr
 import yaml
 
-OUTLET_REACH_ID = 1276182780176988
-NHF_PATH = "/hydrofabric/nhf_1.2.1.gpkg"
+### CONSTANTS ###
+
 RESERVOIR_TYPE_MOD = {
     1276675272336236: 2,
     1276673989193624: 3,
@@ -39,37 +43,40 @@ RESERVOIR_DN_FP = {
     1276672890005227: 1276672844213843,
     1276185235011805: 1276185303862487,
 }
+
 DA_TYPE_LOOKUP = {2: "usgs_da", 3: "usace_da", 4: "rfc_da", 7: "usbr_da"}
 DA_TIMESLICE_SUFFIX = {2: "usgsTimeSlice", 3: "usaceTimeSlice", 7: "usbrTimeSlice"}
 
 START_TIME = "2020-01-01 00:00:00"
 END_TIME = "2020-01-01 01:00:00"
-DT = 300   # seconds per routing timestep
-NTS = 12   # (1 hour * 3600 s) / 300 s
+DT = 300  # seconds per routing timestep
+NTS = 12  # (1 hour * 3600 s) / 300 s
+
+### RUN CONTEXT CLASS ###
 
 
 @dataclass
 class RunContext:
+    """Paths and settings for a single four_lakes test run."""
+
     model_root: Path = field(default_factory=lambda: Path(__file__).parent)
-    hf_path: Path = field(default_factory=lambda: Path(__file__).parent / "domain" / "nhf.gpkg")
-    forcing_dir: Path = field(default_factory=lambda: Path(__file__).parent / "channel_forcing")
+    hf_path: Path = field(
+        default_factory=lambda: Path(__file__).parent / "domain" / "nhf.gpkg"
+    )
+    forcing_dir: Path = field(
+        default_factory=lambda: Path(__file__).parent / "channel_forcing"
+    )
     da_dir: Path = field(default_factory=lambda: Path(__file__).parent / "reservoir_da")
-    config_path: Path = field(default_factory=lambda: Path(__file__).parent / "config.yaml")
+    config_path: Path = field(
+        default_factory=lambda: Path(__file__).parent / "config.yaml"
+    )
     output_dir: str = "output"
 
 
-def subset_nhf(run_context: RunContext):
-    """Domain is pre-built; verify it exists."""
-    if not run_context.hf_path.exists():
-        relative_hf_path = run_context.hf_path.relative_to(run_context.model_root)
-        subprocess.run(
-            ["python", "../subset_nhf.py", "--source-gpkg", NHF_PATH, "--out-gpkg", str(relative_hf_path), "--outlet-fp-id", str(OUTLET_REACH_ID)],
-            cwd=run_context.model_root,
-            check=True,
-        )
+### SETUP FUNCTIONS
 
 
-def modify_lakes_table(run_context: RunContext):
+def modify_lakes_table(run_context: RunContext) -> None:
     """Update da_type and assign synthetic site_nos in the gpkg reservoir_da table."""
     conn = sqlite3.connect(run_context.hf_path)
     cur = conn.cursor()
@@ -83,8 +90,8 @@ def modify_lakes_table(run_context: RunContext):
     conn.close()
 
 
-def make_channel_forcing_data(run_context: RunContext):
-    """Write zero-valued channel forcing CSVs for every flowpath and timestep."""
+def make_channel_forcing_data(run_context: RunContext) -> None:
+    """Write constant-flow channel forcing CSVs for every flowpath and timestep."""
     run_context.forcing_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(run_context.hf_path)
     cur = conn.cursor()
@@ -102,12 +109,11 @@ def make_channel_forcing_data(run_context: RunContext):
         )
 
 
-def make_reservoir_da_data(run_context: RunContext):
+def make_reservoir_da_data(run_context: RunContext) -> None:
     """Write constant-flow DA forcing files for each reservoir type."""
     for subdir in DA_TYPE_LOOKUP.values():
         (run_context.da_dir / subdir).mkdir(parents=True, exist_ok=True)
 
-    # Build per-type lists of (site_no, flow).
     type_to_sites: dict[int, list[tuple[str, float]]] = {}
     for lake_id, da_type in RESERVOIR_TYPE_MOD.items():
         type_to_sites.setdefault(da_type, []).append(
@@ -139,7 +145,7 @@ def make_reservoir_da_data(run_context: RunContext):
         "observedCounts": {"dtype": "int16"},
         "forecastCounts": {"dtype": "int16"},
         "discharge_qualities": {"dtype": "int16"},
-        # timeSteps encoding is intentionally omitted; let xarray infer it for timedelta64.
+        # timeSteps encoding intentionally omitted; let xarray infer timedelta64.
     }
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H:%M:%S")
@@ -178,18 +184,9 @@ def make_reservoir_da_data(run_context: RunContext):
 
         elif da_type == 4:
             # RFC (type 4): one file per hour per station.
-            # Each file covers a multi-hour timeseries starting 28 hours before
-            # the issue time (matching the lookback_hours used in the config) so
-            # that t0 (START_TIME) is guaranteed to be present in every file.
-            # The reference format (BCRT2) uses:
-            #   stationId           – scalar (0-dim)
-            #   discharges          – (nseries, forecastInd)  one entry per hour
-            #   synthetic_values    – (nseries, forecastInd)
-            #   totalCounts / observedCounts / forecastCounts / timeSteps /
-            #   discharge_qualities / queryTime / issueTimeUTC  – (nseries,) scalars
             lookback_hrs = 28
-            forecast_hrs = 12   # enough to cover the simulation and persist window
-            n_steps = lookback_hrs + forecast_hrs + 1  # hourly steps
+            forecast_hrs = 12
+            n_steps = lookback_hrs + forecast_hrs + 1
 
             hour_range = pd.date_range(
                 start_dt - pd.Timedelta(hours=1),
@@ -204,13 +201,11 @@ def make_reservoir_da_data(run_context: RunContext):
                 for sid, flow in site_list:
                     sid_clean = sid.strip()
                     out_path = (
-                        out_subdir
-                        / f"{hour_str}.60min.{sid_clean}.RFCTimeSeries.ncdf"
+                        out_subdir / f"{hour_str}.60min.{sid_clean}.RFCTimeSeries.ncdf"
                     )
                     discharges = np.full((1, n_steps), flow, dtype=np.float32)
-                    # Mark the forecast portion (after issue time) as synthetic.
                     synthetic = np.zeros((1, n_steps), dtype=np.int8)
-                    synthetic[0, lookback_hrs + 1:] = 1
+                    synthetic[0, lookback_hrs + 1 :] = 1
                     ds = xr.Dataset(
                         data_vars={
                             "stationId": np.asarray(sid.rjust(15), dtype="S15"),
@@ -218,14 +213,8 @@ def make_reservoir_da_data(run_context: RunContext):
                                 ["nseries"],
                                 np.asarray([time_str], dtype="S19"),
                             ),
-                            "discharges": (
-                                ["nseries", "forecastInd"],
-                                discharges,
-                            ),
-                            "synthetic_values": (
-                                ["nseries", "forecastInd"],
-                                synthetic,
-                            ),
+                            "discharges": (["nseries", "forecastInd"], discharges),
+                            "synthetic_values": (["nseries", "forecastInd"], synthetic),
                             "totalCounts": (
                                 ["nseries"],
                                 np.asarray([n_steps], dtype=np.int16),
@@ -241,8 +230,7 @@ def make_reservoir_da_data(run_context: RunContext):
                             "timeSteps": (
                                 ["nseries"],
                                 np.asarray(
-                                    [np.timedelta64(1, "h")],
-                                    dtype="timedelta64[ns]",
+                                    [np.timedelta64(1, "h")], dtype="timedelta64[ns]"
                                 ),
                             ),
                             "discharge_qualities": (
@@ -269,8 +257,8 @@ def make_reservoir_da_data(run_context: RunContext):
                     ds.to_netcdf(out_path, encoding=encoding_rfc)
 
 
-def make_config(run_context: RunContext):
-    """Write a T-Route config yaml with all four reservoir DA types enabled."""
+def make_config(run_context: RunContext) -> None:
+    """Write a T-Route config YAML with all four reservoir DA types enabled."""
     config_dict = {
         "log_parameters": {
             "showtiming": True,
@@ -337,58 +325,3 @@ def make_config(run_context: RunContext):
     }
     with open(run_context.config_path, "w") as f:
         yaml.dump(config_dict, f)
-
-
-def run_troute(run_context: RunContext):
-    """Execute the generated T-Route run."""
-    subprocess.run(
-        ["python", "-m", "nwm_routing", "-V5", "-f", str(run_context.config_path)],
-        cwd=run_context.model_root,
-        check=True,
-    )
-
-
-def review_results(run_context: RunContext):
-    """Check that flow is 0 everywhere except downstream of a DA reservoir and
-    verify each reservoir's outflow matches its expected constant value."""
-    output_path = run_context.model_root / run_context.output_dir
-    output_files = sorted(output_path.glob("*.nc"))
-    assert output_files, f"No output files found in {output_path}"
-
-    output_ds = xr.concat(
-        [xr.open_dataset(p, engine="netcdf4") for p in output_files],
-        dim="time",
-    )
-    feature_ids = set(output_ds["feature_id"].values.tolist())
-
-    # Each immediately-downstream reach must carry the reservoir's DA outflow.
-    for lake_id, dn_fp_id in RESERVOIR_DN_FP.items():
-        if dn_fp_id not in feature_ids:
-            continue
-        expected = RESERVOIR_FLOW_VALUES[lake_id]
-        actual = output_ds["flow"].sel(feature_id=dn_fp_id).values
-        np.testing.assert_allclose(
-            actual,
-            expected,
-            rtol=0.05,
-            atol=1.0,
-            err_msg=(
-                f"Flow downstream of reservoir {lake_id} (fp {dn_fp_id}) "
-                f"should be ~{expected} m³/s"
-            ),
-        )
-
-
-def test_reservoir_da():
-    run_context = RunContext()
-    subset_nhf(run_context)
-    modify_lakes_table(run_context)
-    make_channel_forcing_data(run_context)
-    make_reservoir_da_data(run_context)
-    make_config(run_context)
-    run_troute(run_context)
-    review_results(run_context)
-
-
-if __name__ == "__main__":
-    test_reservoir_da()
