@@ -93,21 +93,10 @@ PATUXENT = TestConfig(
     start_time="2011-09-05 00:00",
     end_time="2011-09-15 00:00",
 )
-LAKE_CREEK = TestConfig(
-    case_id="lake_creek",
-    outlet_fp_id=1266641284404728,
-    start_time="1987-03-20 00:00",
-    end_time="1987-03-30 00:00",
-)
+
 CISS_CREEK = TestConfig(
     case_id="ciss_creek",
     outlet_fp_id=1288454913281725,
-    start_time="2000-01-01 00:00",
-    end_time="2000-01-03 00:00",
-)
-HOT_BROOK = TestConfig(
-    case_id="hot_brook",
-    outlet_fp_id=1288003930934961,
     start_time="2000-01-01 00:00",
     end_time="2000-01-03 00:00",
 )
@@ -296,12 +285,8 @@ def main() -> None:
         prep_test(CONECUH, args.nhf_gpkg, args.refresh)
     if "patuxent" in tests:
         prep_test(PATUXENT, args.nhf_gpkg, args.refresh)
-    if "lake_creek" in tests:
-        prep_test(LAKE_CREEK, args.nhf_gpkg, args.refresh)
     if "ciss_creek" in tests:
         prep_test(CISS_CREEK, args.nhf_gpkg, args.refresh)
-    if "hot_brook" in tests:
-        prep_test(HOT_BROOK, args.nhf_gpkg, args.refresh)
     if "great_lakes" in tests:
         prep_great_lakes(GREAT_LAKES, args.nhf_gpkg, args.refresh)
     if "four_lakes" in tests:

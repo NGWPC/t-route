@@ -74,33 +74,21 @@ Passing criteria: Peak outflow downstream of one of the reservoirs is within acc
 
 ---
 
-### Lake Creek (`lake_creek`)
+### Ciss Creek (`ciss_creek`)
 
-Two lakes on the same flowpath. Tests in-series reservoir routing. A gage is present; results should improve once water-level hot starts are in.
+Single flowpath with four reservoirs including two on the main flowpath and two on a shared virtual flowpath.  Checks
 
-Passing criteria: Peak outflow at outlet is within acceptable range.
+ - level pool routing is ocurring on virtual flowpaths
+ - many reservoirs will route when on the same flowpath or virtual flowpath
 
-| Parameter | Value |
-|---|---|
-| Outlet fp_id | `1266641284404728` |
-| Period | 1987-03-20 to 1987-03-30 |
-| Forcing | `retro` |
-| Lat / Lon | 43.11703,-101.73266 |
-
----
-
-### Hot Brook (`hot_brook`)
-
-Small domain with two in-series lakes. Used for iterating on level-pool logic without the overhead of retrospective data. `review.py` regenerates the diagnostic plot after routing.
-
-Passing criteria: Results match a recalculated level pool run.
+Passing criteria: Peak outflow is within acceptable range.
 
 | Parameter | Value |
 |---|---|
-| Outlet fp_id | `1288003930934961` |
+| Outlet fp_id | `1288454913281725` |
 | Period | 2000-01-01 to 2000-01-03 |
-| Forcing | `pulse` (synthetic unit hydrograph) |
-| Lat / Lon | 45.60821,-67.93942 |
+| Forcing | `pulse` |
+| Lat / Lon | 46.26594,-69.58566 |
 
 ---
 

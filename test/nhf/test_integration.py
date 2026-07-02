@@ -151,30 +151,15 @@ PATUXENT_PLOTS: list[PlotSpec] = [
     ),
 ]
 
-LAKE_CREEK_PLOTS: list[PlotSpec] = [
-    PlotSpec(
-        title="Lake Creek (Mar 1987)",
-        output_dir=HERE / "lake_creek" / f"output_{RUN_ID}",
-        traces=[
-            ReachTrace(
-                label="Outlet",
-                feature_id=1266641284404728,
-            ),
-        ],
-    ),
-]
-
 # ciss_creek: outlet reach not yet determined; add feature_id + bounds once known.
-CISS_CREEK_PLOTS: list[PlotSpec] = []
-
-HOT_BROOK_PLOTS: list[PlotSpec] = [
+CISS_CREEK_PLOTS: list[PlotSpec] = [
     PlotSpec(
-        title="Hot Brook (synthetic pulse)",
-        output_dir=HERE / "hot_brook" / f"output_{RUN_ID}",
+        title="Ciss Creek (synthetic pulse)",
+        output_dir=HERE / "ciss_creek" / f"output_{RUN_ID}",
         traces=[
             ReachTrace(
                 label="Outlet",
-                feature_id=1288003930934961,
+                feature_id=1288454913281725,
             ),
         ],
     ),
@@ -453,28 +438,6 @@ def test_patuxent() -> None:
     for spec in PATUXENT_PLOTS:
         _PLOT_QUEUE.append(_load_plot_data(spec))
 
-
-@pytest.mark.integration
-def test_lake_creek() -> None:
-    """Route the March 1987 Lake Creek event (two lakes on the same flowpath)."""
-    case_dir    = HERE / "lake_creek"
-    config_path = case_dir / CONFIG
-    forcing_dir = case_dir / FORCING_DIR
-    output_dir  = LAKE_CREEK_PLOTS[0].output_dir
-
-    if not config_path.exists() or not _has_files(forcing_dir, "*.csv"):
-        pytest.skip(
-            "lake_creek data not built. "
-            "Run: python test/nhf/prep_tests.py --nhf-gpkg <path> --test lake_creek"
-        )
-
-    _delete_outputs(output_dir)
-    _run_troute(config_path)
-    _assert_peak_bounds(LAKE_CREEK_PLOTS, output_dir)
-    for spec in LAKE_CREEK_PLOTS:
-        _PLOT_QUEUE.append(_load_plot_data(spec))
-
-
 @pytest.mark.integration
 def test_ciss_creek() -> None:
     """Route a synthetic pulse through Ciss Creek."""
@@ -501,39 +464,6 @@ def test_ciss_creek() -> None:
         _PLOT_QUEUE.append(_load_plot_data(spec))
 
     # TODO: add outlet reach ID + bounds to CISS_CREEK_PLOTS above
-
-
-@pytest.mark.integration
-def test_hot_brook() -> None:
-    """Route a synthetic pulse through Hot Brook (two lakes, same flowpath).
-
-    After routing, ``review.py`` is run to regenerate the diagnostic plot.
-    That script has no assertions — failures surface as non-zero exit codes
-    or exceptions raised during plot computation.
-    """
-    case_dir    = HERE / "hot_brook"
-    config_path = case_dir / CONFIG
-    forcing_dir = case_dir / "channel_forcing"
-    output_dir  = HOT_BROOK_PLOTS[0].output_dir
-
-    if not config_path.exists() or not _has_files(forcing_dir, "*.csv"):
-        pytest.skip(
-            "hot_brook forcing data not built. "
-            "Run: python test/nhf/prep_tests.py --test hot_brook"
-        )
-
-    _delete_outputs(output_dir)
-    _run_troute(config_path)
-
-    subprocess.run(
-        [sys.executable, "review.py"],
-        cwd=case_dir,
-        check=True,
-    )
-
-    _assert_peak_bounds(HOT_BROOK_PLOTS, output_dir)
-    for spec in HOT_BROOK_PLOTS:
-        _PLOT_QUEUE.append(_load_plot_data(spec))
 
 
 @pytest.mark.integration
