@@ -48,6 +48,8 @@ Each test runs t-route end-to-end and checks model output.  If the input data is
 
 NHF routing on a well-observed Alabama basin (USGS gage 02374250), December 2009 flood.
 
+Passing criteria: Peak flow at outlet is within acceptable range.
+
 | Parameter | Value |
 |---|---|
 | Outlet fp_id | `1270581653591645` |
@@ -60,6 +62,8 @@ NHF routing on a well-observed Alabama basin (USGS gage 02374250), December 2009
 ### Patuxent Reservoir (`patuxent`)
 
 Simple, well-gauged site for checking level-pool reservoir behaviour.
+
+Passing criteria: Peak outflow downstream of one of the reservoirs is within acceptable range.
 
 | Parameter | Value |
 |---|---|
@@ -74,6 +78,8 @@ Simple, well-gauged site for checking level-pool reservoir behaviour.
 
 Two lakes on the same flowpath. Tests in-series reservoir routing. A gage is present; results should improve once water-level hot starts are in.
 
+Passing criteria: Peak outflow at outlet is within acceptable range.
+
 | Parameter | Value |
 |---|---|
 | Outlet fp_id | `1266641284404728` |
@@ -85,7 +91,9 @@ Two lakes on the same flowpath. Tests in-series reservoir routing. A gage is pre
 
 ### Hot Brook (`hot_brook`)
 
-Small synthetic domain with two in-series lakes. Used for iterating on level-pool logic without the overhead of retrospective data. `review.py` regenerates the diagnostic plot after routing.
+Small domain with two in-series lakes. Used for iterating on level-pool logic without the overhead of retrospective data. `review.py` regenerates the diagnostic plot after routing.
+
+Passing criteria: Results match a recalculated level pool run.
 
 | Parameter | Value |
 |---|---|
@@ -100,6 +108,8 @@ Small synthetic domain with two in-series lakes. Used for iterating on level-poo
 
 DA-forced outflows from the three fp_id-bearing Great Lakes (Superior, Erie, Ontario via outflow CSV). Checks that forced values propagate correctly downstream. A domain is committed to the repo and runs as-is; use `build_domain.py` to regenerate from a newer NHF release.
 
+Passing criteria: Flows at outlets of lakes match DA values very closely
+
 | Parameter | Value |
 |---|---|
 | Lake fp_ids | `4800002`, `4800004`, `4800006` |
@@ -111,6 +121,8 @@ DA-forced outflows from the three fp_id-bearing Great Lakes (Superior, Erie, Ont
 ### Four Lakes — Reservoir DA (`four_lakes`)
 
 Runs all four reservoir DA types in one shot: USGS persistence (type 2), USACE persistence (type 3), RFC time-series (type 4), USBR persistence (type 7). `prep_tests.py` generates synthetic constant-flow DA files. The test checks that the immediately-downstream reach of each reservoir carries the expected outflow.
+
+Passing criteria: Flows at outlets of lakes (which have been forced low) match DA values very closely
 
 | Parameter | Value |
 |---|---|

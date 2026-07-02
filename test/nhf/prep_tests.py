@@ -43,7 +43,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from make_forcing import ForcingConfig, build_forcing_dataset
 from four_lakes.setup import (
-    OUTLET_REACH_ID as FOUR_LAKES_OUTLET_FP_ID,
     RunContext as FourLakesRunContext,
     make_channel_forcing_data,
     make_config as make_four_lakes_config,
@@ -114,6 +113,8 @@ HOT_BROOK = TestConfig(
 )
 
 GREAT_LAKES = GreatLakesConfig()
+
+FOUR_LAKES_OUTLET_FP_ID = 1276182780176988
 
 ALL_TESTS = [
     "conecuh",
