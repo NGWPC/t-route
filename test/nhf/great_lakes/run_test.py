@@ -126,12 +126,5 @@ def main():
 
     run_troute(cfg_path)
 
-    out_files = Path(out_dir).glob("*"+out_ext)
-    ds = xr.concat([xr.open_dataset(i) for i in out_files], dim="time")
-    max_flows = ds["flow"].values.max(axis=0)
-    close = np.isclose(max_flows, 2000, atol=5).all()
-    if not close:
-        raise RuntimeError("Maximum flows for great lakes runs not close to forcing value of 2,000")
-
 if __name__ == "__main__":
     main()

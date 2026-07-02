@@ -16,6 +16,7 @@ import argparse
 import sqlite3
 import sys
 from pathlib import Path
+import geopandas as gpd
 
 # subset_nhf lives one directory up (test/nhf/).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -29,54 +30,44 @@ FP_LINKAGE = {
     "4800006": 1286192735893685,
     "4800007": 1287248237297035
 }
+VFP_LINKAGE = {
+    "4800002": 1278346877373953,
+    "4800004": 1276364270423160,
+    "4800006": 1286154743979494,
+    "4800007": 1287248166320950
+}
 
-def great_lakes_fp_ids(source_gpkg: str) -> list[int]:
-    conn = sqlite3.connect(source_gpkg)
-    placeholders = ",".join("?" * len(GREAT_LAKES_FP_BEARING_IDS))
-    rows = conn.execute(
-        f"SELECT fp_id FROM lakes WHERE lake_id IN ({placeholders}) "
-        "AND fp_id IS NOT NULL",
-        GREAT_LAKES_FP_BEARING_IDS,
-    ).fetchall()
-    conn.close()
-    return [int(r[0]) for r in rows]
 
-def patch_gpkg_lakes_fp_ids(gpkg_path: str) -> None:
-    """Temporary fix: UPDATE the lakes table in-place so each Great Lake's fp_id
-    matches FP_LINKAGE.
+def patch_gpkg_lakes(gpkg_path: str) -> None:
+    """Patch Great Lakes fp_id and virtual_fp_id values in-place."""
+    linkages = {"fp_id": FP_LINKAGE, "virtual_fp_id": VFP_LINKAGE}
+    lake_id_list = ", ".join(FP_LINKAGE.keys())  # same keys for both
 
-    NHF releases occasionally assign a Great Lake's fp_id to a flowpath that
-    doesn't survive the domain subset, leaving the lake with a stale fp_id that
-    later causes an IndexError in _build_div_weighting_matrix.  Patching the
-    geopackage directly is the simplest fix until NHF corrects the source data.
-    """
-    conn = sqlite3.connect(gpkg_path)
-    try:
-        # GeoPackage triggers use ST_IsEmpty (a spatialite function) which
-        # plain sqlite3 doesn't have.  Drop them temporarily, patch, recreate.
-        triggers = conn.execute(
-            "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='lakes'"
-        ).fetchall()
-        for name, _ in triggers:
-            conn.execute(f"DROP TRIGGER IF EXISTS \"{name}\"")
+    # Quick check: skip if all columns already match.
+    gl = gpd.read_file(gpkg_path, layer="lakes", where=f"lake_id IN ({lake_id_list})")
+    if all(
+        row[col] == {int(k): v for k, v in mapping.items()}[int(row["lake_id"])]
+        for col, mapping in linkages.items()
+        for _, row in gl.iterrows()
+    ):
+        return
 
-        for lake_id, correct_fp_id in FP_LINKAGE.items():
-            row = conn.execute(
-                "SELECT fp_id FROM lakes WHERE lake_id = ?", (lake_id,)
-            ).fetchone()
-            if row is None or row[0] is None or int(row[0]) == correct_fp_id:
-                continue
-            print(f"  [patch_gpkg] lake_id {lake_id}: fp_id {int(row[0])} -> {correct_fp_id}")
-            conn.execute(
-                "UPDATE lakes SET fp_id = ? WHERE lake_id = ?",
-                (correct_fp_id, lake_id),
-            )
+    gdf = gpd.read_file(gpkg_path, layer="lakes")
+    dirty = False
+    for col, mapping in linkages.items():
+        old = gdf[col].copy()
+        gdf[col] = gdf["lake_id"].map(mapping).fillna(gdf[col]).astype(gdf[col].dtype)
+        changed = ~((gdf[col] == old) | (gdf[col].isna() & old.isna()))
+        for lake_id, old_val, new_val in (
+            gdf.loc[changed, ["lake_id", col]]
+            .assign(old_col=old[changed])[["lake_id", "old_col", col]]
+            .itertuples(index=False)
+        ):
+            print(f"  [patch_gpkg] lake_id {lake_id}: {col} {old_val} -> {new_val}")
+        dirty |= changed.any()
 
-        for _, sql in triggers:
-            conn.execute(sql)
-        conn.commit()
-    finally:
-        conn.close()
+    if dirty:
+        gdf.to_file(gpkg_path, layer="lakes", driver="GPKG")
 
 
 def main() -> None:
@@ -92,9 +83,9 @@ def main() -> None:
     args = ap.parse_args()
 
     ### TEMPORARY PATCH UNTIL NHF 1.2.2 ###
-    patch_gpkg_lakes_fp_ids(args.source_gpkg)
+    patch_gpkg_lakes(args.source_gpkg)
 
-    gl_fps = great_lakes_fp_ids(args.source_gpkg)
+    gl_fps = FP_LINKAGE.values()
     if not gl_fps:
         sys.exit("ERROR: no fp_id-bearing Great Lakes found in the source "
                  "geopackage (expected lake_ids 4800002/4800004/4800006)")
