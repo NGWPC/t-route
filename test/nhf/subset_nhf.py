@@ -11,6 +11,7 @@ import pyogrio
 def get_upstream_fp_ids(gpkg_path: str, outlet_fp_id: int) -> list[int]:
     """Recursively find all upstream fp_ids via fp_to_id."""
     conn = sqlite3.connect(gpkg_path)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_flowpaths_fp_to_id ON flowpaths(fp_to_id)")
     rows = conn.execute(
         """
         WITH RECURSIVE upstream(fp_id) AS (
@@ -34,6 +35,7 @@ def get_downstream_fp_ids(gpkg_path: str, seed_fp_ids: list[int], max_depth: int
     """
     seeds = ",".join(str(int(x)) for x in seed_fp_ids)
     conn = sqlite3.connect(gpkg_path)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_flowpaths_fp_id ON flowpaths(fp_id)")
     rows = conn.execute(
         f"""
         WITH RECURSIVE downstream(fp_id, depth) AS (
@@ -68,7 +70,7 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
         return "(" + ",".join(str(v) for v in unique_vals) + ")"
 
     def _read_layer(layer_name: str, where_sql: str):
-        return gpd.read_file(gpkg_path, sql=f'SELECT * FROM "{layer_name}" WHERE {where_sql}')
+        return gpd.read_file(gpkg_path, layer=layer_name, where=where_sql)
 
     nex_ids: set[int] = set()
     vfp_ids: set[int] = set()

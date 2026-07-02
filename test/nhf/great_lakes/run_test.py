@@ -13,7 +13,7 @@ import xarray as xr
 import yaml
 
 def get_feature_ids(domain_path: Path) -> np.ndarray:
-    return gpd.read_file(domain_path, layer="flowpaths")["fp_id"].values
+    return gpd.read_file(domain_path, layer="flowpaths")["fp_id"].astype(int).values
 
 def write_forcing(forcing_dir: Path, timesteps: int, start_time: str, feature_ids: np.ndarray) -> None:
     forcing_dir.mkdir(exist_ok=True)

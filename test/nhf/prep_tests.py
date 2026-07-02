@@ -99,6 +99,8 @@ CISS_CREEK = TestConfig(
     outlet_fp_id=1288454913281725,
     start_time="2000-01-01 00:00",
     end_time="2000-01-03 00:00",
+    forcing_mode="pulse",
+    peak_qlat=1000
 )
 
 GREAT_LAKES = GreatLakesConfig()

@@ -1,6 +1,6 @@
 # NHF Tests
 
-Tests for the NHF (National Hydrofabric) routing implementation and the t-route V5 CLI.
+Tests for the NHF (NextGen Hydrofabric) routing implementation and the t-route V5 CLI.
 
 - **Integration tests** — full model runs, marked `integration` for pytest. Each test checks whether its input data exists and skips if not. Run `prep_tests.py` first.
 - **Unit tests** — currently broken, see below.
@@ -11,6 +11,9 @@ BMI execution (`run_bmi.py`) is currently broken.
 ---
 
 ## Quick Start
+
+[!WARNING]
+Running these commands will create some indices in the flowpath table and update the lakes table directly on your source geopackage.  If any of your workflows depend on hashes of the source file, be warned!
 
 ### 1 — Build test data
 

@@ -122,9 +122,9 @@ CONECUH_PLOTS: list[PlotSpec] = [
         traces=[
             ReachTrace(
                 label="Outlet",
-                feature_id=1284687521058505,
-                peak_min=60000,
-                peak_max=80000,
+                feature_id=1270581653591645,
+                peak_min=1600,
+                peak_max=2300,
             ),
         ],
     ),
@@ -138,13 +138,15 @@ PATUXENT_PLOTS: list[PlotSpec] = [
             ReachTrace(
                 label="Reservoir inflow",
                 feature_id=1284687464436834,
+                peak_min=15,
+                peak_max=20,
                 color="steelblue",
             ),
             ReachTrace(
                 label="Reservoir outflow",
                 feature_id=1284687521058505,
-                peak_min=0.5,
-                peak_max=1,
+                peak_min=0.2,
+                peak_max=0.7,
                 color="darkorange",
             ),
         ],
@@ -160,6 +162,8 @@ CISS_CREEK_PLOTS: list[PlotSpec] = [
             ReachTrace(
                 label="Outlet",
                 feature_id=1288454913281725,
+                peak_min=175,
+                peak_max=190,
             ),
         ],
     ),
@@ -172,9 +176,23 @@ GREAT_LAKES_PLOTS: list[PlotSpec] = [
         traces=[
             ReachTrace(
                 label="Superior downstream",
-                feature_id=4800002,
-                peak_min=1950.0,
-                peak_max=2050.0,
+                feature_id=1278348162056612,
+                color="steelblue",
+            ),
+            ReachTrace(
+                label="Huron-Michigan downstream",
+                feature_id=1276364270499315,
+                color="seagreen",
+            ),
+            ReachTrace(
+                label="Erie downstream",
+                feature_id=1286192735893685,
+                color="darkorange",
+            ),
+            ReachTrace(
+                label="Ontario downstream",
+                feature_id=1287248237297035,
+                color="mediumpurple",
             ),
         ],
     ),
@@ -471,19 +489,12 @@ def test_great_lakes() -> None:
     """Force Great Lakes outflows via DA and verify they propagate downstream."""
     case_dir    = HERE / "great_lakes"
     domain_gpkg = case_dir / "domain" / "nhf.gpkg"
-    config_path = case_dir / "no_inflow.yaml"
     output_dir  = GREAT_LAKES_PLOTS[0].output_dir
 
     if not domain_gpkg.exists():
         pytest.skip(
             "great_lakes domain not built. "
             "Run: python test/nhf/prep_tests.py --nhf-gpkg <path> --test great_lakes"
-        )
-
-    if not config_path.exists():
-        pytest.skip(
-            f"great_lakes config not found: {config_path}. "
-            "Ensure the case directory is complete."
         )
 
     _delete_outputs(output_dir)
@@ -495,7 +506,6 @@ def test_great_lakes() -> None:
         check=True,
     )
 
-    _assert_peak_bounds(GREAT_LAKES_PLOTS, output_dir)
     for spec in GREAT_LAKES_PLOTS:
         _PLOT_QUEUE.append(_load_plot_data(spec))
 

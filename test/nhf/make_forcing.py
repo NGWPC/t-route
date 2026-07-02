@@ -164,7 +164,7 @@ def create_pulse_forcing_dataset(
     forcing_dir.mkdir(parents=True, exist_ok=True)
 
     fps = gpd.read_file(hydrofabric_path, layer="flowpaths", ignore_geometry=True)
-    feature_ids = fps["fp_id"].values
+    feature_ids = fps["fp_id"].astype(int).values
 
     if t_end is not None:
         times = pd.date_range(t_start, t_end, freq="h")
@@ -199,7 +199,7 @@ def create_constant_forcing_dataset(
     forcing_dir.mkdir(parents=True, exist_ok=True)
 
     fps = gpd.read_file(hydrofabric_path, layer="flowpaths", ignore_geometry=True)
-    feature_ids = fps["fp_id"].values
+    feature_ids = fps["fp_id"].astype(int).values
 
     times = pd.date_range(t_start, t_end, freq="h")
     for t in times:
@@ -235,6 +235,7 @@ def create_forcing_dataset(t_start: str, t_end: str, forcing_dir: str, hydrofabr
         t_str = i.strftime("%Y%m%d%H%M")
         df = qlat.to_dataframe()
         df = pd.merge(df, crosswalk[["ref_fp_id", "fp_id"]], left_index=True, right_on="ref_fp_id", how="left").rename(columns={"fp_id": "feature_id", RETROSPECTIVE_LATERAL_FIELD: t_str})[["feature_id", t_str]]
+        df["feature_id"] = df["feature_id"].astype(int)
         df = df.groupby("feature_id").sum().reset_index()
         df.to_csv(forcing_dir / f"{t_str}.{forcing_file_pattern}.csv", index=False)
     for i in range(1, runout_time + 1):
