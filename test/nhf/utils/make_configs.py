@@ -85,6 +85,7 @@ class Config:
     qlat_file_pattern: str = "*.CHRTOUT_DOMAIN1.csv"
     data_assimilation_parameters: DataAssimilationParameters = field(default_factory=DataAssimilationParameters)
     max_loop_size: int = 288
+    lakeout_output: Optional[str] = None
 
     def __post_init__(self):
         """Create the expected directory structure."""
@@ -92,6 +93,16 @@ class Config:
         self.channel_forcing_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.domain_dir.mkdir(parents=True, exist_ok=True)
+        if self.lakeout_output:
+            self.lakeout_dir.mkdir(parents=True, exist_ok=True)
+        if self.usgs_timeslices_dir:
+            self.usgs_timeslices_dir.mkdir(parents=True, exist_ok=True)
+        if self.usace_timeslices_dir:
+            self.usace_timeslices_dir.mkdir(parents=True, exist_ok=True)
+        if self.usbr_timeslices_dir:
+            self.usbr_timeslices_dir.mkdir(parents=True, exist_ok=True)
+        if self.rfc_timeslices_dir:
+            self.rfc_timeslices_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def nts(self) -> int:
@@ -173,6 +184,13 @@ class Config:
         if da.LakeOntario_outflow is None:
             return None
         return self.root_dir / da.LakeOntario_outflow
+    
+    @property
+    def lakeout_dir(self) -> Optional[Path]:
+        """Absolute path to the files with detailed lake outputs."""
+        if self.lakeout_output is None:
+            return None
+        return self.root_dir / self.lakeout_output
 
     def write_yaml(self) -> None:
         """Write the t-route YAML configuration file to config_path."""
@@ -222,6 +240,9 @@ class Config:
                 },
             },
         }
+
+        if self.lakeout_output:
+            config["output_parameters"]["lakeout_output"] = self.lakeout_output
 
         with open(self.config_path, "w") as f:
             yaml.dump(config, f)

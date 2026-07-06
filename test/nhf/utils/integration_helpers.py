@@ -59,6 +59,68 @@ def load_output(output_dir: Path) -> xr.Dataset:
     )
 
 
+def load_lakeout(lakeout_dir: Path) -> xr.Dataset:
+    """Load and concatenate all lakeout .nc files into a single Dataset."""
+    nc_files = sorted(lakeout_dir.glob("*.nc"))
+    if not nc_files:
+        pytest.fail(f"No lakeout files found in {lakeout_dir}")
+    if len(nc_files) == 1:
+        return xr.open_dataset(nc_files[0], engine="netcdf4")
+    return xr.concat(
+        [xr.open_dataset(p, engine="netcdf4") for p in nc_files], dim="time"
+    )
+
+
+def assert_lakeout(
+    lakeout_dir: Path,
+    expected_feature_count: int | None = None,
+    outflow_bounds: dict[int, tuple[float, float]] | None = None,
+) -> None:
+    """Validate lakeout NetCDF files."""
+    ds = load_lakeout(lakeout_dir)
+
+    expected_vars = {"reservoir_type", "inflow", "outflow", "water_sfc_elev"}
+    violations: list[str] = []
+
+    # Check expected variables exist.
+    missing = expected_vars - set(ds.data_vars)
+    if missing:
+        violations.append(f"missing variables {missing}")
+
+    # Check feature_id dimension.
+    if "feature_id" not in ds.dims:
+        violations.append("missing 'feature_id' dimension")
+    elif expected_feature_count is not None and ds.sizes["feature_id"] != expected_feature_count:
+        violations.append(
+            f"expected {expected_feature_count} features, "
+            f"got {ds.dims['feature_id']}"
+        )
+
+    # Check for NaNs in numeric data variables.
+    for var in ("inflow", "outflow", "water_sfc_elev"):
+        if var in ds.data_vars and np.isnan(ds[var].values).any():
+            violations.append(f"NaN values found in '{var}'")
+
+    # Check outflow bounds.
+    if outflow_bounds and "outflow" in ds.data_vars and "feature_id" in ds.dims:
+        for fid, (lo, hi) in outflow_bounds.items():
+            if fid not in ds["feature_id"].values:
+                violations.append(f"feature_id {fid} not in dataset")
+                continue
+            vals = ds["outflow"].sel(feature_id=fid).values
+            max_val = float(np.nanmax(vals))
+            if not (lo <= max_val <= hi):
+                violations.append(
+                    f"feature_id {fid} max outflow "
+                    f"{max_val:.4f} outside [{lo}, {hi}]"
+                )
+
+    ds.close()
+
+    if violations:
+        pytest.fail("Lakeout validation failed:\n" + "\n".join(violations))
+
+
 def assert_peak_bounds(
     output_dir: Path, peak_bounds: dict[int, tuple[float, float]]
 ) -> None:

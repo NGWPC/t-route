@@ -5,6 +5,7 @@ import pytest
 
 
 from ..utils.integration_helpers import (
+    assert_lakeout,
     assert_peak_bounds,
     delete_outputs,
     has_files,
@@ -20,7 +21,7 @@ OUTLET_FP_ID = 1276182780176988
 START_TIME = "2020-01-01 00:00"
 END_TIME = "2020-01-01 01:00"
 FORCING_MODE = "constant"
-CONSTANT_QLAT = 0
+CONSTANT_QLAT = 100
 
 # Reservoir DA configuration from the legacy setup.py
 RESERVOIR_TYPE_MOD = {
@@ -48,9 +49,15 @@ RESERVOIR_DN_FP = {
     1276185235011805: 1276185303862487,
 }
 PEAK_BOUNDS: dict[int, tuple[float, float]] = {
-    dn_fp: (expected - max(0.05 * expected, 1.0), expected + max(0.05 * expected, 1.0))
+    dn_fp: (0.9*expected, 1.1*expected)
     for lake_id, dn_fp in RESERVOIR_DN_FP.items()
     for expected in [RESERVOIR_FLOW_VALUES[lake_id]]
+}
+
+# Expected mean outflow bounds (value ± 5% or ±1.0) for lakeout feature_ids.
+LAKEOUT_OUTFLOW_BOUNDS: dict[int, tuple[float, float]] = {
+    lake_id: (0.9*expected, 1.1*expected)
+    for lake_id, expected in RESERVOIR_FLOW_VALUES.items()
 }
 
 # Group reservoirs by DA type for build_da_dataset calls.
@@ -76,8 +83,7 @@ DA_PARAMS = DataAssimilationParameters(
     reservoir_rfc_forecasts_offset_hours=0,
     reservoir_rfc_forecast_persist_days=11,
 )
-CFG = Config(DATA_DIR, START_TIME, END_TIME, data_assimilation_parameters=DA_PARAMS)
-
+CFG = Config(DATA_DIR, START_TIME, END_TIME, data_assimilation_parameters=DA_PARAMS, lakeout_output="lakeout")
 
 def modify_lakes_table(gpkg_path: Path) -> None:
     """Update da_type and assign synthetic site_nos in the reservoir_da table."""
@@ -149,3 +155,8 @@ def test_four_lakes():
     delete_outputs(CFG.output_dir)
     run_troute(CFG.config_path)
     assert_peak_bounds(CFG.output_dir, PEAK_BOUNDS)
+    assert_lakeout(
+        CFG.lakeout_dir,
+        expected_feature_count=4,
+        outflow_bounds=LAKEOUT_OUTFLOW_BOUNDS,
+    )

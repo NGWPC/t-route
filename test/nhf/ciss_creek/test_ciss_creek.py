@@ -5,6 +5,7 @@ import pytest
 
 from ..utils.integration_helpers import (
     assert_peak_bounds,
+    assert_lakeout,
     delete_outputs,
     has_files,
     run_troute,
@@ -18,10 +19,20 @@ OUTLET_FP_ID = 1288454913281725
 START_TIME = "2000-01-01 00:00"
 END_TIME = "2000-01-03 00:00"
 FORCING_MODE = "pulse"
-PEAK_QLAT = 1000
+PEAK_QLAT = 2000
 
 PEAK_BOUNDS: dict[int, tuple[float, float]] = {
-    OUTLET_FP_ID: (0.9*188, 1.1*188),
+    OUTLET_FP_ID: (0.9 * 1504, 1.1 * 1504),
+}
+LAKEOUT_OUTFLOW_BOUNDS = {
+    i: (0.1, PEAK_QLAT)
+    for i in [
+        1288454931382737,
+        1288455043864385,
+        1288453685890499,
+        1288453736128344,
+        1288453793336386,
+    ]
 }
 
 RUNOUT_PERIOD = int(
@@ -32,7 +43,7 @@ END_TIME_WITH_RUNOUT = (
 ).strftime("%Y-%m-%d %H:%M")
 
 DATA_DIR = Path(__file__).parent / "data"
-CFG = Config(DATA_DIR, START_TIME, END_TIME_WITH_RUNOUT)
+CFG = Config(DATA_DIR, START_TIME, END_TIME_WITH_RUNOUT, lakeout_output="lakeout")
 
 
 def setup(source_gpkg: str | Path, refresh: bool = True):
@@ -51,7 +62,7 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
             CFG.channel_forcing_dir,
             CFG.domain_path,
             RUNOUT_PERIOD,
-            peak_qlat=PEAK_QLAT
+            peak_qlat=PEAK_QLAT,
         )
 
 
@@ -61,3 +72,8 @@ def test_ciss_creek():
     delete_outputs(CFG.output_dir)
     run_troute(CFG.config_path)
     assert_peak_bounds(CFG.output_dir, PEAK_BOUNDS)
+    assert_lakeout(
+        CFG.lakeout_dir,
+        expected_feature_count=len(LAKEOUT_OUTFLOW_BOUNDS),
+        outflow_bounds=LAKEOUT_OUTFLOW_BOUNDS,
+    )

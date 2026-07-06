@@ -96,6 +96,7 @@ Single flowpath with four reservoirs including two on the main flowpath and two 
 
  - level pool routing is ocurring on virtual flowpaths
  - many reservoirs will route when on the same flowpath or virtual flowpath
+ - lakeout file is usable
 
 Passing criteria: Peak outflow is within acceptable range.
 
@@ -124,7 +125,7 @@ Passing criteria: Flows at outlets of lakes match DA values very closely
 
 ### Four Lakes (`four_lakes`)
 
-Runs all four reservoir DA types in one shot: USGS persistence (type 2), USACE persistence (type 3), RFC time-series (type 4), USBR persistence (type 7). `prep_tests.py` generates synthetic constant-flow DA files. The test checks that the immediately-downstream reach of each reservoir carries the expected outflow.
+Runs all four reservoir DA types in one shot: USGS persistence (type 2), USACE persistence (type 3), RFC time-series (type 4), USBR persistence (type 7). `prep_tests.py` generates synthetic constant-flow DA files. The test checks that the immediately-downstream reach of each reservoir carries the expected outflow. This test also tests the lakeout functionality.
 
 Passing criteria: Flows at outlets of lakes (which have been forced low) match DA values very closely
 

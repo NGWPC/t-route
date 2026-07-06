@@ -165,9 +165,9 @@ LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
     ),
     ("virtual_nexus", None, True),
     (
-        "lakes", 
-        WATERBODY_DF_FIELDS + ["hy_id", "ref_fp_id"], 
-        True),
+        "lakes",
+        WATERBODY_DF_FIELDS + ["hy_id", "ref_fp_id"],
+        False),
     ("gages", None, True),
     ("hydrolocations", None, True),
     ("reservoir_da", ["nhf_lake_id", "lake_id", "site_no", "da_type"], True),
@@ -606,9 +606,19 @@ class NHFPreprocessMixin:
 
     def preprocess_waterbodies(self, lakes):
         if not lakes.empty:
+            # Add lat, lon, and crs columns for LAKEOUT files:
+            if self.output_parameters.get("lakeout_output", None):
+                lakes = lakes.to_crs(crs=4326)
+                lakes["crs"] = 4326  # Why you need to list crs when your coordinate keys are lat/lon eludes me...
+                lakes["lon"] = lakes.geometry.x
+                lakes["lat"] = lakes.geometry.y
+                lake_cols = WATERBODY_DF_FIELDS + ["crs", "lat", "lon"]
+            else:
+                lake_cols = WATERBODY_DF_FIELDS
+
             # Step-by-step cleanup; every dropped category is counted and logged
             # as a warning (see _clean_waterbodies).
-            self.waterbody_dataframe = lakes[WATERBODY_DF_FIELDS]
+            self.waterbody_dataframe = lakes[lake_cols]
             self._waterbody_df, gl_df = _clean_waterbodies(
                 self._waterbody_df, LAKE_ID_FIELD
             )
@@ -618,7 +628,15 @@ class NHFPreprocessMixin:
             self.waterbody_dataframe[RECORD_LAKE_ID_FIELD] = self.waterbody_dataframe.index
             self._waterbody_df.index = np.arange(len(self._waterbody_df)) + max_df_id
             self._waterbody_df = self._waterbody_df.rename_axis(LAKE_ID_FIELD)
-            self._duplicate_ids_df = pd.DataFrame()  # Relic from how hyfeatures and NHD handled this. We add relationship to _fp_outlet_crosswalk 
+            # Add conversion back to original nhf_lake_id for lakeout table
+            self._duplicate_ids_df = self._waterbody_df.reset_index()[
+                [RECORD_LAKE_ID_FIELD, LAKE_ID_FIELD]
+            ].rename(
+                columns={
+                    RECORD_LAKE_ID_FIELD: "lake_id",
+                    LAKE_ID_FIELD: "synthetic_ids",
+                }
+            )
 
             # Process great lakes reaches, if necessary
             gl_anchored, gl_da_enabled = _great_lakes_for_da(
@@ -646,14 +664,7 @@ class NHFPreprocessMixin:
                 self.great_lakes_climatology_df = pd.DataFrame()
 
             # Condense flowpaths in a reservoir to single level pool node
-            self._refactor_reservoirs()
-
-            # Add lat, lon, and crs columns for LAKEOUT files:
-            lakeout = self.output_parameters.get("lakeout_output", None)
-            if lakeout:
-                raise NotImplementedError("The lakeout feature has not been developed for NHF.")
-
-            
+            self._refactor_reservoirs()          
 
             self._waterbody_types_df = pd.DataFrame(
                 data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
