@@ -1,5 +1,4 @@
-import sys
-import subprocess
+import os
 from pathlib import Path
 
 import geopandas as gpd
@@ -8,16 +7,15 @@ import pytest
 import xarray as xr
 import yaml
 
+from nwm_routing.nhf_routing import nhf_routing
+
 from test.nhf.utils.make_configs import Config
 
 
 def run_troute(config_path: Path) -> None:
     """Run t-route from config_path's parent directory, raising on failure."""
-    subprocess.run(
-        [sys.executable, "-m", "nwm_routing", "-V5", "-f", config_path.name],
-        cwd=config_path.parent,
-        check=True,
-    )
+    os.chdir(config_path.parent)
+    nhf_routing(["-f", config_path.name])
 
 
 def has_files(directory: Path, pattern: str = "*") -> bool:

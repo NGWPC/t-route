@@ -24,7 +24,7 @@ def plot_reach(data_dir: str, reach_id: int, out_path: Path | str) -> None:
         ha="center",
         color="crimson",
         fontsize=9,
-        fontweight="semibold",
+        fontweight=700,
     )
     ax.legend()
     fig.autofmt_xdate()
