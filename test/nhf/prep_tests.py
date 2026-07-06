@@ -6,6 +6,7 @@ from .patuxent.test_patuxent import setup as patuxent_setup
 from .ciss_creek.test_ciss_creek import setup as ciss_creek_setup
 from .great_lakes.test_great_lakes import setup as great_lakes_setup
 from .four_lakes.test_four_lakes import setup as four_lakes_setup
+from .conus.test_conus import setup as conus_setup
 
 NHF_GPKG_DEFAULT = "/t-route/nhf_1.2.1.gpkg"
 FUNC_LOOKUP = {
@@ -13,7 +14,8 @@ FUNC_LOOKUP = {
     "patuxent": patuxent_setup,
     "ciss_creek": ciss_creek_setup,
     "great_lakes": great_lakes_setup,
-    "four_lakes": four_lakes_setup
+    "four_lakes": four_lakes_setup,
+    "conus": conus_setup
 }
 ALL_TESTS = list(FUNC_LOOKUP.keys())
 

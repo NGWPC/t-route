@@ -2,9 +2,11 @@ import sys
 import subprocess
 from pathlib import Path
 
+import geopandas as gpd
 import numpy as np
 import pytest
 import xarray as xr
+import yaml
 
 from test.nhf.utils.make_configs import Config
 
@@ -75,3 +77,42 @@ def assert_peak_bounds(
             )
     if violations:
         pytest.fail("Peak flow bounds violated:\n" + "\n".join(violations))
+
+
+def assert_output_dimensions_and_validity(output_path: Path, hf_path: Path, cfg_path: Path) -> None:
+    """Check that output data exists for all required timesteps and reaches and that data has no nans."""
+    # Load output
+    ds = load_output(output_path)
+
+    # Get expected feature IDs from hydrofabric
+    fps = gpd.read_file(hf_path, layer="flowpaths", ignore_geometry=True, columns=["fp_id"])
+    expected_ids = set(fps["fp_id"].astype(int).values)
+
+    # Get expected number of timesteps from config
+    with open(cfg_path) as f:
+        config = yaml.safe_load(f)
+    nts = config["compute_parameters"]["forcing_parameters"]["nts"]
+    dt = config["compute_parameters"]["forcing_parameters"]["dt"]
+    output_frequency = config["output_parameters"]["stream_output"]["stream_output_internal_frequency"]
+    expected_prints = int((nts * (dt / 60)) / output_frequency)
+
+    violations = []
+
+    # Check timestep count
+    actual_prints = ds.sizes["time"]
+    if actual_prints != expected_prints:
+        violations.append(f"expected {expected_prints} output timesteps, got {actual_prints}")
+
+    # Check that all expected reaches are present
+    output_ids = set(ds["feature_id"].values)
+    missing_ids = expected_ids - output_ids
+    if missing_ids:
+        violations.append(f"{len(missing_ids)} reaches missing from output: {sorted(missing_ids)}")
+
+    # Check for NaN values in flow
+    nan_count = int(ds["flow"].isnull().sum())
+    if nan_count > 0:
+        violations.append(f"flow contains {nan_count} NaN values")
+
+    if violations:
+        pytest.fail("Output validation failed:\n" + "\n".join(violations))

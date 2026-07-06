@@ -84,6 +84,7 @@ class Config:
     dt: int = 300
     qlat_file_pattern: str = "*.CHRTOUT_DOMAIN1.csv"
     data_assimilation_parameters: DataAssimilationParameters = field(default_factory=DataAssimilationParameters)
+    max_loop_size: int = 288
 
     def __post_init__(self):
         """Create the expected directory structure."""
@@ -206,7 +207,7 @@ class Config:
                     ),
                     "qlat_file_pattern_filter": self.qlat_file_pattern,
                     "nts": self.nts,
-                    "max_loop_size": 288,
+                    "max_loop_size": self.max_loop_size,
                 },
                 "data_assimilation_parameters": self.data_assimilation_parameters.to_dict(),
             },
