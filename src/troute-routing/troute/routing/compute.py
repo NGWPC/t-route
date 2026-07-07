@@ -1088,7 +1088,7 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
     reservoir_usbr_persistence_update_time (ndarray): update time (sec) of persisted value at USBR reservoirs
     reservoir_usbr_persistence_index       (ndarray): index denoting elapsed persistence epochs at USBR reservoirs
     '''
-    if not reservoir_usgs_df.empty:
+    if not reservoir_usgs_df.empty and not waterbody_types_df_sub.empty:
         usgs_wbodies_sub      = waterbody_types_df_sub[
                                     waterbody_types_df_sub['reservoir_type']==2
                                 ].index
@@ -1117,7 +1117,7 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
             waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 2] = 1
 
     # select USACE reservoir DA data waterbodies in sub-domain
-    if not reservoir_usace_df.empty:
+    if not reservoir_usace_df.empty and not waterbody_types_df_sub.empty:
         usace_wbodies_sub      = waterbody_types_df_sub[
                                     waterbody_types_df_sub['reservoir_type']==3
                                 ].index
@@ -1143,7 +1143,7 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
             waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 3] = 1
 
     # select USBR reservoir DA data waterbodies in sub-domain
-    if not reservoir_usbr_df.empty:
+    if not reservoir_usbr_df.empty and not waterbody_types_df_sub.empty:
         usbr_wbodies_sub      = waterbody_types_df_sub[
                                     waterbody_types_df_sub['reservoir_type']==7
                                 ].index
@@ -1169,7 +1169,7 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
             waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 7] = 1
     
     # RFC reservoirs
-    if not reservoir_rfc_df.empty:
+    if not reservoir_rfc_df.empty and not waterbody_types_df_sub.empty:
         rfc_wbodies_sub = waterbody_types_df_sub[
             waterbody_types_df_sub['reservoir_type']==4
             ].index
@@ -1197,7 +1197,7 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
                 waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 4] = 1
     
     # Great Lakes
-    if not great_lakes_df.empty:
+    if not great_lakes_df.empty and not waterbody_types_df_sub.empty:
         gl_wbodies_sub = waterbody_types_df_sub[
             waterbody_types_df_sub['reservoir_type']==6
             ].index
