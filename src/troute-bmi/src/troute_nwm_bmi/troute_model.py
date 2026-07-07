@@ -270,14 +270,8 @@ class Model:
 
     def create_state(self):
         """Create a dictionary of data that can be serialized using `pickle.dumps`."""
-        # save current subnetwork and convert defaultdicts to dicts
-        subnetwork = list(self._subnetwork)
-        for i, value in enumerate(subnetwork):
-            if isinstance(value, dict):
-                subnetwork[i] = dict(value)
         return {
             "time": self._time,
-            "subnetwork": subnetwork,
             # updated data stored on AbstractNetwork
             "q0": self._network._q0,
             "t0": self._network._t0,
@@ -291,7 +285,6 @@ class Model:
 
     def load_state(self, data: dict):
         self._time = data["time"]
-        self._subnetwork = data["subnetwork"]
         self._network._q0 = data["q0"]
         self._network._t0 = data["t0"]
         self._data_assimilation._last_obs_df = data["last_obs"]
