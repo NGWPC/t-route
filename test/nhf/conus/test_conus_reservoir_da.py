@@ -67,7 +67,7 @@ def assert_da_outflows(
     )
     # Note: T-route may drop some lakes, so this intersection may silently hide dropped lakes.
     valid_ids = list(set(forced_ids).intersection(ds_lake["feature_id"].values))
-    ds_lake.sel(feature_id=valid_ids)
+    ds_lake = ds_lake.sel(feature_id=valid_ids)
 
     # Load lakes and their properties
     lakes = gpd.read_file(
