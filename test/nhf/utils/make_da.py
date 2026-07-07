@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
+import netCDF4
 import pandas as pd
 import xarray as xr
 
@@ -124,18 +125,18 @@ def write_timeslice_da(cfg: DAConfig) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     n = len(cfg.station_ids)
-    station_ids_bytes = np.asarray(
-        [sid.rjust(15) for sid in cfg.station_ids], dtype="S15"
+    if n == 0:
+        return
+
+    # Build 2D char arrays (n, char_len) matching WRF-Hydro convention.
+    # _read_timeslice_file expects np.apply_along_axis(''.join, 1, ...) on axis=1.
+    id_char_len = 15
+    time_char_len = 19
+    station_ids_chars = np.array(
+        [list(sid.rjust(id_char_len)) for sid in cfg.station_ids], dtype="S1"
     )
     discharge = np.full(n, cfg.discharge, dtype=np.float32)
     quality = np.full(n, cfg.discharge_quality, dtype=np.int16)
-
-    encoding = {
-        "stationId": {"dtype": "S15"},
-        "time": {"dtype": "S19"},
-        "discharge": {"dtype": "float32"},
-        "discharge_quality": {"dtype": "int16"},
-    }
 
     ts_range = pd.date_range(
         cfg.start_dt - pd.Timedelta(hours=1),
@@ -147,23 +148,30 @@ def write_timeslice_da(cfg: DAConfig) -> None:
     for t in ts_range:
         time_str = t.strftime("%Y-%m-%d_%H:%M:%S")
         out_path = out_dir / f"{time_str}.15min.{suffix}.ncdf"
-        ds = xr.Dataset(
-            data_vars={
-                "stationId": (["stationIdInd"], station_ids_bytes),
-                "time": (
-                    ["stationIdInd"],
-                    np.asarray([time_str] * n, dtype="S19"),
-                ),
-                "discharge": (["stationIdInd"], discharge),
-                "discharge_quality": (["stationIdInd"], quality),
-            },
-            attrs={
-                "fileUpdateTimeUTC": now_str,
-                "sliceCenterTimeUTC": time_str,
-                "sliceTimeResolutionMinutes": "15",
-            },
+        time_chars = np.array(
+            [list(time_str.ljust(time_char_len)) for _ in range(n)], dtype="S1"
         )
-        ds.to_netcdf(out_path, encoding=encoding)
+
+        with netCDF4.Dataset(str(out_path), "w", format="NETCDF4") as nc:
+            nc.fileUpdateTimeUTC = now_str
+            nc.sliceCenterTimeUTC = time_str
+            nc.sliceTimeResolutionMinutes = "15"
+
+            nc.createDimension("stationIdInd", n)
+            nc.createDimension("stationIdStringLength", id_char_len)
+            nc.createDimension("timeStringLength", time_char_len)
+
+            v_id = nc.createVariable("stationId", "S1", ("stationIdInd", "stationIdStringLength"))
+            v_id[:] = station_ids_chars
+
+            v_t = nc.createVariable("time", "S1", ("stationIdInd", "timeStringLength"))
+            v_t[:] = time_chars
+
+            v_q = nc.createVariable("discharge", "f4", ("stationIdInd",))
+            v_q[:] = discharge
+
+            v_qc = nc.createVariable("discharge_quality", "i2", ("stationIdInd",))
+            v_qc[:] = quality
 
 
 def write_rfc_da(cfg: DAConfig) -> None:

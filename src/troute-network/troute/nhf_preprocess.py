@@ -400,9 +400,9 @@ def _clean_waterbodies(
       4. elevation consistency: OrificeE <= WeirE <= LkMxE must hold for
          level-pool routing; violating lakes are dropped with a warning
          (previously the whole run failed on the first violation).
-      5. fp_id anchoring: drop lakes with no fp_id -- they cannot be placed
-         on a routing flowpath (the hydrofabric fix for these is tracked
-         upstream).
+      5. virtual_fp_id anchoring: drop lakes with no virtual_fp_id -- they
+         cannot be anchored to a routing flowpath (the hydrofabric fix for
+         these is tracked upstream).
       6. parameter completeness: drop lakes missing any level-pool
          parameter.
 
