@@ -1544,6 +1544,20 @@ def _set_persistence_reservoir_da_params(run_results):
             tmp_usbr['persistence_index'] = r[6][3]
             reservoir_usbr_param_df = pd.concat([reservoir_usbr_param_df, tmp_usbr])
 
+    # A reservoir that sits on a sub-domain boundary appears as an
+    # offnetwork upstream in a downstream compute job AND as a home reach
+    # in its own job.  Both jobs run the reservoir through the DA kernel
+    # and emit results, so pd.concat above produces duplicate index entries.
+    # On the next loop iteration _prep_reservoir_da_dataframes calls
+    # .loc[lake_id].to_numpy() and gets a 2-row result for a 1-element
+    # index, causing a shape mismatch when the kernel output is unpacked.
+    # Deduplicate by keeping the last entry for each lake (both duplicates
+    # carry the same computed state, so the choice of first vs. last is
+    # inconsequential).
+    reservoir_usgs_param_df  = reservoir_usgs_param_df[~reservoir_usgs_param_df.index.duplicated(keep='last')]
+    reservoir_usace_param_df = reservoir_usace_param_df[~reservoir_usace_param_df.index.duplicated(keep='last')]
+    reservoir_usbr_param_df  = reservoir_usbr_param_df[~reservoir_usbr_param_df.index.duplicated(keep='last')]
+
     return reservoir_usgs_param_df, reservoir_usace_param_df, reservoir_usbr_param_df
 
 def _set_rfc_reservoir_da_params(reservoir_rfc_param_df, run_results):
