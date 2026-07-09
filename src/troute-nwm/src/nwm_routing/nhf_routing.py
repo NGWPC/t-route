@@ -3,6 +3,7 @@ import argparse
 import time
 
 import numpy as np
+import pandas as pd
 
 from .flow_scaling_utils import append_nonrouting_to_run_results
 from .input import _input_handler_v04
@@ -113,6 +114,16 @@ def nhf_routing(argv):
         )
     
     forcing_end_time = time.time()
+
+    # Apply hot start if a lite_channel_restart_file is provided.
+    # The restart pickle stores fp-level q0 keyed by 'feature_id' column; broadcast
+    # those values to every routing link that belongs to the same flowpath (fp_id).
+    # Links whose fp_id is absent from the restart (e.g. synthetic waterbody
+    # headwaters) are zero-filled rather than left NaN.
+    if restart_parameters.get("lite_channel_restart_file", None):
+        network._q0 = pd.merge(network.q0, network.dataframe.reset_index()[["up_node_id", "fp_id"]], left_on="feature_id", right_on="fp_id", how="right")
+        network._q0 = network._q0.set_index("up_node_id")[["qd0", "h0", "qu0", "ql0"]].fillna(0).astype("float32")
+
     task_times['forcing_time'] += forcing_end_time - network_end_time
 
     parallel_compute_method = compute_parameters.get("parallel_compute_method", None)

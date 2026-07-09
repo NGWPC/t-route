@@ -86,6 +86,7 @@ class Config:
     data_assimilation_parameters: DataAssimilationParameters = field(default_factory=DataAssimilationParameters)
     max_loop_size: int = 288
     lakeout_output: Optional[str] = None
+    restart_dir_name: Optional[str] = None
 
     def __post_init__(self):
         """Create the expected directory structure."""
@@ -95,6 +96,8 @@ class Config:
         self.domain_dir.mkdir(parents=True, exist_ok=True)
         if self.lakeout_output:
             self.lakeout_dir.mkdir(parents=True, exist_ok=True)
+        if self.restart_dir_name:
+            (self.root_dir / self.restart_dir_name).mkdir(parents=True, exist_ok=True)
         if self.usgs_timeslices_dir:
             self.usgs_timeslices_dir.mkdir(parents=True, exist_ok=True)
         if self.usace_timeslices_dir:
@@ -192,6 +195,15 @@ class Config:
             return None
         return self.root_dir / self.lakeout_output
 
+    @property
+    def reference_data_path(self) -> Path:
+        """Absolute path to the gage reference data NetCDF file.
+
+        Matches the file name and subdirectory convention used by RunContext
+        in generate_diagnostics.
+        """
+        return self.root_dir / Path(self.config_file_name).stem / "gage_reference_data.nc"
+
     def write_yaml(self) -> None:
         """Write the t-route YAML configuration file to config_path."""
         # TODO: some day this could be a set of nested dataclasses
@@ -243,6 +255,9 @@ class Config:
 
         if self.lakeout_output:
             config["output_parameters"]["lakeout_output"] = self.lakeout_output
+
+        if self.restart_dir_name:
+            config["compute_parameters"]["restart_parameters"]["lite_channel_restart_file"] = str(Path(self.restart_dir_name) / "restart.pkl")
 
         with open(self.config_path, "w") as f:
             yaml.dump(config, f)
