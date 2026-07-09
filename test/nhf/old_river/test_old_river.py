@@ -7,13 +7,15 @@ import pytest
 from ..utils.integration_helpers import (
     assert_peak_bounds,
     delete_outputs,
+    get_usgs_station_ids,
     has_files,
     run_troute,
     skip_if_not_built,
 )
 from ..utils.generate_reference_data import generate_reference_data
-from ..utils.make_configs import Config
+from ..utils.make_configs import Config, DataAssimilationParameters
 from ..utils.make_forcing import build_forcing_dataset, create_hot_start_file
+from ..utils.make_da import write_usgs_timeslices
 from ..utils.subset_nhf import get_offnetwork_upstreams, extract_layers, write_gpkg
 
 FP_IDS = [
@@ -105,7 +107,17 @@ END_TIME_WITH_RUNOUT = (
 ).strftime("%Y-%m-%d %H:%M")
 
 DATA_DIR = Path(__file__).parent / "data"
-CFG = Config(DATA_DIR, START_TIME, END_TIME_WITH_RUNOUT, restart_dir_name="restart")
+CFG = Config(
+    DATA_DIR,
+    START_TIME,
+    END_TIME_WITH_RUNOUT,
+    restart_dir_name="restart",
+    data_assimilation_parameters=DataAssimilationParameters(
+        usgs_timeslices_folder="usgs_da",
+        streamflow_nudging=True,
+        timeslice_lookback_hours=48,
+    ),
+)
 
 GAGES_PATCH = {
     "07381482": {"fp_id": 1270478544606477, "virtual_fp_id": 1270478544606478},
@@ -165,6 +177,20 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
             t_end=pd.Timestamp(END_TIME),
             output_dir=CFG.reference_data_path.parent,
         )
+
+    if CFG.usgs_timeslices_dir is not None and (
+        refresh or not has_files(CFG.usgs_timeslices_dir, "*.usgsTimeSlice.ncdf")
+    ):
+        station_ids = get_usgs_station_ids(CFG.domain_path)
+        if station_ids:
+            lookback_hours = CFG.data_assimilation_parameters.timeslice_lookback_hours or 0
+            da_start = (pd.Timestamp(START_TIME) - pd.Timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
+            write_usgs_timeslices(
+                station_ids=station_ids,
+                start_time=da_start,
+                end_time=END_TIME_WITH_RUNOUT,
+                output_dir=CFG.usgs_timeslices_dir,
+            )
 
 
 @pytest.mark.integration

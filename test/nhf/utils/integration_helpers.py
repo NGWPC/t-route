@@ -12,6 +12,12 @@ from nwm_routing.nhf_routing import nhf_routing
 from test.nhf.utils.make_configs import Config
 
 
+def get_usgs_station_ids(domain_path: Path) -> list[str]:
+    """Read the gages layer and return USGS site numbers."""
+    gages = gpd.read_file(domain_path, layer="gages", ignore_geometry=True)
+    return gages["site_no"].dropna().astype(str).tolist()
+
+
 def run_troute(config_path: Path) -> None:
     """Run t-route from config_path's parent directory, raising on failure."""
     os.chdir(config_path.parent)
