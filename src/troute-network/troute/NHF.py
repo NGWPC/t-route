@@ -131,7 +131,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             self.preprocess_waterbodies(waterbodies)
 
             # Preprocess data assimilation objects
-            self.preprocess_data_assimilation(reservoir_da)
+            self.preprocess_data_assimilation(gages, reservoir_da)
 
 
         if self.verbose:
@@ -165,14 +165,6 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
     @waterbody_connections.setter
     def waterbody_connections(self, val):
         self._waterbody_connections = val
-
-    @property
-    def gages(self):
-        """
-        FIXME
-        """
-        return self._gages
-
 
     @property
     def waterbody_null(self):

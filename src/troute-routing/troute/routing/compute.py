@@ -984,7 +984,8 @@ def _prep_da_dataframes(
                      reindex(lastobs_segs)[0].
                      to_list()
                     )
-        da_positions_list_byseg = param_df_sub_idx.get_indexer(usgs_segs)
+        lookup = {v: i for i, v in enumerate(param_df_sub_idx)}
+        da_positions_list_byseg = np.array([lookup.get(seg, -1) for seg in usgs_segs])
         usgs_df_sub = usgs_df.loc[usgs_segs]
     elif usgs_df.empty and not lastobs_df.empty:
         lastobs_segs = (lastobs_df.index.
@@ -997,10 +998,12 @@ def _prep_da_dataframes(
         # in the compute kernel below.
         usgs_df_sub = pd.DataFrame(index=lastobs_df_sub.index,columns=[])
         usgs_segs = lastobs_segs
-        da_positions_list_byseg = param_df_sub_idx.get_indexer(lastobs_segs)
+        lookup = {v: i for i, v in enumerate(param_df_sub_idx)}
+        da_positions_list_byseg = np.array([lookup.get(seg, -1) for seg in lastobs_segs])
     elif not usgs_df.empty and lastobs_df.empty:
         usgs_segs = list(usgs_df.index.intersection(subnet_segs))
-        da_positions_list_byseg = param_df_sub_idx.get_indexer(usgs_segs)
+        lookup = {v: i for i, v in enumerate(param_df_sub_idx)}
+        da_positions_list_byseg = np.array([lookup.get(seg, -1) for seg in usgs_segs])
         usgs_df_sub = usgs_df.loc[usgs_segs]
         lastobs_df_sub = pd.DataFrame(index=usgs_df_sub.index,columns=["discharge","time","model_discharge"])
     else:

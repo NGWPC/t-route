@@ -905,7 +905,7 @@ class NHFPreprocessMixin:
             row_df = row_df.astype(self.dataframe.dtypes.to_dict())
             self.dataframe = pd.concat([self.dataframe, row_df])
 
-    def preprocess_data_assimilation(self, reservoir_da: pd.DataFrame):
+    def preprocess_data_assimilation(self, gages: pd.DataFrame, reservoir_da: pd.DataFrame):
         if reservoir_da.empty or self.waterbody_dataframe.empty:
             self._gages = {}
             self._usgs_lake_gage_crosswalk = pd.DataFrame()
@@ -1069,4 +1069,22 @@ class NHFPreprocessMixin:
             ["reservoir_type"]
         ].copy()
 
-        self._gages = {}
+        # Streamflow DA
+        gages_join = gages.merge(
+            self.dataframe.reset_index()[["vfp_id", "up_node_id"]],
+            left_on="virtual_fp_id",
+            right_on="vfp_id",
+            how="left",
+        )
+        usgs_sub = gages_join[gages_join["status"].isin(["USGS-active", "USGS-discontinued"])]
+        canada_sub = gages_join[gages_join["status"] == "CADWR_ENVCA"]
+        self.gages = (
+            usgs_sub.set_index("up_node_id")[["site_no"]]
+            .rename(columns={"site_no": "gages"})
+            .rename_axis(None, axis=0)
+            .to_dict()
+        )
+        self.canadian_gage_df = (
+            canada_sub.set_index("up_node_id")[["site_no"]]
+            .rename(columns={"site_no": "gages"})
+        )
