@@ -9,7 +9,7 @@ from .four_lakes.test_four_lakes import setup as four_lakes_setup
 from .conus.test_conus import setup as conus_setup
 from .conus.test_conus_reservoir_da import setup as conus_reservoir_da_setup
 
-NHF_GPKG_DEFAULT = "/t-route/nhf_1.2.1.gpkg"
+NHF_GPKG_DEFAULT = "/hydrofabric/nhf_1.2.1.gpkg"
 FUNC_LOOKUP = {
     "conecuh": conecuh_setup,
     "patuxent": patuxent_setup,
