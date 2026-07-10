@@ -72,10 +72,12 @@ def _write_runout_steps(
 ) -> None:
     """Append zero-qlat runout CSVs after the primary simulation window."""
     for i in range(1, runout_time + 1):
-        print(f"Processing runout time step {i}...")
         t_str = (last_time + pd.Timedelta(hours=i)).strftime("%Y%m%d%H%M")
         df = pd.DataFrame({"feature_id": feature_ids, t_str: 0.0})
         df.to_csv(forcing_dir / f"{t_str}.{forcing_file_pattern}.csv", index=False)
+        print(f"  Wrote {i}/{runout_time} runout timesteps...", end="\r", flush=True)
+    if runout_time > 0:
+        print(f"  Wrote {runout_time}/{runout_time} runout timesteps.   ")
 
 
 def create_pulse_forcing_dataset(
@@ -110,7 +112,7 @@ def create_pulse_forcing_dataset(
 
     inflows = shape * peak_qlat
 
-    for t, q in zip(times, inflows):
+    for i, (t, q) in enumerate(zip(times, inflows)):
         t_str = t.strftime("%Y%m%d%H%M")
         df = pd.DataFrame({"feature_id": feature_ids, t_str: q})
         df.to_csv(
@@ -118,7 +120,8 @@ def create_pulse_forcing_dataset(
             index=False,
             float_format="%.15g",
         )
-        print(f"Processing time step {t}...")
+        print(f"  Wrote {i + 1}/{n} timesteps...", end="\r", flush=True)
+    print(f"  Wrote {n}/{n} timesteps.   ")
     _write_runout_steps(
         times[-1], feature_ids, forcing_dir, runout_time, forcing_file_pattern
     )
@@ -141,7 +144,8 @@ def create_constant_forcing_dataset(
     feature_ids = fps["fp_id"].astype(int).values
 
     times = pd.date_range(t_start, t_end, freq="h")
-    for t in times:
+    n = len(times)
+    for i, t in enumerate(times):
         t_str = t.strftime("%Y%m%d%H%M")
         df = pd.DataFrame({"feature_id": feature_ids, t_str: constant_qlat})
         df.to_csv(
@@ -149,7 +153,8 @@ def create_constant_forcing_dataset(
             index=False,
             float_format="%.15g",
         )
-        print(f"Processing time step {t}...")
+        print(f"  Wrote {i + 1}/{n} timesteps...", end="\r", flush=True)
+    print(f"  Wrote {n}/{n} timesteps.   ")
     _write_runout_steps(
         times[-1], feature_ids, forcing_dir, runout_time, forcing_file_pattern
     )
