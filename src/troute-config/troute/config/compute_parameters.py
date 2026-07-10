@@ -353,6 +353,7 @@ class DataAssimilationParameters(BaseModel):
     
     streamflow_da: StreamflowDA = None
     reservoir_da: Optional[ReservoirDA] = None
+    diversion_da: Optional[Dict[str, Any]] = None
 
     qc_threshold: float = Field(1, ge=0, le=1)
     """

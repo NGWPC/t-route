@@ -158,6 +158,7 @@ class ComputeConfig:
     compute_func_name: str
     subnetwork_target_size: int
     backend: Literal["loky", "threading", "multiprocessing"] = "loky"
+    diversion_da: dict[ReachId, int] = field(default_factory=dict)
 
     def __post_init__(self):
         # Control serial execution by forcing single worker instead of a code change.
@@ -538,6 +539,7 @@ class ComputeInputs:
     da_check_gage: int = -1
     from_files: bool = True
     qlat_add_loc: int = 1
+    diversion_da: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -1448,6 +1450,27 @@ def compute_log_diff(
         preRunLog.write("\n")
 
 
+def _resolve_diversion_da(
+    diversion_da: dict[ReachId, int],
+    river_reaches: np.ndarray,
+    usgs_df_sub: pd.DataFrame,
+) -> dict:
+    """Translate a global diversion map (fp_ids) to kernel-ready indices for one job."""
+    if not diversion_da:
+        return {}
+    kernel_map: dict[int, int] = {}
+    for ms_id, gage_seg_id in diversion_da.items():
+        # Binary-search for the Mississippi segment in this job's sorted index.
+        pos = int(np.searchsorted(river_reaches, ms_id))
+        if pos >= len(river_reaches) or river_reaches[pos] != ms_id:
+            continue  # segment not in this subnetwork job
+        if gage_seg_id not in usgs_df_sub.index:
+            continue  # gage not assimilated in this job
+        gage_i = int(usgs_df_sub.index.get_loc(gage_seg_id))
+        kernel_map[pos] = gage_i
+    return kernel_map
+
+
 def build_compute_package(
     job: ComputationJob,
     forcing: ForcingData,
@@ -1666,7 +1689,8 @@ def build_compute_package(
         assume_short_ts=config.assume_short_ts,
         return_courant=config.return_courant,
         from_files=config.from_files,
-        qlat_add_loc=config.qlat_add_loc_c
+        qlat_add_loc=config.qlat_add_loc_c,
+        diversion_da=_resolve_diversion_da(config.diversion_da, job.river_reaches, usgs_df_sub),
     )
 
 
@@ -1766,6 +1790,7 @@ def compute_nhd_routing_v02(
     flowveldepth_interorder: dict = {},
     from_files: bool = True,
     qlat_add_loc: Literal["top", "middle", "bottom"] = "middle",
+    diversion_da: dict[ReachId, int] = {},
 ) -> tuple[RoutingResultsCollection, ExecutionPlan]:
     """Build typed routing objects from legacy flat arguments and delegate to compute_routing."""
     if flowveldepth_interorder:
@@ -1796,7 +1821,8 @@ def compute_nhd_routing_v02(
         parallel_compute_method=parallel_compute_method,
         qlat_add_loc=qlat_add_loc,
         compute_func_name=compute_func_name,
-        subnetwork_target_size=subnetwork_target_size
+        subnetwork_target_size=subnetwork_target_size,
+        diversion_da=diversion_da,
     )
     topology = NetworkTopology(
         connections = connections,

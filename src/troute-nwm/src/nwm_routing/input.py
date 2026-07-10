@@ -535,6 +535,52 @@ def check_inputs(
                 'gage_lakeID_crosswalk_file',
                 reservoir_da['gage_lakeID_crosswalk_file']
             )
+
+    #-----------------------------------------------------------------
+    # Checking diversion data assimilation inputs
+    #-----------------------------------------------------------------
+    diversion_da = data_assimilation_parameters.get('diversion_da', None)
+    if diversion_da:
+        crosswalk = diversion_da.get('diversion_gage_crosswalk', None)
+        if crosswalk is None:
+            LOG.error(
+                'diversion_da is specified but diversion_gage_crosswalk is missing. '
+                'Provide a mapping of fp_id (int) to gage site_no (str).'
+            )
+            quit()
+        elif not isinstance(crosswalk, dict):
+            LOG.error(
+                'diversion_gage_crosswalk must be a mapping of fp_id to site_no, '
+                'but got %s. Expected a YAML mapping block.',
+                type(crosswalk).__name__
+            )
+            quit()
+        elif len(crosswalk) == 0:
+            LOG.error(
+                'diversion_gage_crosswalk is empty. '
+                'Provide at least one fp_id: site_no entry.'
+            )
+            quit()
+        else:
+            for fp_id, site_no in crosswalk.items():
+                if not isinstance(fp_id, int):
+                    LOG.error(
+                        'diversion_gage_crosswalk key %r is not an integer fp_id.',
+                        fp_id
+                    )
+                    quit()
+                if not isinstance(site_no, str):
+                    LOG.error(
+                        'diversion_gage_crosswalk value %r for fp_id %s is not a string site_no.',
+                        site_no, fp_id
+                    )
+                    quit()
+            LOG.debug(
+                'diversion_da configured with %d diversion(s).', len(crosswalk)
+            )
+    else:
+        LOG.debug('No diversion_da parameters provided. No flow diversions will be applied.')
+
     #-----------------------------------------------------------------
     # Checking output settings
     #----------------------------------------------------------------- 

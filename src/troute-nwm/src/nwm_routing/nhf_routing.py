@@ -239,7 +239,8 @@ def nhf_routing(argv):
             firstRun,
             logFileName,
             # flowveldepth_interorder=network.flowveldepth_interorder,
-            qlat_add_loc = "bottom"  # All NHF lats go in bottom
+            qlat_add_loc = "bottom",  # All NHF lats go in bottom
+            diversion_da=network.diversion_da
         )
         
         route_end_time = time.time()

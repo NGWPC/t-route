@@ -42,6 +42,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         "_upstream_inflow_df",
         "_nexus_virtual_seg_ids",
         "_fp_outlet_crosswalk",
+        "_diversion_da",
     ]
 
     def __init__(
@@ -174,6 +175,15 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
     def fp_outlet_crosswalk(self):
         """Map outlet link_id -> fp_id for reindexing outputs."""
         return self._fp_outlet_crosswalk
+
+    @property
+    def diversion_da(self) -> dict:
+        """Map outlet node_id of each diverted flowpath to the gage reach node_id."""
+        return self._diversion_da
+
+    @diversion_da.setter
+    def diversion_da(self, val: dict) -> None:
+        self._diversion_da = val
 
     def preprocess_network(self, flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, discretization_len_m=300.0, protected_fp_ids: set[int] | None = None):
         """Create routing links (self._dataframe) and weighting data to assign fp flows to links."""

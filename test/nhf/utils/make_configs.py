@@ -26,6 +26,7 @@ class DataAssimilationParameters:
     reservoir_rfc_forecasts_lookback_hours: Optional[int] = None
     reservoir_rfc_forecasts_offset_hours: Optional[int] = None
     reservoir_rfc_forecast_persist_days: Optional[int] = None
+    diversion_gage_crosswalk: Optional[dict] = None
 
     def to_dict(self) -> dict:
         da: dict = {
@@ -57,6 +58,10 @@ class DataAssimilationParameters:
             da["canada_timeslices_folder"] = self.canada_timeslices_folder
         if self.LakeOntario_outflow is not None:
             da["LakeOntario_outflow"] = self.LakeOntario_outflow
+        if self.diversion_gage_crosswalk is not None:
+            da["diversion_da"] = {
+                "diversion_gage_crosswalk": self.diversion_gage_crosswalk
+            }
         rfc_da = da["reservoir_da"]["reservoir_rfc_da"]
         if self.reservoir_rfc_forecasts_time_series_path is not None:
             rfc_da["reservoir_rfc_forecasts_time_series_path"] = self.reservoir_rfc_forecasts_time_series_path

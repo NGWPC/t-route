@@ -116,7 +116,16 @@ CFG = Config(
         usgs_timeslices_folder="usgs_da",
         streamflow_nudging=True,
         timeslice_lookback_hours=48,
+        diversion_gage_crosswalk={1270479816524705: "07381482"}
     ),
+)
+CFG_NO_DA = Config(
+    DATA_DIR,
+    START_TIME,
+    END_TIME_WITH_RUNOUT,
+    restart_dir_name="restart",
+    config_file_name="config_no_da.yaml",
+    output_dir_name="output_no_da"
 )
 
 GAGES_PATCH = {
@@ -139,6 +148,8 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
     offnetwork_upstreams = None
     if refresh or not CFG.config_path.exists():
         CFG.write_yaml()
+    if refresh or not CFG_NO_DA.config_path.exists():
+        CFG_NO_DA.write_yaml()
 
     if refresh or not CFG.domain_path.exists():
         offnetwork_upstreams = get_offnetwork_upstreams(source_gpkg, FP_IDS)
@@ -156,7 +167,7 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
             CFG.channel_forcing_dir,
             CFG.domain_path,
             RUNOUT_PERIOD,
-            offnetwork_upstreams=offnetwork_upstreams
+            offnetwork_upstreams=offnetwork_upstreams,
         )
 
     restart_file = CFG.root_dir / CFG.restart_dir_name / "restart.pkl"
@@ -176,6 +187,7 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
             t_start=pd.Timestamp(START_TIME),
             t_end=pd.Timestamp(END_TIME),
             output_dir=CFG.reference_data_path.parent,
+            dv_only=True
         )
 
     if CFG.usgs_timeslices_dir is not None and (
@@ -186,10 +198,11 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
             lookback_hours = CFG.data_assimilation_parameters.timeslice_lookback_hours or 0
             da_start = (pd.Timestamp(START_TIME) - pd.Timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
             write_usgs_timeslices(
-                station_ids=station_ids,
+                station_ids=["07381482"],
                 start_time=da_start,
                 end_time=END_TIME_WITH_RUNOUT,
                 output_dir=CFG.usgs_timeslices_dir,
+                dv_only=True
             )
 
 
@@ -202,3 +215,4 @@ def test_patuxent():
 
 
 # python -m test.nhf.utils.generate_diagnostics -f test/nhf/old_river/data/config.yaml
+# python -m test.nhf.utils.generate_diagnostics -f test/nhf/old_river/data/config_no_da.yaml

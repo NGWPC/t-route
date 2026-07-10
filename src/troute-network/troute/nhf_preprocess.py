@@ -912,6 +912,7 @@ class NHFPreprocessMixin:
             self._usace_lake_gage_crosswalk = pd.DataFrame()
             self._usbr_lake_gage_crosswalk = pd.DataFrame()
             self._rfc_lake_gage_crosswalk = pd.DataFrame()
+            self.diversion_da = {}
             return
 
         ### reservoir_da validation and formatting ###
@@ -1088,3 +1089,46 @@ class NHFPreprocessMixin:
             canada_sub.set_index("up_node_id")[["site_no"]]
             .rename(columns={"site_no": "gages"})
         )
+
+        self._resolve_diversion_da(gages_join)
+
+    def _resolve_diversion_da(self, gages_join: pd.DataFrame) -> None:
+        """Transform fp_id to self.dataframe link ID and gage site_no to link ID of gage link."""
+        _diversion_da = {}
+        _diversion_cfg = self.data_assimilation_parameters.get("diversion_da", None)
+        if _diversion_cfg:
+            _crosswalk = _diversion_cfg.get("diversion_gage_crosswalk", {})
+            if _crosswalk:
+                gage_site_to_node = (
+                    gages_join.dropna(subset=["up_node_id"])
+                    .drop_duplicates(subset=["site_no"], keep="first")
+                    .set_index("site_no")["up_node_id"]
+                    .astype(int)
+                    .to_dict()
+                )
+                fp_outlet_nodes = (
+                    self._dataframe.loc[
+                        self._dataframe.groupby("fp_id")["segment_order"].idxmax()
+                    ]
+                    .reset_index()
+                    .set_index("fp_id")["up_node_id"]
+                    .astype(int)
+                    .to_dict()
+                )
+                for fp_id, site_no in _crosswalk.items():
+                    from_id = fp_outlet_nodes.get(fp_id)
+                    if from_id is None:
+                        raise ValueError(
+                            f"diversion_gage_crosswalk: fp_id {fp_id} not found in network."
+                        )
+                    gage_node = gage_site_to_node.get(site_no)
+                    if gage_node is None:
+                        raise ValueError(
+                            f"diversion_gage_crosswalk: site_no '{site_no}' not found in gages."
+                        )
+                    _diversion_da[from_id] = gage_node
+                    LOG.debug(
+                        "Diversion configured: fp_id %s (node %s) -> gage %s (node %s)",
+                        fp_id, from_id, site_no, gage_node,
+                    )
+        self.diversion_da = _diversion_da
