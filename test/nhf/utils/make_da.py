@@ -312,14 +312,65 @@ def _valid_nwis_site_ids(station_ids: list[str]) -> list[str]:
     return [sid for sid in station_ids if sid.strip().isdigit() and len(sid.strip()) <= 15]
 
 
+def _fetch_dv_as_15min(
+    sid: str,
+    fetch_start: str,
+    fetch_end: str,
+    ts_range: pd.DatetimeIndex,
+) -> pd.Series:
+    """Fetch USGS daily-value discharge for one station and resample to 15-min.
+
+    Daily values are placed at noon UTC of each day, then linearly interpolated
+    to the target 15-minute index. This avoids a step-function artifact at
+    midnight while still being a simple, defensible fill strategy.
+
+    Returns a Series (float, m³/s) aligned to ts_range, or all-NaN on failure.
+    """
+    empty = pd.Series(np.nan, index=ts_range, name=sid)
+    try:
+        raw, _ = nwis.get_dv(
+            sites=[sid],
+            parameterCd=_USGS_DISCHARGE_PARAM,
+            startDT=pd.Timestamp(fetch_start).strftime("%Y-%m-%d"),
+            endDT=pd.Timestamp(fetch_end).strftime("%Y-%m-%d"),
+        )
+    except Exception:
+        return empty
+
+    if raw.empty:
+        return empty
+
+    q_col = next((c for c in raw.columns if _USGS_DISCHARGE_PARAM in c and not c.endswith("_cd")), None)
+    if q_col is None:
+        return empty
+
+    # DV index is date-only; shift to noon UTC so interpolation is centred on the day.
+    # DV index may already be tz-aware; ensure UTC then shift to noon.
+    dv_index = pd.DatetimeIndex(raw.index)
+    if dv_index.tz is None:
+        dv_index = dv_index.tz_localize("UTC")
+    else:
+        dv_index = dv_index.tz_convert("UTC")
+    dv_index = dv_index + pd.Timedelta(hours=12)
+    q_daily = pd.Series(raw[q_col].astype(float).values * _CFS_TO_CMS, index=dv_index, name=sid)
+
+    # Reindex onto a combined index (daily + 15-min), interpolate, then select 15-min only.
+    combined_index = dv_index.union(ts_range).sort_values()
+    q_combined = q_daily.reindex(combined_index).interpolate(method="time", limit_direction="both")
+    return q_combined.reindex(ts_range)
+
+
 def _fetch_usgs_observations(
     station_ids: list[str],
     start_time: str,
     end_time: str,
+    dv_only: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Pull 15-min discharge from NWIS and return (discharge_cms, quality) DataFrames.
 
     Both are indexed by UTC timestamp with one column per station.
+    If *dv_only* is True, skip the IV fetch entirely and derive all values from
+    daily means interpolated to 15-minute resolution.
     discharge_cms is in m³/s; quality is an int 0-100. Missing obs are NaN.
     """
     start_dt = pd.to_datetime(start_time)
@@ -334,6 +385,15 @@ def _fetch_usgs_observations(
     valid_ids = _valid_nwis_site_ids(station_ids)
     if not valid_ids:
         return empty, empty_quality
+
+    if dv_only:
+        discharge_cms = empty.copy()
+        quality_df = empty_quality.copy()
+        for sid in valid_ids:
+            dv_fill = _fetch_dv_as_15min(sid, fetch_start, fetch_end, ts_range)
+            discharge_cms[sid] = dv_fill
+            quality_df[sid] = np.where(dv_fill.notna(), _USGS_QUALITY_CODE_MAP["A"], _USGS_QUALITY_DEFAULT)
+        return discharge_cms, quality_df
 
     try:
         raw, _ = nwis.get_iv(
@@ -397,12 +457,22 @@ def _fetch_usgs_observations(
     for sid in valid_ids:
         q_series = site_q.get(sid, pd.Series(dtype=float)).reindex(ts_range)
         cd_series = site_cd.get(sid, pd.Series(dtype=str)).reindex(ts_range)
-        discharge_cms[sid] = q_series * _CFS_TO_CMS
-        quality_df[sid] = (
+        q_cms = q_series * _CFS_TO_CMS
+
+        # Always fetch DV and use it to fill any NaN gaps in the IV series.
+        dv_fill = _fetch_dv_as_15min(sid, fetch_start, fetch_end, ts_range)
+        nan_mask = q_cms.isna()
+        q_cms = q_cms.fillna(dv_fill)
+
+        discharge_cms[sid] = q_cms
+
+        # For timesteps filled from DV, mark quality as estimated.
+        iv_quality = (
             cd_series.map(lambda v: _USGS_QUALITY_CODE_MAP.get(str(v).strip(), _USGS_QUALITY_DEFAULT))
             .fillna(_USGS_QUALITY_DEFAULT)
             .astype(int)
         )
+        quality_df[sid] = np.where(nan_mask & q_cms.notna(), _USGS_QUALITY_CODE_MAP["e"], iv_quality)
 
     return discharge_cms, quality_df
 
@@ -413,18 +483,21 @@ def write_usgs_timeslices(
     end_time: str,
     output_dir: Path | str = Path("usgs_da"),
     discharge_quality: int = 100,
+    dv_only: bool = False,
 ) -> None:
     """Write 15-min USGS timeslice files using real NWIS observations.
 
     Fetches instantaneous discharge (ft³/s → m³/s) for each station and writes
     one NetCDF per 15-min step, ±1 hour around [start_time, end_time].
     Stations with no observations are written as NaN.
+    If *dv_only* is True, skip the IV fetch and derive all values from daily
+    means interpolated to 15-minute resolution.
     """
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     discharge_cms, quality_df = _fetch_usgs_observations(
-        station_ids, start_time, end_time
+        station_ids, start_time, end_time, dv_only=dv_only
     )
 
     suffix = DA_SUFFIX["usgs"]
