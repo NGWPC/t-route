@@ -1450,6 +1450,21 @@ def compute_log_diff(
         preRunLog.write("\n")
 
 
+def _warn_diverted_zero_flow(results: RoutingResultsCollection, diversion_da: dict[int, int]) -> None:
+    """Log a warning for any diverted reach whose flow was clamped to zero."""
+    diverted_ids = set(diversion_da.keys())
+    for r in results:
+        for i, sid in enumerate(r.ids):
+            if sid in diverted_ids:
+                n_zero = int((r.flow[i, 0::4] == 0).sum())
+                if n_zero:
+                    LOG.warning(
+                        "Diverted reach %s had flow clamped to 0 at %d of %d timestep(s). "
+                        "Check that the diversion value does not exceed routed flow.",
+                        sid, n_zero, r.flow.shape[1] // 4,
+                    )
+
+
 def _resolve_diversion_da(
     diversion_da: dict[ReachId, int],
     river_reaches: np.ndarray,
@@ -1532,6 +1547,18 @@ def build_compute_package(
     da_positions_list_byreach, da_positions_list_bygage = _prep_da_positions_byreach(
         job.routing_paths, lastobs_df_sub.index
     )
+
+    # The diversion gage is often in a different subnetwork than the reach
+    # being diverted, so inject its usgs_df row here if it's missing.
+    if config.diversion_da:
+        diversion_gage_ids = set(config.diversion_da.values())
+        missing_gage_ids = diversion_gage_ids - set(usgs_df_sub.index)
+        if missing_gage_ids:
+            extra = assimilation_data.usgs_df.loc[
+                assimilation_data.usgs_df.index.intersection(list(missing_gage_ids))
+            ]
+            if not extra.empty:
+                usgs_df_sub = pd.concat([usgs_df_sub, extra])
 
     # prepare reservoir DA data
     (
@@ -1743,8 +1770,14 @@ def compute_routing(
     # Clear boundary condition data to save some memory
     execution_plan.boundary_conditions.clear_data()
 
-    # Format and return
-    return RoutingResultsCollection(results), execution_plan
+    # Format results
+    collection = RoutingResultsCollection(results)
+
+    # Warn if any diverted reach had its flow drained to zero.
+    if config.diversion_da:
+        _warn_diverted_zero_flow(collection, config.diversion_da)
+
+    return collection, execution_plan
 
 
 def compute_nhd_routing_v02(
