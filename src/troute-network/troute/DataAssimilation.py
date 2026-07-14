@@ -21,6 +21,25 @@ from troute.network import bmi_array2df as a2df
 # not to be used in regular BMI runs any longer, only for debugging
 legacy_bmi_df = False
 
+# Old River Control Structure diversion fallback values
+# Retrieved from NWIS on 7/14/26
+_DIVERSION_MONTHLY_MEANS = {
+    '07381482': {
+        1:  3220,
+        2:  3180,
+        3:  3080,
+        4:  5750,
+        5:  3960,
+        6:  4160,
+        7:  3140,
+        8:  3040,
+        9:  1980,
+        10: 1680,
+        11: 1980,
+        12: 3070,
+    }
+}
+
 # -----------------------------------------------------------------------------
 # Abstract DA Class:
 #   Define all slots and pass function definitions to child classes
@@ -218,7 +237,18 @@ class NudgingDA(AbstractDA):
                 self._usgs_df = _create_usgs_df(data_assimilation_parameters, streamflow_da_parameters, run_parameters, network, da_run)
                 if ('canada_timeslice_files' in da_run) & (not network.canadian_gage_df.empty):
                     self._canada_df = _create_canada_df(data_assimilation_parameters, streamflow_da_parameters, run_parameters, network, da_run)
-                    self._canada_is_created = True                    
+                    self._canada_is_created = True
+
+        # Fill diversion gage rows with historical monthly medians where real observations are absent.
+        # Real observations always take priority; this only fills NaN gaps (or creates the row if missing).
+        diversion_da_parameters = data_assimilation_parameters.get('diversion_da', {}) or {}
+        if diversion_da_parameters.get('persist_historical_median', False):
+            self._usgs_df = _fill_diversion_historical_median(
+                self._usgs_df,
+                diversion_da_parameters,
+                network,
+                run_parameters,
+            )
         LOG.debug("NudgingDA class is completed in %s seconds." % (time.time() - main_start_time))
         
     def update_after_compute(self, run_results, time_increment):
@@ -279,6 +309,16 @@ class NudgingDA(AbstractDA):
                 self._canada_df = _create_canada_df(data_assimilation_parameters, streamflow_da_parameters, run_parameters, network, da_run)
             else:
                 self._canada_df = pd.DataFrame()
+
+        # Re-apply historical median fill for next loop iteration
+        diversion_da_parameters = data_assimilation_parameters.get('diversion_da', {}) or {}
+        if diversion_da_parameters.get('persist_historical_median', False):
+            self._usgs_df = _fill_diversion_historical_median(
+                self._usgs_df,
+                diversion_da_parameters,
+                network,
+                run_parameters,
+            )
 
 
 class PersistenceDA(AbstractDA):
@@ -1255,6 +1295,88 @@ class DataAssimilation(NudgingDA, PersistenceDA, RFCDA):
 # --------------------------------------------------------------
 # Helper functions
 # --------------------------------------------------------------
+def _diversion_decay_to_median(row, historical, nan_mask, da_decay_coefficient):
+    """Fill NaN gaps by decaying from the last valid observation toward the monthly median (mirrors obs_persist_shift in simple_da.pyx)."""
+    last_obs_vals = row.ffill()
+    obs_idx = row.index[row.notna()]
+    for col in row.index[nan_mask]:
+        last_obs_val = last_obs_vals[col]
+        if pd.isna(last_obs_val):
+            row[col] = historical[col]
+        else:
+            last_ts = obs_idx[obs_idx < col][-1]
+            minutes_since = (col - last_ts).total_seconds() / 60
+            weight = np.exp(-abs(minutes_since) / da_decay_coefficient)
+            row[col] = historical[col] + (last_obs_val - historical[col]) * weight
+    return row
+
+
+def _fill_diversion_historical_median(usgs_df, diversion_da_parameters, network, run_parameters):
+    """Fill nan values in usgs_df for diversion gages (if necessary)."""
+    diversion_gage_crosswalk = diversion_da_parameters.get('diversion_gage_crosswalk', {})
+    if not diversion_gage_crosswalk:
+        return usgs_df
+
+    # Build time columns if usgs_df has none (nudging is off)
+    if usgs_df.empty or usgs_df.shape[1] == 0:
+        t0  = network.t0
+        dt  = run_parameters.get('dt', 300)          # seconds
+        nts = run_parameters.get('nts', 0)
+        # Observation frequency is 5-minute regardless of routing dt
+        obs_freq = '5min'
+        n_obs = max(1, int(nts * dt / 300) + 1)
+        time_index = pd.date_range(t0, periods=n_obs, freq=obs_freq)
+        usgs_df = pd.DataFrame(index=pd.Index([], dtype='int64'), columns=time_index, dtype=float)
+
+    # da_decay_coefficient (minutes) mirrors the simple_da decay rate.
+    da_decay_coefficient = float(
+        getattr(network, 'data_assimilation_parameters', {}).get('da_decay_coefficient', 120)
+    )
+    diversion_site_to_node: dict[str, int] = getattr(network, '_diversion_site_to_node', {})
+
+    # crosswalk maps fp_id (int) -> site_no (str)
+    for fp_id, gage_id in diversion_gage_crosswalk.items():
+        gage_id = str(gage_id)
+        link_id = int(diversion_site_to_node[gage_id])
+
+        monthly_means = _DIVERSION_MONTHLY_MEANS.get(gage_id)
+        if monthly_means is None:
+            LOG.warning(
+                "persist_historical_median: no monthly means defined for gage %s - skipping.",
+                gage_id,
+            )
+            continue
+
+        # Target to decay toward at each column (monthly median by calendar month).
+        historical = pd.Series(
+            {col: monthly_means[col.month] for col in usgs_df.columns},
+            dtype=float,
+        )
+
+        # Get the existing row or create a blank one.
+        if link_id in usgs_df.index:
+            row = usgs_df.loc[link_id].copy()
+        else:
+            row = pd.Series(np.nan, index=usgs_df.columns, dtype=float)
+
+        nan_mask = row.isna()
+        if nan_mask.any():
+            if row.notna().any():
+                row = _diversion_decay_to_median(row, historical, nan_mask, da_decay_coefficient)
+            else:
+                # No real observations at all: use monthly median for every column.
+                row[nan_mask] = historical[nan_mask]
+
+        if link_id in usgs_df.index:
+            usgs_df.loc[link_id] = row
+        else:
+            new_row = row.to_frame().T
+            new_row.index = pd.Index([link_id], dtype='int64')
+            usgs_df = pd.concat([usgs_df, new_row])
+
+    return usgs_df
+
+
 def _reindex_link_to_lake_id(target_df, crosswalk):
     '''
     Utility function for replacing link ID index values

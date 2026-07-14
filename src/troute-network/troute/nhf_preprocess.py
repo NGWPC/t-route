@@ -1094,41 +1094,48 @@ class NHFPreprocessMixin:
 
     def _resolve_diversion_da(self, gages_join: pd.DataFrame) -> None:
         """Transform fp_id to self.dataframe link ID and gage site_no to link ID of gage link."""
-        _diversion_da = {}
+        self._diversion_site_to_node: dict[str, int] = {}
+        self.diversion_da: dict[int, int] = {}
         _diversion_cfg = self.data_assimilation_parameters.get("diversion_da", None)
-        if _diversion_cfg:
-            _crosswalk = _diversion_cfg.get("diversion_gage_crosswalk", {})
-            if _crosswalk:
-                gage_site_to_node = (
-                    gages_join.dropna(subset=["up_node_id"])
-                    .drop_duplicates(subset=["site_no"], keep="first")
-                    .set_index("site_no")["up_node_id"]
-                    .astype(int)
-                    .to_dict()
+        if not _diversion_cfg:
+            return
+        _crosswalk = _diversion_cfg.get("diversion_gage_crosswalk", {})
+        if not _crosswalk:
+            return
+
+        # Map gage site_no to network links
+        self._diversion_site_to_node = (
+            gages_join.dropna(subset=["up_node_id"])
+            .drop_duplicates(subset=["site_no"], keep="first")
+            .set_index("site_no")["up_node_id"]
+            .astype(int)
+            .to_dict()
+        )
+
+        # Find most downstream routing link for each diversion flowpath
+        fp_ids_needed = set(_crosswalk.keys())
+        fp_outlet_nodes = (
+            self._dataframe[self._dataframe["fp_id"].isin(fp_ids_needed)]
+            .groupby("fp_id")["segment_order"]
+            .idxmax()
+            .astype(int)
+            .to_dict()
+        )
+
+        # Create updated diversion_da dict
+        for fp_id, site_no in _crosswalk.items():
+            from_id = fp_outlet_nodes.get(fp_id)
+            if from_id is None:
+                raise ValueError(
+                    f"diversion_gage_crosswalk: fp_id {fp_id} not found in network."
                 )
-                fp_outlet_nodes = (
-                    self._dataframe.loc[
-                        self._dataframe.groupby("fp_id")["segment_order"].idxmax()
-                    ]
-                    .reset_index()
-                    .set_index("fp_id")["up_node_id"]
-                    .astype(int)
-                    .to_dict()
+            gage_node = self._diversion_site_to_node.get(site_no)
+            if gage_node is None:
+                raise ValueError(
+                    f"diversion_gage_crosswalk: site_no '{site_no}' not found in gages."
                 )
-                for fp_id, site_no in _crosswalk.items():
-                    from_id = fp_outlet_nodes.get(fp_id)
-                    if from_id is None:
-                        raise ValueError(
-                            f"diversion_gage_crosswalk: fp_id {fp_id} not found in network."
-                        )
-                    gage_node = gage_site_to_node.get(site_no)
-                    if gage_node is None:
-                        raise ValueError(
-                            f"diversion_gage_crosswalk: site_no '{site_no}' not found in gages."
-                        )
-                    _diversion_da[from_id] = gage_node
-                    LOG.debug(
-                        "Diversion configured: fp_id %s (node %s) -> gage %s (node %s)",
-                        fp_id, from_id, site_no, gage_node,
-                    )
-        self.diversion_da = _diversion_da
+            self.diversion_da[from_id] = gage_node
+            LOG.debug(
+                "Diversion configured: fp_id %s (node %s) -> gage %s (node %s)",
+                fp_id, from_id, site_no, gage_node,
+            )

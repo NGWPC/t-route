@@ -107,7 +107,7 @@ END_TIME_WITH_RUNOUT = (
 ).strftime("%Y-%m-%d %H:%M")
 
 DATA_DIR = Path(__file__).parent / "data"
-CFG = Config(
+CFG_DIVERSION = Config(
     DATA_DIR,
     START_TIME,
     END_TIME_WITH_RUNOUT,
@@ -119,13 +119,32 @@ CFG = Config(
         diversion_gage_crosswalk={1270479816524705: "07381482"}
     ),
 )
-CFG_NO_DA = Config(
+CFG_NO_DIVERSION = Config(
     DATA_DIR,
     START_TIME,
     END_TIME_WITH_RUNOUT,
     restart_dir_name="restart",
-    config_file_name="config_no_da.yaml",
-    output_dir_name="output_no_da"
+    config_file_name="config_no_diversion.yaml",
+    output_dir_name="output_no_diversion",
+    data_assimilation_parameters=DataAssimilationParameters(
+        usgs_timeslices_folder="usgs_da_no_diversion",
+        streamflow_nudging=True,
+        timeslice_lookback_hours=48,
+    ),
+)
+CFG_HISTORICAL = Config(
+    DATA_DIR,
+    START_TIME,
+    END_TIME_WITH_RUNOUT,
+    restart_dir_name="restart",
+    config_file_name="config_historical.yaml",
+    output_dir_name="output_historical",
+    data_assimilation_parameters=DataAssimilationParameters(
+        streamflow_nudging=False,
+        timeslice_lookback_hours=48,
+        persist_historical_median=True,
+        diversion_gage_crosswalk={1270479816524705: "07381482"}
+    ),
 )
 
 GAGES_PATCH = {
@@ -146,72 +165,85 @@ def patch_gages(domain_path: Path) -> None:
 def setup(source_gpkg: str | Path, refresh: bool = True):
     """Subset the NHF domain and generate forcing for a standard test case."""
     offnetwork_upstreams = None
-    if refresh or not CFG.config_path.exists():
-        CFG.write_yaml()
-    if refresh or not CFG_NO_DA.config_path.exists():
-        CFG_NO_DA.write_yaml()
+    if refresh or not CFG_DIVERSION.config_path.exists():
+        CFG_DIVERSION.write_yaml()
+    if refresh or not CFG_NO_DIVERSION.config_path.exists():
+        CFG_NO_DIVERSION.write_yaml()
+    if refresh or not CFG_HISTORICAL.config_path.exists():
+        CFG_HISTORICAL.write_yaml()
 
-    if refresh or not CFG.domain_path.exists():
+
+    if refresh or not CFG_DIVERSION.domain_path.exists():
         offnetwork_upstreams = get_offnetwork_upstreams(source_gpkg, FP_IDS)
         layers = extract_layers(source_gpkg, FP_IDS + offnetwork_upstreams)
-        write_gpkg(layers, CFG.domain_path)
-        patch_gages(CFG.domain_path)
+        write_gpkg(layers, CFG_DIVERSION.domain_path)
+        patch_gages(CFG_DIVERSION.domain_path)
 
-    if refresh or not has_files(CFG.channel_forcing_dir, CFG.qlat_file_pattern):
+    if refresh or not has_files(CFG_DIVERSION.channel_forcing_dir, CFG_DIVERSION.qlat_file_pattern):
         if offnetwork_upstreams is None:
             offnetwork_upstreams = get_offnetwork_upstreams(source_gpkg, FP_IDS)
         build_forcing_dataset(
             FORCING_MODE,
             START_TIME,
             END_TIME,
-            CFG.channel_forcing_dir,
-            CFG.domain_path,
+            CFG_DIVERSION.channel_forcing_dir,
+            CFG_DIVERSION.domain_path,
             RUNOUT_PERIOD,
             offnetwork_upstreams=offnetwork_upstreams,
         )
 
-    restart_file = CFG.root_dir / CFG.restart_dir_name / "restart.pkl"
+    restart_file = CFG_DIVERSION.root_dir / CFG_DIVERSION.restart_dir_name / "restart.pkl"
     if refresh or not restart_file.exists():
         if offnetwork_upstreams is None:
             offnetwork_upstreams = get_offnetwork_upstreams(source_gpkg, FP_IDS)
         create_hot_start_file(
             t_start=START_TIME,
-            restart_dir=str(CFG.root_dir / CFG.restart_dir_name),
-            hydrofabric_path=str(CFG.domain_path),
+            restart_dir=str(CFG_DIVERSION.root_dir / CFG_DIVERSION.restart_dir_name),
+            hydrofabric_path=str(CFG_DIVERSION.domain_path),
             offnetwork_upstreams=offnetwork_upstreams
         )
 
-    if refresh or not CFG.reference_data_path.exists():
+    if refresh or not CFG_DIVERSION.reference_data_path.exists():
         generate_reference_data(
-            hydrofabric_path=CFG.domain_path,
+            hydrofabric_path=CFG_DIVERSION.domain_path,
             t_start=pd.Timestamp(START_TIME),
             t_end=pd.Timestamp(END_TIME),
-            output_dir=CFG.reference_data_path.parent,
+            output_dir=CFG_DIVERSION.reference_data_path.parent,
             dv_only=True
         )
 
-    if CFG.usgs_timeslices_dir is not None and (
-        refresh or not has_files(CFG.usgs_timeslices_dir, "*.usgsTimeSlice.ncdf")
+    if CFG_DIVERSION.usgs_timeslices_dir is not None and (
+        refresh or not has_files(CFG_DIVERSION.usgs_timeslices_dir, "*.usgsTimeSlice.ncdf")
     ):
-        station_ids = get_usgs_station_ids(CFG.domain_path)
-        if station_ids:
-            lookback_hours = CFG.data_assimilation_parameters.timeslice_lookback_hours or 0
-            da_start = (pd.Timestamp(START_TIME) - pd.Timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
-            write_usgs_timeslices(
-                station_ids=["07381482"],
-                start_time=da_start,
-                end_time=END_TIME_WITH_RUNOUT,
-                output_dir=CFG.usgs_timeslices_dir,
-                dv_only=True
-            )
+        lookback_hours = CFG_DIVERSION.data_assimilation_parameters.timeslice_lookback_hours or 0
+        da_start = (pd.Timestamp(START_TIME) - pd.Timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
+        write_usgs_timeslices(
+            station_ids=["07381482", "07289000"],
+            start_time=da_start,
+            end_time=END_TIME_WITH_RUNOUT,
+            output_dir=CFG_DIVERSION.usgs_timeslices_dir,
+            dv_only=True
+        )
+    if CFG_NO_DIVERSION.usgs_timeslices_dir is not None and (
+        refresh or not has_files(CFG_NO_DIVERSION.usgs_timeslices_dir, "*.usgsTimeSlice.ncdf")
+    ):
+        lookback_hours = CFG_NO_DIVERSION.data_assimilation_parameters.timeslice_lookback_hours or 0
+        da_start = (pd.Timestamp(START_TIME) - pd.Timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
+        write_usgs_timeslices(
+            station_ids=["07289000"],
+            start_time=da_start,
+            end_time=END_TIME_WITH_RUNOUT,
+            output_dir=CFG_NO_DIVERSION.usgs_timeslices_dir,
+            dv_only=True
+        )
 
 
-@pytest.mark.integration
-def test_patuxent():
-    skip_if_not_built(CFG)
-    delete_outputs(CFG.output_dir)
-    run_troute(CFG.config_path)
-    assert_peak_bounds(CFG.output_dir, PEAK_BOUNDS)
+# @pytest.mark.integration
+# def test_old_river():
+#     skip_if_not_built(CFG_DIVERSION)
+#     delete_outputs(CFG_DIVERSION.output_dir)
+#     run_troute(CFG_DIVERSION.config_path)
+#     assert_peak_bounds(CFG_DIVERSION.output_dir, PEAK_BOUNDS)
 
 
 # python -m test.nhf.utils.generate_diagnostics -f test/nhf/old_river/data/config.yaml

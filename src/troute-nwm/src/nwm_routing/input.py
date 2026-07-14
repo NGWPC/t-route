@@ -578,6 +578,14 @@ def check_inputs(
             LOG.debug(
                 'diversion_da configured with %d diversion(s).', len(crosswalk)
             )
+        persist_historical_median = diversion_da.get('persist_historical_median', False)
+        if not isinstance(persist_historical_median, bool):
+            LOG.error(
+                'persist_historical_median must be a boolean (true/false), but got %s.',
+                type(persist_historical_median).__name__
+            )
+            quit()
+        LOG.debug('persist_historical_median = %s', persist_historical_median)
     else:
         LOG.debug('No diversion_da parameters provided. No flow diversions will be applied.')
 
