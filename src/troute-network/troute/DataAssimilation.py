@@ -1295,44 +1295,37 @@ class DataAssimilation(NudgingDA, PersistenceDA, RFCDA):
 # --------------------------------------------------------------
 # Helper functions
 # --------------------------------------------------------------
-def _diversion_decay_to_median(row, historical, nan_mask, da_decay_coefficient):
-    """Fill NaN gaps by decaying from the last valid observation toward the monthly median (mirrors obs_persist_shift in simple_da.pyx)."""
-    last_obs_vals = row.ffill()
-    obs_idx = row.index[row.notna()]
-    for col in row.index[nan_mask]:
-        last_obs_val = last_obs_vals[col]
-        if pd.isna(last_obs_val):
-            row[col] = historical[col]
-        else:
-            last_ts = obs_idx[obs_idx < col][-1]
-            minutes_since = (col - last_ts).total_seconds() / 60
-            weight = np.exp(-abs(minutes_since) / da_decay_coefficient)
-            row[col] = historical[col] + (last_obs_val - historical[col]) * weight
-    return row
 
 
-def _fill_diversion_historical_median(usgs_df, diversion_da_parameters, network, run_parameters):
+def _fill_diversion_historical_median(
+    usgs_df: pd.DataFrame,
+    diversion_da_parameters: dict,
+    network,
+    run_parameters: dict,
+) -> pd.DataFrame:
     """Fill nan values in usgs_df for diversion gages (if necessary)."""
-    diversion_gage_crosswalk = diversion_da_parameters.get('diversion_gage_crosswalk', {})
+    diversion_gage_crosswalk = diversion_da_parameters.get(
+        "diversion_gage_crosswalk", {}
+    )
     if not diversion_gage_crosswalk:
         return usgs_df
 
     # Build time columns if usgs_df has none (nudging is off)
     if usgs_df.empty or usgs_df.shape[1] == 0:
-        t0  = network.t0
-        dt  = run_parameters.get('dt', 300)          # seconds
-        nts = run_parameters.get('nts', 0)
+        t0 = network.t0
+        dt = run_parameters.get("dt", 300)  # seconds
+        nts = run_parameters.get("nts", 0)
         # Observation frequency is 5-minute regardless of routing dt
-        obs_freq = '5min'
+        obs_freq = "5min"
         n_obs = max(1, int(nts * dt / 300) + 1)
         time_index = pd.date_range(t0, periods=n_obs, freq=obs_freq)
-        usgs_df = pd.DataFrame(index=pd.Index([], dtype='int64'), columns=time_index, dtype=float)
+        usgs_df = pd.DataFrame(
+            index=pd.Index([], dtype="int64"), columns=time_index, dtype=float
+        )
 
-    # da_decay_coefficient (minutes) mirrors the simple_da decay rate.
-    da_decay_coefficient = float(
-        getattr(network, 'data_assimilation_parameters', {}).get('da_decay_coefficient', 120)
+    diversion_site_to_node: dict[str, int] = getattr(
+        network, "_diversion_site_to_node", {}
     )
-    diversion_site_to_node: dict[str, int] = getattr(network, '_diversion_site_to_node', {})
 
     # crosswalk maps fp_id (int) -> site_no (str)
     for fp_id, gage_id in diversion_gage_crosswalk.items():
@@ -1347,7 +1340,7 @@ def _fill_diversion_historical_median(usgs_df, diversion_da_parameters, network,
             )
             continue
 
-        # Target to decay toward at each column (monthly median by calendar month).
+        # Fill value at each column using the monthly median by calendar month.
         historical = pd.Series(
             {col: monthly_means[col.month] for col in usgs_df.columns},
             dtype=float,
@@ -1361,17 +1354,13 @@ def _fill_diversion_historical_median(usgs_df, diversion_da_parameters, network,
 
         nan_mask = row.isna()
         if nan_mask.any():
-            if row.notna().any():
-                row = _diversion_decay_to_median(row, historical, nan_mask, da_decay_coefficient)
-            else:
-                # No real observations at all: use monthly median for every column.
-                row[nan_mask] = historical[nan_mask]
+            row[nan_mask] = historical[nan_mask]
 
         if link_id in usgs_df.index:
             usgs_df.loc[link_id] = row
         else:
             new_row = row.to_frame().T
-            new_row.index = pd.Index([link_id], dtype='int64')
+            new_row.index = pd.Index([link_id], dtype="int64")
             usgs_df = pd.concat([usgs_df, new_row])
 
     return usgs_df
