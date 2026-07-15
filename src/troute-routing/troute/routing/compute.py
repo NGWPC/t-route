@@ -602,7 +602,7 @@ class ExecutionPlan:
                 subnetwork_target_size,
             )
         elif parallel_compute_method in ["serial", "by-network", "bmi"]:
-            self._init_treewise_plan(topology, reach_data, waterbody_data)
+            self._init_treewise_plan(topology, reach_data, waterbody_data, assimilation_data)
         self._init_boundary_conditions()
 
     def _build_compute_job(
@@ -662,16 +662,25 @@ class ExecutionPlan:
         topology: NetworkTopology,
         reach_data: ReachData,
         waterbody_data: WaterbodyData,
+        assimilation_data: AssimilationData,
     ) -> None:
         """Build a single-level execution plan with one computation job per tree."""
+        # Represent each whole tree as a single partition at level 0
+        partitions_by_level: dict[int, dict[int, set]] = {
+            0: {tw: set(topology.connections_by_tw[tw]) for tw in topology.tailwaters}
+        }
+        # Split at waterbodies, gages, etc
+        computable_routing_paths = self._clean_compute_jobs(
+            partitions_by_level, topology, waterbody_data, assimilation_data
+        )
         self.batches = {0: []}
-        for i in topology.tailwaters:
+        for tw, routing_paths in computable_routing_paths[0].items():
             job = self._build_compute_job(
-                topology.paths_by_tailwater[i],
-                topology.connections_by_tw[i],
+                routing_paths,
+                topology.connections_by_tw[tw],
                 waterbody_data,
                 reach_data,
-                [i],
+                [tw],
             )
             self.batches[0].append(job)
 
