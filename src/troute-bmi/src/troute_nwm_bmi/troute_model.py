@@ -503,6 +503,10 @@ class Model:
                         err = f"Cannot merge output formats other than .nc, .csv, or .pkl. Format provided in the config file: {stream_type}"
                         LOG.error(err)
                         raise RuntimeError(err)
+
+                    original_mode = files[0].stat().st_mode
+                    Path(combo_path).chmod(original_mode)
+
                     for f in files:
                         f.unlink()
                     Path(combo_path).rename(out_path)
@@ -535,6 +539,10 @@ class Model:
                         compat="override"
                     ) as ds:
                         ds.load().to_netcdf(combo_path)
+
+                    original_mode = files[0].stat().st_mode
+                    Path(combo_path).chmod(original_mode)
+
                     for f in files:
                         f.unlink()
                     Path(combo_path).rename(out_path)
