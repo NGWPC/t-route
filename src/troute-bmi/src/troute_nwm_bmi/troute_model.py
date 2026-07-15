@@ -486,20 +486,33 @@ class Model:
                     raise
                 self._timings["output_time"] = time.time() - start_time
         wbdy_dir = self.output_parameters.get("lakeout_output", None)
+        LOG.info(f"[lakeout merge] wbdy_dir = {wbdy_dir!r} (type={type(wbdy_dir).__name__})")
         if isinstance(wbdy_dir, str):
             files = sorted(
                 Path(wbdy_dir).glob("troute_lakeout_*.nc"),
                 key=lambda f: f.stem
             )
+            LOG.info(f"[lakeout merge] found {len(files)} file(s): {[str(f) for f in files]}")
             if len(files) > 1:
                 start_time = time.time()
                 out_path = str(files[0].resolve())
+                LOG.info(f"[lakeout merge] out_path (destination) = {out_path}")
+
+                try:
+                    LOG.info(
+                        f"[lakeout merge] about to create temp file with suffix={stream_type!r}, dir={stream_dir!r}"
+                    )
+                except NameError as e:
+                    LOG.error(f"[lakeout merge] stream_type/stream_dir not defined: {e}")
+                    raise
+
                 with NamedTemporaryFile(
                     suffix=stream_type,
                     dir=stream_dir,
                     delete=False
                 ) as tmp:
                     combo_path = tmp.name
+                LOG.info(f"[lakeout merge] created temp file: {combo_path}")
                 try:
                     with xr.open_mfdataset(
                         files,
@@ -509,11 +522,17 @@ class Model:
                         coords="minimal",
                         compat="override"
                     ) as ds:
+                        LOG.info(f"[lakeout merge] merged dataset dims: {dict(ds.sizes)}")
+                        LOG.info(f"[lakeout merge] writing merged dataset to: {combo_path}")
                         ds.to_netcdf(combo_path)
+                    LOG.info(f"[lakeout merge] wrote merged dataset to: {combo_path}")
                     for f in files:
+                        LOG.info(f"[lakeout merge] deleting original file: {f}")
                         f.unlink()
+                    LOG.info(f"[lakeout merge] renaming {combo_path} -> {out_path}")
                     Path(combo_path).rename(out_path)
                 except Exception:
+                    LOG.error(f"[lakeout merge] FAILED: {type(e).__name__}: {e}")
                     Path(combo_path).unlink(missing_ok=True)
                     raise
                 self._timings["output_time"] = time.time() - start_time
