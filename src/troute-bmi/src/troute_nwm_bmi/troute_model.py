@@ -493,19 +493,29 @@ class Model:
             )
             if len(files) > 1:
                 start_time = time.time()
-                orig = files[0]
-                files[0] = orig.rename(orig.with_stem('_' + orig.stem))
-                with xr.open_mfdataset(
-                    files,
-                    concat_dim="time",
-                    combine="nested",
-                    data_vars="minimal",
-                    coords="minimal",
-                    compat="override"
-                ) as ds:
-                    ds.to_netcdf(orig)
-                for f in files:
-                    f.unlink()
+                out_path = str(files[0].resolve())
+                with NamedTemporaryFile(
+                    suffix=stream_type,
+                    dir=stream_dir,
+                    delete=False
+                ) as tmp:
+                    combo_path = tmp.name
+                try:
+                    with xr.open_mfdataset(
+                        files,
+                        concat_dim="time",
+                        combine="nested",
+                        data_vars="minimal",
+                        coords="minimal",
+                        compat="override"
+                    ) as ds:
+                        ds.to_netcdf(combo_path)
+                    for f in files:
+                        f.unlink()
+                    Path(combo_path).rename(out_path)
+                except Exception:
+                    Path(combo_path).unlink(missing_ok=True)
+                    raise
                 self._timings["output_time"] = time.time() - start_time
 
     def _is_nhf(self):
