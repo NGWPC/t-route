@@ -486,7 +486,7 @@ class Model:
                             coords="minimal",
                             compat="override"
                         ) as ds:
-                            ds.to_netcdf(combo_path)
+                            ds.load().to_netcdf(combo_path)
                     elif stream_type == ".csv":
                         df = pd.concat(
                             (pd.read_csv(f) for f in files),
@@ -511,7 +511,7 @@ class Model:
                     raise
                 self._timings["output_time"] = time.time() - start_time
         wbdy_dir = self.output_parameters.get("lakeout_output", None)
-        if isinstance(wbdy_dir, str):
+        if isinstance(wbdy_dir, Path):
             files = sorted(
                 Path(wbdy_dir).glob("troute_lakeout_*.nc"),
                 key=lambda f: f.stem
@@ -534,7 +534,7 @@ class Model:
                         coords="minimal",
                         compat="override"
                     ) as ds:
-                        ds.to_netcdf(combo_path)
+                        ds.load().to_netcdf(combo_path)
                     for f in files:
                         f.unlink()
                     Path(combo_path).rename(out_path)
