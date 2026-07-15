@@ -1,6 +1,7 @@
 """Basic Model Interface backing model for NGEN t-route."""
 from __future__ import annotations
 import math
+from tempfile import NamedTemporaryFile
 import psutil
 import time
 import typing
@@ -443,36 +444,46 @@ class Model:
             )
             if len(files) > 1:
                 start_time = time.time()
-                orig = files[0]
-                files[0] = orig.rename(orig.with_stem('_' + orig.stem))
-                if stream_type == ".nc":
-                    with xr.open_mfdataset(
-                        files,
-                        concat_dim="time",
-                        combine="nested",
-                        data_vars="minimal",
-                        coords="minimal",
-                        compat="override"
-                    ) as ds:
-                        ds.to_netcdf(orig)
-                elif stream_type == ".csv":
-                    df = pd.concat(
-                        (pd.read_csv(f) for f in files),
-                        ignore_index=True
-                    )
-                    df.to_csv(orig, index=False)
-                elif stream_type == ".pkl":
-                    df = pd.concat(
-                        (pd.read_pickle(f) for f in files),
-                        ignore_index=False
-                    )
-                    df.to_pickle(orig)
-                else:
-                    err = f"Cannot merge output formats other than .nc, .csv, or .pkl. Format provided in the config file: {stream_type}"
-                    LOG.error(err)
-                    raise RuntimeError(err)
-                for f in files:
-                    f.unlink()
+                out_path = str(files[0].resolve())
+                with NamedTemporaryFile(
+                    suffix=stream_type,
+                    dir=stream_dir,
+                    delete=False
+                ) as tmp:
+                    combo_path = tmp.name
+                try:
+                    if stream_type == ".nc":
+                        with xr.open_mfdataset(
+                            files,
+                            concat_dim="time",
+                            combine="nested",
+                            data_vars="minimal",
+                            coords="minimal",
+                            compat="override"
+                        ) as ds:
+                            ds.to_netcdf(combo_path)
+                    elif stream_type == ".csv":
+                        df = pd.concat(
+                            (pd.read_csv(f) for f in files),
+                            ignore_index=True
+                        )
+                        df.to_csv(combo_path, index=False)
+                    elif stream_type == ".pkl":
+                        df = pd.concat(
+                            (pd.read_pickle(f) for f in files),
+                            ignore_index=False
+                        )
+                        df.to_pickle(combo_path)
+                    else:
+                        err = f"Cannot merge output formats other than .nc, .csv, or .pkl. Format provided in the config file: {stream_type}"
+                        LOG.error(err)
+                        raise RuntimeError(err)
+                    for f in files:
+                        f.unlink()
+                    Path(combo_path).rename(out_path)
+                except Exception:
+                    Path(combo_path).unlink(missing_ok=True)
+                    raise
                 self._timings["output_time"] = time.time() - start_time
         wbdy_dir = self.output_parameters.get("lakeout_output", None)
         if isinstance(wbdy_dir, str):
