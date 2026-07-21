@@ -20,6 +20,7 @@ START_TIME = "2000-01-01 00:00"
 END_TIME = "2000-01-01 04:00"
 FORCING_MODE = "constant"
 CONSTANT_QLAT = 100
+DA_DISCHARGE = 0.1  # constant discharge written into every generated DA feed
 
 DATA_DIR = Path(__file__).parent / "data" / "reservoir_da"
 DA_PARAMS = DataAssimilationParameters(
@@ -65,8 +66,17 @@ def assert_da_outflows(
         .astype(int)
         .values
     )
-    # Note: T-route may drop some lakes, so this intersection may silently hide dropped lakes.
-    valid_ids = list(set(forced_ids).intersection(ds_lake["feature_id"].values))
+    # T-route may drop lakes. Intersecting and asserting on the remainder means a
+    # run that dropped EVERY DA lake compares an empty array and passes, so require
+    # coverage explicitly before narrowing.
+    produced = set(ds_lake["feature_id"].values)
+    valid_ids = sorted(set(forced_ids) & produced)
+    assert valid_ids, (
+        f"no DA-forced lake reached lakeout: {len(forced_ids)} configured, "
+        f"{len(produced)} lakes written"
+    )
+    missing = sorted(set(forced_ids) - produced)
+    assert not missing, f"{len(missing)} DA-forced lake(s) absent from lakeout: {missing[:5]}"
     ds_lake = ds_lake.sel(feature_id=valid_ids)
 
     # Load lakes and their properties
@@ -153,7 +163,7 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
                     start_time=START_TIME,
                     end_time=END_TIME,
                     output_dir=target_dir,
-                    discharge=0.1,
+                    discharge=DA_DISCHARGE,
                 )
             )
 
@@ -168,18 +178,42 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
                     start_time=START_TIME,
                     end_time=END_TIME,
                     output_dir=CFG.rfc_timeslices_dir,
-                    discharge=0.1,
+                    discharge=DA_DISCHARGE,
                 )
             )
 
 
+# Inputs are generated out of band by ``python -m test.nhf.prep_tests``. The fixture
+# gates on that data and clears stale outputs, including the lakeout directory, so an
+# assertion cannot pass on a previous run's files.
+
+
+@pytest.fixture
+def reservoir_da_case(built_case):
+    return built_case(CFG, clear=(CFG.lakeout_dir,))
+
+
 @pytest.mark.integration
-def test_conus_reservoir_da():
-    skip_if_not_built(CFG)
-    delete_outputs(CFG.output_dir)
-    delete_outputs(CFG.lakeout_dir)
-    run_troute(CFG.config_path)
+def test_output_dimensions_and_validity(reservoir_da_case):
+    run_troute(reservoir_da_case.config_path)
     assert_output_dimensions_and_validity(
-        CFG.output_dir, CFG.domain_path, CFG.config_path
+        reservoir_da_case.output_dir,
+        reservoir_da_case.domain_path,
+        reservoir_da_case.config_path,
     )
-    assert_da_outflows(CFG.lakeout_dir, CFG.domain_path, expected=0.1, atol=0.05)
+
+
+@pytest.mark.integration
+def test_da_forced_lakes_track_observed_discharge(reservoir_da_case):
+    """Every reservoir with a DA type must release the assimilated discharge.
+
+    The observation feeds are generated at a constant 0.1 cms, so each forced lake
+    should hold there apart from timesteps spilling over its maximum elevation.
+    """
+    run_troute(reservoir_da_case.config_path)
+    assert_da_outflows(
+        reservoir_da_case.lakeout_dir,
+        reservoir_da_case.domain_path,
+        expected=DA_DISCHARGE,
+        atol=0.05,
+    )
