@@ -140,23 +140,15 @@ CFG_HISTORICAL = Config(
     config_file_name="config_historical.yaml",
     output_dir_name="output_historical",
     data_assimilation_parameters=DataAssimilationParameters(
-        streamflow_nudging=False,
+        # Same observation archive as CFG_NO_DIVERSION, which has the diversion
+        # gage removed. Every other gage is still nudged, so the run is a real
+        # forecast-mode shape and CFG_NO_DIVERSION is a matched control: the only
+        # difference between the two is the diversion itself.
+        usgs_timeslices_folder="usgs_da_no_diversion",
+        streamflow_nudging=True,
         timeslice_lookback_hours=48,
         persist_historical_median=True,
         diversion_gage_crosswalk={1270479816524705: "07381482"}
-    ),
-)
-
-CFG_HISTORICAL_CONTROL = Config(
-    DATA_DIR,
-    START_TIME,
-    END_TIME_WITH_RUNOUT,
-    restart_dir_name="restart",
-    config_file_name="config_historical_control.yaml",
-    output_dir_name="output_historical_control",
-    data_assimilation_parameters=DataAssimilationParameters(
-        streamflow_nudging=False,
-        timeslice_lookback_hours=48,
     ),
 )
 
@@ -182,8 +174,6 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
         CFG_NO_DIVERSION.write_yaml()
     if refresh or not CFG_HISTORICAL.config_path.exists():
         CFG_HISTORICAL.write_yaml()
-    if refresh or not CFG_HISTORICAL_CONTROL.config_path.exists():
-        CFG_HISTORICAL_CONTROL.write_yaml()
 
     if refresh or not CFG_DIVERSION.domain_path.exists():
         offnetwork_upstreams = get_offnetwork_upstreams(source_gpkg, FP_IDS)
@@ -270,20 +260,10 @@ def no_diversion_case(built_case):
 
 @pytest.fixture
 def historical_case(built_case):
-    """Forecast-mode shape: no timeslices, climatology supplies the diversion."""
+    """Forecast-mode shape: the diversion gage has no observation, so climatology
+    supplies it. Every other gage is still nudged, exactly as in no_diversion_case,
+    which is therefore the matched control."""
     return built_case(CFG_HISTORICAL)
-
-
-@pytest.fixture
-def historical_control_case(built_case):
-    """Matched control for the forecast-mode case: nudging off, no diversion.
-
-    CFG_NO_DIVERSION is NOT a valid control here, because it leaves nudging on.
-    Comparing against it varies two things at once, and the nudged Mississippi is
-    pulled down to its observed value while the unnudged one routes free, which
-    swamps the diversion entirely.
-    """
-    return built_case(CFG_HISTORICAL_CONTROL)
 
 def _peak_at(output_dir: Path, fp_id: int) -> float:
     """Peak simulated discharge at a routing link over the run."""
@@ -325,7 +305,7 @@ def test_diversion_moves_water_from_mississippi_to_atchafalaya(
 
 @pytest.mark.integration
 def test_historical_median_diverts_without_timeslices(
-    historical_case, historical_control_case
+    historical_case, no_diversion_case
 ):
     """Forecast mode: climatology alone still moves water.
 
@@ -333,9 +313,9 @@ def test_historical_median_diverts_without_timeslices(
     observation exists, so the transfer keeps working past the end of the
     observation record. This is the mode a forecast actually runs in.
     """
-    run_troute(historical_control_case.config_path)
+    run_troute(no_diversion_case.config_path)
     _, ms_link = MISSISSIPPI_BATON_ROUGE
-    ms_without = _peak_at(historical_control_case.output_dir, ms_link)
+    ms_without = _peak_at(no_diversion_case.output_dir, ms_link)
 
     run_troute(historical_case.config_path)
     ms_with = _peak_at(historical_case.output_dir, ms_link)
