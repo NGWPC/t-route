@@ -906,15 +906,23 @@ class NHFPreprocessMixin:
             self.dataframe = pd.concat([self.dataframe, row_df])
 
     def preprocess_data_assimilation(self, gages: pd.DataFrame, reservoir_da: pd.DataFrame):
+        # Reservoir DA needs lakes; streamflow and diversion DA do not. Returning
+        # early here for a lake-free domain used to leave self.gages empty, which
+        # silently disabled gage nudging on every network without waterbodies (the
+        # Ohio benchmark subset among them) even though its gages layer is fully
+        # populated. Skip only the reservoir crosswalks and carry on.
         if reservoir_da.empty or self.waterbody_dataframe.empty:
-            self.gages = {}
             self.usgs_lake_gage_crosswalk = pd.DataFrame()
             self.usace_lake_gage_crosswalk = pd.DataFrame()
             self.usbr_lake_gage_crosswalk = pd.DataFrame()
             self.rfc_lake_gage_crosswalk = pd.DataFrame()
-            self.diversion_da = {}
-            self._diversion_site_to_node = {}
-            self.diversion_da = {}
+            if not self.waterbody_dataframe.empty:
+                LOG.warning(
+                    "reservoir DA: no reservoir_da records for %d waterbody(s); "
+                    "reservoir assimilation is disabled for this run.",
+                    len(self.waterbody_dataframe),
+                )
+            self._preprocess_streamflow_and_diversion_da(gages)
             return
 
         ### reservoir_da validation and formatting ###
@@ -1072,38 +1080,7 @@ class NHFPreprocessMixin:
             ["reservoir_type"]
         ].copy()
 
-        # Streamflow DA
-        if gages.empty:
-            self.gages = {}
-            # An empty DataFrame, not an empty dict: consumers call .empty on this.
-            self.canadian_gage_df = pd.DataFrame(columns=["gages"])
-            gages_join = pd.DataFrame()
-        else:
-            gages_join = gages.merge(
-                self.dataframe.reset_index()[["vfp_id", "up_node_id", "segment_order"]],
-                left_on="virtual_fp_id",
-                right_on="vfp_id",
-                how="left",
-            )
-            usgs_sub = self._one_link_per_gage(
-                gages_join[gages_join["status"].isin(["USGS-active", "USGS-discontinued"])],
-                "USGS",
-            )
-            canada_sub = self._one_link_per_gage(
-                gages_join[gages_join["status"] == "CADWR_ENVCA"], "Canadian"
-            )
-            self.gages = (
-                usgs_sub.set_index("up_node_id")[["site_no"]]
-                .rename(columns={"site_no": "gages"})
-                .rename_axis(None, axis=0)
-                .to_dict()
-            )
-            self.canadian_gage_df = (
-                canada_sub.set_index("up_node_id")[["site_no"]]
-                .rename(columns={"site_no": "gages"})
-            )
-
-        self._resolve_diversion_da(gages_join)
+        self._preprocess_streamflow_and_diversion_da(gages)
 
     @staticmethod
     def _one_link_per_gage(sub: pd.DataFrame, label: str) -> pd.DataFrame:
@@ -1133,7 +1110,7 @@ class NHFPreprocessMixin:
             )
         if placed.empty:
             return placed
-        outlet = placed.loc[placed.groupby("site_no")["segment_order"].idxmax()].copy()
+        outlet = placed.loc[placed.groupby("site_no")["link_segment_order"].idxmax()].copy()
         outlet["up_node_id"] = outlet["up_node_id"].astype("int64")
         n_collisions = len(outlet) - outlet["up_node_id"].nunique()
         if n_collisions:
@@ -1142,6 +1119,49 @@ class NHFPreprocessMixin:
                 "one observation per link is assimilated", n_collisions, label,
             )
         return outlet
+
+    def _preprocess_streamflow_and_diversion_da(self, gages: pd.DataFrame) -> None:
+        """Resolve the gage crosswalk and the diversion map.
+
+        Independent of reservoir DA: a network with no waterbodies still has gages.
+        """
+        # Streamflow DA
+        if gages.empty:
+            self.gages = {}
+            # An empty DataFrame, not an empty dict: consumers call .empty on this.
+            self.canadian_gage_df = pd.DataFrame(columns=["gages"])
+            gages_join = pd.DataFrame()
+        else:
+            # The gages layer carries its own segment_order, which is a different
+            # quantity from the link table's, so rename to avoid a _x/_y collision.
+            link_cols = self.dataframe.reset_index()[
+                ["vfp_id", "up_node_id", "segment_order"]
+            ].rename(columns={"segment_order": "link_segment_order"})
+            gages_join = gages.merge(
+                link_cols,
+                left_on="virtual_fp_id",
+                right_on="vfp_id",
+                how="left",
+            )
+            usgs_sub = self._one_link_per_gage(
+                gages_join[gages_join["status"].isin(["USGS-active", "USGS-discontinued"])],
+                "USGS",
+            )
+            canada_sub = self._one_link_per_gage(
+                gages_join[gages_join["status"] == "CADWR_ENVCA"], "Canadian"
+            )
+            self.gages = (
+                usgs_sub.set_index("up_node_id")[["site_no"]]
+                .rename(columns={"site_no": "gages"})
+                .rename_axis(None, axis=0)
+                .to_dict()
+            )
+            self.canadian_gage_df = (
+                canada_sub.set_index("up_node_id")[["site_no"]]
+                .rename(columns={"site_no": "gages"})
+            )
+
+        self._resolve_diversion_da(gages_join)
 
     def _resolve_diversion_da(self, gages_join: pd.DataFrame) -> None:
         """Transform fp_id to self.dataframe link ID and gage site_no to link ID of gage link."""
