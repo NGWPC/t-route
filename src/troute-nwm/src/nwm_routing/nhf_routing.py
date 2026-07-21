@@ -240,7 +240,10 @@ def nhf_routing(argv):
             logFileName,
             # flowveldepth_interorder=network.flowveldepth_interorder,
             qlat_add_loc = "bottom",  # All NHF lats go in bottom
-            diversion_da=network.diversion_da
+            diversion_da=network.diversion_da,
+            # Static split points for the cached execution plan: every gage the
+            # network carries, not just those with observations this window.
+            gage_segments=set(network.gages.get("gages", network.gages) or ())
         )
         
         route_end_time = time.time()

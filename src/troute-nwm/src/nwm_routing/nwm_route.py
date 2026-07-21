@@ -58,7 +58,8 @@ def nwm_route(
     flowveldepth_interorder={},
     from_files=False,
     qlat_add_loc: Literal["top", "middle", "bottom"] = "middle",
-    diversion_da: dict[int, int] = {}
+    diversion_da: dict[int, int] = {},
+    gage_segments: set | None = None,
 ):
 
     ################### Main Execution Loop across ordered networks      
@@ -151,7 +152,8 @@ def nwm_route(
         flowveldepth_interorder,
         from_files=from_files,
         qlat_add_loc=qlat_add_loc,
-        diversion_da=diversion_da
+        diversion_da=diversion_da,
+        gage_segments=gage_segments,
     )
     LOG.debug("MC computation complete in %s seconds." % (time.time() - start_time_mc))
     # returns list, first item is run result, second item is subnetwork items

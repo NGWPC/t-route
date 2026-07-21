@@ -223,6 +223,14 @@ class Model:
                 # diversion is silently disabled under BMI, which is the path ngen
                 # drives. NHF only: other network types do not resolve this map.
                 diversion_da=getattr(self._network, "diversion_da", {}) or {},
+                # Same static split points as the -V5 driver: the plan is cached
+                # across updates, so it must not depend on this window's data.
+                gage_segments=set(
+                    (getattr(self._network, "gages", None) or {}).get(
+                        "gages", getattr(self._network, "gages", None) or {}
+                    )
+                    or ()
+                ),
             )
 
             # create initial conditions for next loop iteration

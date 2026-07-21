@@ -464,6 +464,14 @@ class AssimilationData:
     great_lakes_climatology_df: pd.DataFrame
     usgs_df: pd.DataFrame
     lastobs_df: pd.DataFrame
+    # Every gage the network carries, independent of which ones have observations
+    # this window. The execution plan splits reaches here rather than at usgs_df's
+    # index, because the plan is a topological decomposition that is cached and
+    # reused for the whole run: keying it on per-window data availability means a
+    # first window with no observations produces a plan with no gage splits, and
+    # nothing rebuilds it when observations return. Defaults to empty so callers
+    # that predate the field fall back to the observation frame.
+    gage_segments: set = field(default_factory=set)
 
 
 @dataclass
@@ -743,7 +751,21 @@ class ExecutionPlan:
         waterbody_data: WaterbodyData,
         assimilation_data: AssimilationData,
     ) -> dict[RoutingLevel, dict[TailwaterId, OrderedRoutingPaths]]:
-        """Decompose each partition into ordered routing paths split at gages, waterbodies, and/or junctions."""
+        """Decompose each partition into ordered routing paths split at gages, waterbodies, and/or junctions.
+
+        Gage split points come from the network's static gage set where it is
+        available, falling back to this window's observation frame. The two are the
+        same set in normal operation, because the observation frame is built by
+        left-joining the gage crosswalk, so a gage with no data still gets an all-NaN
+        row. They diverge only when a window yields no observations at all, and since
+        this plan is cached for the whole run, keying it on the observation frame
+        meant one empty first window produced a plan that never splits at gages, even
+        after the feed recovered.
+        """
+        gage_segments = set(assimilation_data.gage_segments) or set(
+            assimilation_data.usgs_df.index.to_numpy()
+        )
+        has_gages = bool(gage_segments)
         computable_routing_paths = defaultdict(dict)
         for level, partitions in partitions_by_level.items():
             for partition_tailwater, partition in partitions.items():
@@ -752,31 +774,22 @@ class ExecutionPlan:
                     for k in partition
                     if k in topology.reverse_connections
                 }
-                if (
-                    not waterbody_data.dataframe.empty
-                    and not assimilation_data.usgs_df.empty
-                ):
+                if not waterbody_data.dataframe.empty and has_gages:
                     path_func = partial(
                         nhd_network.split_at_gages_waterbodies_and_junctions,
-                        set(assimilation_data.usgs_df.index.to_numpy()),
+                        gage_segments,
                         set(waterbody_data.dataframe.index.to_numpy()),
                         rconn_subn,
                     )
 
-                elif (
-                    waterbody_data.dataframe.empty
-                    and not assimilation_data.usgs_df.empty
-                ):
+                elif waterbody_data.dataframe.empty and has_gages:
                     path_func = partial(
                         nhd_network.split_at_gages_and_junctions,
-                        set(assimilation_data.usgs_df.index.to_numpy()),
+                        gage_segments,
                         rconn_subn,
                     )
 
-                elif (
-                    not waterbody_data.dataframe.empty
-                    and assimilation_data.usgs_df.empty
-                ):
+                elif not waterbody_data.dataframe.empty and not has_gages:
                     path_func = partial(
                         nhd_network.split_at_waterbodies_and_junctions,
                         set(waterbody_data.dataframe.index.to_numpy()),
@@ -1843,6 +1856,7 @@ def compute_nhd_routing_v02(
     from_files: bool = True,
     qlat_add_loc: Literal["top", "middle", "bottom"] = "middle",
     diversion_da: dict[ReachId, int] = {},
+    gage_segments: set | None = None,
 ) -> tuple[RoutingResultsCollection, ExecutionPlan]:
     """Build typed routing objects from legacy flat arguments and delegate to compute_routing."""
     if flowveldepth_interorder:
@@ -1900,6 +1914,7 @@ def compute_nhd_routing_v02(
         great_lakes_climatology_df = great_lakes_climatology_df,
         usgs_df = usgs_df,
         lastobs_df = lastobs_df,
+        gage_segments = set(gage_segments or ()),
     )
 
     if isinstance(subnetwork_list, ExecutionPlan):
