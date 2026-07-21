@@ -1083,7 +1083,7 @@ class NHFPreprocessMixin:
         self._preprocess_streamflow_and_diversion_da(gages)
 
     @staticmethod
-    def _one_link_per_gage(sub: pd.DataFrame, label: str) -> pd.DataFrame:
+    def _one_link_per_gage(sub: pd.DataFrame, label: str, quiet: bool = False) -> pd.DataFrame:
         """Reduce a gage-to-link join to exactly one routing link per gage.
 
         ``vfp_id`` is not unique in the link table: flowpaths longer than the
@@ -1098,12 +1098,16 @@ class NHFPreprocessMixin:
         different quantity from the link table's ``segment_order`` and matches only
         about a fifth of gages. The outlet link (highest ``segment_order`` within the
         flowpath) is the placement used elsewhere in this module for diversion gages.
+
+        ``quiet`` suppresses the summary logs for callers that re-resolve the same
+        join for a different purpose, so the counts are reported once rather than
+        once per caller with a label that misdescribes what was counted.
         """
         if sub.empty:
             return sub
         placed = sub.dropna(subset=["up_node_id"])
         n_unplaced = sub["site_no"].nunique() - placed["site_no"].nunique()
-        if n_unplaced:
+        if n_unplaced and not quiet:
             LOG.warning(
                 "gages: %d %s gage(s) have no routing link for their virtual flowpath "
                 "and are excluded from streamflow DA", n_unplaced, label,
@@ -1113,7 +1117,7 @@ class NHFPreprocessMixin:
         outlet = placed.loc[placed.groupby("site_no")["link_segment_order"].idxmax()].copy()
         outlet["up_node_id"] = outlet["up_node_id"].astype("int64")
         n_collisions = len(outlet) - outlet["up_node_id"].nunique()
-        if n_collisions:
+        if n_collisions and not quiet:
             LOG.warning(
                 "gages: %d %s gage(s) share a routing link with another gage; only "
                 "one observation per link is assimilated", n_collisions, label,
@@ -1121,10 +1125,11 @@ class NHFPreprocessMixin:
         # Worth an INFO line of its own: this count is how many links the cached
         # execution plan splits reaches at, so a jump here is a routing slowdown
         # with no other visible cause.
-        LOG.info(
-            "gages: %d %s gage(s) placed on %d routing link(s)",
-            len(outlet), label, outlet["up_node_id"].nunique(),
-        )
+        if not quiet:
+            LOG.info(
+                "gages: %d %s gage(s) placed on %d routing link(s)",
+                len(outlet), label, outlet["up_node_id"].nunique(),
+            )
         return outlet
 
     def _preprocess_streamflow_and_diversion_da(self, gages: pd.DataFrame) -> None:
@@ -1188,7 +1193,7 @@ class NHFPreprocessMixin:
         # meant the two disagreed on any multi-link flowpath, so the diversion could
         # not find its observations and silently applied nothing.
         self._diversion_site_to_node = (
-            self._one_link_per_gage(gages_join, "diversion")
+            self._one_link_per_gage(gages_join, "diversion", quiet=True)
             .set_index("site_no")["up_node_id"]
             .astype("int64")
             .to_dict()
