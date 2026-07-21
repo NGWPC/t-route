@@ -307,6 +307,20 @@ class DiversionDA(BaseModel):
     diversion_gage_crosswalk: Dict[int, str] = {}
     """
     Donor flowpath ``fp_id`` -> site number of the gage measuring the diverted flow.
+
+    The full observed discharge is removed from the donor, which assumes the model
+    routes no flow of its own down the diversion path. That holds where the diversion
+    gage sits on a headwater flowpath, as it does at Old River. If it were ever mapped
+    to a gage with upstream contributing area, the correction would need to be the
+    observed discharge minus the simulated flow already leaving the donor, not the
+    observed discharge alone.
+
+    Mass is conserved except where the observed diversion exceeds the routed donor
+    flow: the donor is then floored at zero and gives up less than the receiving river
+    gains. Capping the transfer at the routed flow would require the donor's discharge
+    inside the receiving reach's compute job, which crosses the parallel
+    decomposition, so the condition is reported at WARNING with the volume involved
+    rather than enforced. It has not been observed over the available record.
     """
     persist_historical_median: bool = False
     """

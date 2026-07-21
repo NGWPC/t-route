@@ -232,3 +232,83 @@ class TestMultiWindowFallback:
         )
         means = _DIVERSION_MONTHLY_MEANS[DIVERSION_GAGE]
         np.testing.assert_allclose(again.loc[GAGE_LINK].to_numpy(), means[4])
+
+
+class TestMassBalanceMonitor:
+    """Reporting transferred water the donor could not supply.
+
+    The transfer conserves mass by construction, since the same observed value is
+    removed from the donor and imposed at the receiving headwater. The zero-flow
+    clamp is the one exception: when the observed diversion exceeds the routed donor
+    flow the donor is floored at zero and gives up less than the receiving river
+    gains. Capping the transfer at the routed flow would cut across the parallel
+    decomposition, so this is monitored rather than enforced and every occurrence
+    has to be reported with the volume involved.
+    """
+
+    @staticmethod
+    def _results(donor_flow):
+        """A results collection with one donor reach carrying *donor_flow*."""
+        n = len(donor_flow)
+        flow = np.zeros((1, 4 * n), dtype="float32")
+        flow[0, 0::4] = donor_flow
+
+        class _R:
+            ids = np.array([DONOR_FP_ID], dtype="int64")
+
+        r = _R()
+        r.flow = flow
+        return [r]
+
+    @staticmethod
+    def _obs(values):
+        return pd.DataFrame(
+            [values],
+            index=pd.Index([GAGE_LINK], dtype="int64"),
+            columns=pd.date_range("2011-04-14", periods=len(values), freq="h"),
+        )
+
+    def test_clamped_donor_reports_the_unmatched_volume(self, caplog):
+        from troute.routing.compute import _warn_diverted_mass_imbalance
+
+        # two timesteps clamped to zero while 100 and 200 m3/s were being diverted
+        with caplog.at_level(logging.WARNING):
+            _warn_diverted_mass_imbalance(
+                self._results([0.0, 50.0, 0.0]),
+                {DONOR_FP_ID: GAGE_LINK},
+                self._obs([100.0, 10.0, 200.0]),
+                dt=300,
+            )
+        assert "Mass is not conserved" in caplog.text
+        assert "2 of 3" in caplog.text
+        # upper bound on created water: (100 + 200) m3/s over one 300 s step each
+        assert "9e+04" in caplog.text or "90000" in caplog.text
+
+    def test_dry_reach_with_nothing_to_divert_is_not_reported(self, caplog):
+        """Zero flow is only a mass-balance problem if a transfer was requested.
+
+        The previous check keyed on flow == 0 alone, so a genuinely dry donor with
+        no observation was reported as though water had been created.
+        """
+        from troute.routing.compute import _warn_diverted_mass_imbalance
+
+        with caplog.at_level(logging.WARNING):
+            _warn_diverted_mass_imbalance(
+                self._results([0.0, 0.0]),
+                {DONOR_FP_ID: GAGE_LINK},
+                self._obs([np.nan, 0.0]),
+                dt=300,
+            )
+        assert "Mass is not conserved" not in caplog.text
+
+    def test_donor_that_supplied_the_transfer_is_silent(self, caplog):
+        from troute.routing.compute import _warn_diverted_mass_imbalance
+
+        with caplog.at_level(logging.WARNING):
+            _warn_diverted_mass_imbalance(
+                self._results([500.0, 400.0]),
+                {DONOR_FP_ID: GAGE_LINK},
+                self._obs([100.0, 100.0]),
+                dt=300,
+            )
+        assert "Mass is not conserved" not in caplog.text

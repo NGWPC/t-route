@@ -1472,19 +1472,57 @@ def compute_log_diff(
         preRunLog.write("\n")
 
 
-def _warn_diverted_zero_flow(results: RoutingResultsCollection, diversion_da: dict[int, int]) -> None:
-    """Log a warning for any diverted reach whose flow was clamped to zero."""
+def _warn_diverted_mass_imbalance(
+    results: RoutingResultsCollection,
+    diversion_da: dict[int, int],
+    usgs_df: pd.DataFrame,
+    dt: int,
+) -> None:
+    """Report transferred water the donor could not supply.
+
+    The transfer conserves mass by construction: the observed diversion is removed
+    from the donor here and imposed at the receiving system's headwater gage, so the
+    same value leaves one river and enters the other. The one way that breaks is the
+    zero-flow clamp. When the observed diversion exceeds the routed donor flow, the
+    donor is floored at zero and so gives up less than the receiving river gains, and
+    the difference is water this run created.
+
+    Capping the transfer at the routed flow would fix it at the source, but the
+    kernel cannot see the donor's flow from the receiving reach's job, so enforcing
+    it would cut across the parallel decomposition. Observed diversion has stayed
+    below modelled Mississippi discharge over the whole overlapping record, so this
+    is monitored rather than enforced: any occurrence is reported with the volume
+    involved, which is an upper bound because the donor's pre-clamp flow is no longer
+    recoverable from the results.
+    """
     diverted_ids = set(diversion_da.keys())
     for r in results:
         for i, sid in enumerate(r.ids):
-            if sid in diverted_ids:
-                n_zero = int((r.flow[i, 0::4] == 0).sum())
-                if n_zero:
-                    LOG.warning(
-                        "Diverted reach %s had flow clamped to 0 at %d of %d timestep(s). "
-                        "Check that the diversion value does not exceed routed flow.",
-                        sid, n_zero, r.flow.shape[1] // 4,
-                    )
+            if sid not in diverted_ids:
+                continue
+            flow = r.flow[i, 0::4]
+            gage_link = diversion_da[sid]
+            if gage_link not in usgs_df.index:
+                continue
+            requested = pd.to_numeric(
+                usgs_df.loc[gage_link], errors="coerce"
+            ).to_numpy(dtype=float)[: flow.shape[0]]
+            # A clamp event is a timestep where a transfer was actually requested and
+            # the donor still came out at zero. A dry reach with nothing to divert is
+            # not a mass-balance problem and must not be reported as one.
+            clamped = (flow == 0) & np.isfinite(requested) & (requested > 0)
+            n_clamped = int(clamped.sum())
+            if not n_clamped:
+                continue
+            excess_volume = float(requested[clamped].sum()) * dt
+            LOG.warning(
+                "diversion DA: donor reach %s was clamped to zero flow at %d of %d "
+                "timestep(s) where a transfer was requested. Up to %.3g m3 was added "
+                "to the receiving river without being removed here, because the "
+                "observed diversion exceeded the routed flow. Mass is not conserved "
+                "over those timesteps.",
+                sid, n_clamped, flow.shape[0], excess_volume,
+            )
 
 
 def _resolve_diversion_da(
@@ -1805,9 +1843,12 @@ def compute_routing(
     # Format results
     collection = RoutingResultsCollection(results)
 
-    # Warn if any diverted reach had its flow drained to zero.
+    # Report any transfer the donor could not supply (see the function docstring:
+    # this is the one path by which the diversion can fail to conserve mass).
     if config.diversion_da:
-        _warn_diverted_zero_flow(collection, config.diversion_da)
+        _warn_diverted_mass_imbalance(
+            collection, config.diversion_da, assimilation_data.usgs_df, config.dt
+        )
 
     return collection, execution_plan
 
