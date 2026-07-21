@@ -5,10 +5,11 @@ import pandas as pd
 import pytest
 
 from ..utils.integration_helpers import (
-    assert_peak_bounds,
+
     delete_outputs,
     get_usgs_station_ids,
     has_files,
+    load_output,
     run_troute,
     skip_if_not_built,
 )
@@ -98,7 +99,6 @@ START_TIME = "2011-04-14 00:00"
 END_TIME = "2011-06-30 00:00"
 FORCING_MODE = "retro"
 
-
 RUNOUT_PERIOD = int(
     (pd.Timestamp(END_TIME) - pd.Timestamp(START_TIME)).total_seconds() / 3600 / 2
 )
@@ -152,7 +152,6 @@ GAGES_PATCH = {
     "07381490": {"fp_id": 1269985531956909, "virtual_fp_id": 1269985531956910},
 }
 
-
 def patch_gages(domain_path: Path) -> None:
     """Manually patch fp_id and virtual_fp_id in the gages table."""
     gages = gpd.read_file(domain_path, layer="gages")
@@ -160,7 +159,6 @@ def patch_gages(domain_path: Path) -> None:
         for field, value in fields.items():
             gages.loc[gages["site_no"] == site_no, field] = value
     gages.to_file(domain_path, layer="gages", driver="GPKG")
-
 
 def setup(source_gpkg: str | Path, refresh: bool = True):
     """Subset the NHF domain and generate forcing for a standard test case."""
@@ -171,7 +169,6 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
         CFG_NO_DIVERSION.write_yaml()
     if refresh or not CFG_HISTORICAL.config_path.exists():
         CFG_HISTORICAL.write_yaml()
-
 
     if refresh or not CFG_DIVERSION.domain_path.exists():
         offnetwork_upstreams = get_offnetwork_upstreams(source_gpkg, FP_IDS)
@@ -237,14 +234,88 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
             dv_only=True
         )
 
+# Gages bracketing the control structure, with the routing link each resolves to.
+# Taken from the diagnostics behind the Old River report (its Figure 7).
+MISSISSIPPI_BATON_ROUGE = ("07374000", 1269974759984431)  # downstream of the diversion
+ATCHAFALAYA_SIMMESPORT = ("07381490", 1269985531956909)  # receives the diverted water
 
-# @pytest.mark.integration
-# def test_old_river():
-#     skip_if_not_built(CFG_DIVERSION)
-#     delete_outputs(CFG_DIVERSION.output_dir)
-#     run_troute(CFG_DIVERSION.config_path)
-#     assert_peak_bounds(CFG_DIVERSION.output_dir, PEAK_BOUNDS)
+# Inputs are generated out of band by ``python -m test.nhf.prep_tests``, which calls
+# the module-level ``setup`` above. The fixtures below only gate on that data being
+# present and clear stale outputs, so an assertion can never pass on a previous run.
 
+@pytest.fixture
+def diversion_case(built_case):
+    """Case with the Old River transfer active, driven by real observations."""
+    return built_case(CFG_DIVERSION)
 
+@pytest.fixture
+def no_diversion_case(built_case):
+    """Same domain and forcing with the transfer switched off: the control."""
+    return built_case(CFG_NO_DIVERSION)
+
+@pytest.fixture
+def historical_case(built_case):
+    """Forecast-mode shape: no timeslices, climatology supplies the diversion."""
+    return built_case(CFG_HISTORICAL)
+
+def _peak_at(output_dir: Path, fp_id: int) -> float:
+    """Peak simulated discharge at a routing link over the run."""
+    ds = load_output(output_dir)
+    try:
+        return float(ds["flow"].sel(feature_id=fp_id).max())
+    finally:
+        ds.close()
+
+@pytest.mark.integration
+def test_diversion_moves_water_from_mississippi_to_atchafalaya(
+    diversion_case, no_diversion_case
+):
+    """The defining behavior of the control structure, as an A/B.
+
+    Without the transfer t-route carries all of the simulated flow past the
+    structure, which overestimates the Mississippi below it and starves the
+    Atchafalaya. Turning it on must push discharge in opposite directions at the
+    two gages, which is the claim the report makes from this same case.
+    """
+    run_troute(no_diversion_case.config_path)
+    _, ms_link = MISSISSIPPI_BATON_ROUGE
+    _, atch_link = ATCHAFALAYA_SIMMESPORT
+    ms_without = _peak_at(no_diversion_case.output_dir, ms_link)
+    atch_without = _peak_at(no_diversion_case.output_dir, atch_link)
+
+    run_troute(diversion_case.config_path)
+    ms_with = _peak_at(diversion_case.output_dir, ms_link)
+    atch_with = _peak_at(diversion_case.output_dir, atch_link)
+
+    assert ms_with < ms_without, (
+        "Mississippi peak below the structure should fall once flow is diverted "
+        f"({ms_with:.1f} vs {ms_without:.1f} cms)"
+    )
+    assert atch_with > atch_without, (
+        "Atchafalaya peak should rise once it receives the diverted flow "
+        f"({atch_with:.1f} vs {atch_without:.1f} cms)"
+    )
+
+@pytest.mark.integration
+def test_historical_median_diverts_without_timeslices(historical_case, no_diversion_case):
+    """Forecast mode: climatology alone still moves water.
+
+    persist_historical_median populates the diversion gage's row when no
+    observation exists, so the transfer keeps working past the end of the
+    observation record. This is the mode a forecast actually runs in.
+    """
+    run_troute(no_diversion_case.config_path)
+    _, ms_link = MISSISSIPPI_BATON_ROUGE
+    ms_without = _peak_at(no_diversion_case.output_dir, ms_link)
+
+    run_troute(historical_case.config_path)
+    ms_with = _peak_at(historical_case.output_dir, ms_link)
+
+    assert ms_with < ms_without, (
+        "climatological diversion should still reduce the Mississippi peak "
+        f"({ms_with:.1f} vs {ms_without:.1f} cms)"
+    )
+
+# Regenerate the diagnostics behind the report with:
 # python -m test.nhf.utils.generate_diagnostics -f test/nhf/old_river/data/config.yaml
 # python -m test.nhf.utils.generate_diagnostics -f test/nhf/old_river/data/config_no_da.yaml

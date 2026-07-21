@@ -1,3 +1,5 @@
+import logging
+
 from pydantic import BaseModel, DirectoryPath, FilePath, Field, field_validator, model_validator, ConfigDict
 from datetime import datetime
 
@@ -5,6 +7,8 @@ from typing import Any, Dict, Optional, List, Union
 from typing_extensions import Literal
 
 from ._validators import coerce_datetime
+
+LOG = logging.getLogger("TROUTE")
 
 
 # ---------------------------- Compute Parameters ---------------------------- #
@@ -395,26 +399,30 @@ class DataAssimilationParameters(BaseModel):
         return values
 
     @model_validator(mode='after')
-    def check_diversion_requires_nudging(self):
-        """A diversion only conserves mass when streamflow nudging is enabled.
+    def check_diversion_has_an_observation_source(self):
+        """A diversion needs the gage's discharge to reach the observation frame.
 
-        The kernel subtracts the observed diversion from the donor flowpath, but
-        nothing adds it to the receiving river: that water arrives because ordinary
-        nudging imposes the observed discharge at the diversion gage, which sits on
-        a headwater of the receiving system. With nudging off, the subtraction still
-        runs and the water is simply destroyed.
+        The kernel subtracts the observed diversion from the donor flowpath. Nothing
+        adds it to the receiving river in code: the gage sits on a headwater of the
+        receiving system, so imposing the observed discharge there routes the water
+        down through the existing topology. Either source populates that row,
+        ``streamflow_nudging`` from timeslices or ``persist_historical_median`` from
+        climatology, and both conserve the transfer.
+
+        With neither set the observation frame stays empty, the kernel map resolves
+        to nothing and the diversion silently does not happen, which is worth saying
+        out loud rather than leaving to be discovered in the output.
         """
         diversion = self.diversion_da
         if diversion is None or not diversion.diversion_gage_crosswalk:
             return self
         nudging = bool(self.streamflow_da and self.streamflow_da.streamflow_nudging)
-        if not nudging:
-            raise ValueError(
-                "diversion_da.diversion_gage_crosswalk requires "
-                "streamflow_da.streamflow_nudging: true. The diverted flow is removed "
-                "from the donor flowpath by the routing kernel but only reaches the "
-                "receiving river through nudging at the diversion gage, so with "
-                "nudging disabled the transferred water is lost."
+        if not nudging and not diversion.persist_historical_median:
+            LOG.warning(
+                "diversion_da.diversion_gage_crosswalk is set but neither "
+                "streamflow_da.streamflow_nudging nor "
+                "diversion_da.persist_historical_median is enabled, so no discharge "
+                "is available at the diversion gage and no flow will be diverted."
             )
         return self
 
