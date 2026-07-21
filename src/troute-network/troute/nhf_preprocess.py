@@ -540,16 +540,23 @@ def _great_lakes_for_da(gl_df: pd.DataFrame, data_assimilation_parameters: dict)
     )
     if not gl_da_enabled or gl_df.empty:
         return gl_df.iloc[0:0].copy(), gl_da_enabled
-    # Anchor on virtual_fp_id where it exists. _refactor_reservoirs resolves
-    # reservoirs through the virtual flowpath, and on nhf_1.2.2 the two Great Lakes
-    # carrying real USGS gages (04127885 and 04159130) have a null fp_id but a valid
-    # virtual_fp_id, so filtering on fp_id silently dropped exactly the lakes this
-    # function exists to keep. Older hydrofabrics that predate the column still
-    # anchor on fp_id rather than raising KeyError.
-    anchor_col = "virtual_fp_id" if "virtual_fp_id" in gl_df.columns else "fp_id"
-    anchored = gl_df[gl_df[anchor_col].notna()].copy()
-    if not anchored.empty:
-        anchored[anchor_col] = anchored[anchor_col].astype("int64")
+    # Keep a Great Lake if EITHER anchor is present, deciding per row rather than
+    # per column. _refactor_reservoirs resolves reservoirs through the virtual
+    # flowpath, and on nhf_1.2.2 the two Great Lakes carrying real USGS gages
+    # (04127885 and 04159130) have a null fp_id but a valid virtual_fp_id, so
+    # filtering on fp_id alone silently dropped exactly the lakes this function
+    # exists to keep. Choosing a single column for the whole frame has the mirror
+    # failure: a lake with a valid fp_id and a null virtual_fp_id would be dropped
+    # even though it is perfectly anchorable.
+    anchors = [c for c in ("virtual_fp_id", "fp_id") if c in gl_df.columns]
+    if not anchors:
+        return gl_df.iloc[0:0].copy(), gl_da_enabled
+    keep = gl_df[anchors].notna().any(axis=1)
+    anchored = gl_df[keep].copy()
+    for col in anchors:
+        # Int64 (nullable) so a lake anchored by only one of the two columns keeps
+        # its null in the other rather than forcing the column back to float.
+        anchored[col] = anchored[col].astype("Int64")
     return anchored, gl_da_enabled
 
 

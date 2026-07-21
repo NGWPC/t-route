@@ -834,8 +834,25 @@ class PersistenceDA(AbstractDA):
                 da_run,
                 lake_gage_crosswalk = network.usace_lake_gage_crosswalk,
                 res_source = 'usace')
-        
-        # if there are no TimeSlice files available for hybrid reservoir DA in the next loop, 
+
+        # USBR. Without this, type-7 reservoirs kept the first window's observations
+        # for the whole run: the next loop's usbr timeslices were never read.
+        if reservoir_da_parameters.get('reservoir_persistence_da').get('reservoir_persistence_usbr', False):
+
+            (
+                self._reservoir_usbr_df,
+                _,
+            ) = _create_reservoir_df(
+                data_assimilation_parameters,
+                reservoir_da_parameters,
+                streamflow_da_parameters,
+                run_parameters,
+                network,
+                da_run,
+                lake_gage_crosswalk = network.usbr_lake_gage_crosswalk,
+                res_source = 'usbr')
+
+        # if there are no TimeSlice files available for hybrid reservoir DA in the next loop,
         # but there are DA parameters from the previous loop, then create a
         # dummy observations df. This allows the reservoir persistence to continue across loops.
         # USGS Reservoirs
@@ -848,12 +865,23 @@ class PersistenceDA(AbstractDA):
                         columns = [network.t0]
                     )
 
-            # USACE Reservoirs   
+            # USACE Reservoirs
             if 3 in network.waterbody_types_dataframe['reservoir_type'].unique():
                 if self.reservoir_usace_df.empty and len(self.reservoir_usace_param_df.index) > 0:
                     self._reservoir_usace_df = pd.DataFrame(
-                        data    = np.nan, 
-                        index   = self.reservoir_usace_param_df.index, 
+                        data    = np.nan,
+                        index   = self.reservoir_usace_param_df.index,
+                        columns = [network.t0]
+                    )
+
+            # USBR Reservoirs. Same continuation rule as USGS and USACE above: with
+            # no timeslices this loop but persistence state carried from the last
+            # one, a dummy frame lets that persistence continue instead of stalling.
+            if 7 in network.waterbody_types_dataframe['reservoir_type'].unique():
+                if self.reservoir_usbr_df.empty and len(self.reservoir_usbr_param_df.index) > 0:
+                    self._reservoir_usbr_df = pd.DataFrame(
+                        data    = np.nan,
+                        index   = self.reservoir_usbr_param_df.index,
                         columns = [network.t0]
                     )
 

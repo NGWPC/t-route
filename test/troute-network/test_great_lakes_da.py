@@ -143,3 +143,25 @@ def test_da_disabled_still_excludes_all_great_lakes_on_122():
     anchored, enabled = _great_lakes_for_da(_gl_df_122(), _da(False))
     assert enabled is False
     assert anchored.empty
+
+
+def test_lake_anchored_only_by_fp_id_is_kept():
+    """The mirror of the 1.2.2 case: valid fp_id, null virtual_fp_id.
+
+    Anchoring decisions are made per row, so a lake that carries only one of the two
+    ids is still anchorable and must be retained. Choosing one column for the whole
+    frame would drop it.
+    """
+    df = _gl_df_122()
+    df.loc[4800006, "virtual_fp_id"] = np.nan  # keeps a valid fp_id
+    anchored, _ = _great_lakes_for_da(df, _da(True))
+    assert 4800006 in anchored.index
+    assert set(anchored.index) == set(GREAT_LAKES_IDS)
+
+
+def test_lake_with_neither_anchor_is_dropped():
+    df = _gl_df_122()
+    df.loc[4800007, ["fp_id", "virtual_fp_id"]] = np.nan
+    anchored, _ = _great_lakes_for_da(df, _da(True))
+    assert 4800007 not in anchored.index
+    assert len(anchored) == len(GREAT_LAKES_IDS) - 1

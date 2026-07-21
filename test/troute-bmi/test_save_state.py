@@ -37,6 +37,7 @@ class _DataAssimilationStub:
         self._last_obs_df = pd.DataFrame({"discharge": [5.0]})
         self._reservoir_usgs_param_df = pd.DataFrame({"a": [1]})
         self._reservoir_usace_param_df = pd.DataFrame({"b": [2]})
+        self._reservoir_usbr_param_df = pd.DataFrame({"e": [7]})
         self._reservoir_rfc_param_df = pd.DataFrame({"c": [3]})
         self._great_lakes_param_df = pd.DataFrame({"d": [4]})
 
@@ -68,6 +69,17 @@ def test_create_state_excludes_subnetwork_and_does_not_crash():
 
 def test_save_load_roundtrip_preserves_state_and_leaves_subnetwork_alone():
     src = _make_model(3600.0, _ExecutionPlanLike())
+    # Mutate every saved frame away from the stub's defaults BEFORE saving. Without
+    # this the destination stub is constructed with identical values, so the
+    # assertions below pass whether or not load_state actually restored anything.
+    da = src._data_assimilation
+    da._last_obs_df = pd.DataFrame({"discharge": [99.0]})
+    da._reservoir_usgs_param_df = pd.DataFrame({"a": [11]})
+    da._reservoir_usace_param_df = pd.DataFrame({"b": [22]})
+    da._reservoir_usbr_param_df = pd.DataFrame({"e": [77]})
+    da._reservoir_rfc_param_df = pd.DataFrame({"c": [33]})
+    da._great_lakes_param_df = pd.DataFrame({"d": [44]})
+    src._network._q0 = pd.DataFrame({"q": [9.0, 8.0]})
     state = pickle.loads(pickle.dumps(src.create_state(), pickle.HIGHEST_PROTOCOL))
 
     # fresh model with the sentinel __init__ leaves behind
@@ -83,6 +95,12 @@ def test_save_load_roundtrip_preserves_state_and_leaves_subnetwork_alone():
     pd.testing.assert_frame_equal(
         dst._data_assimilation._great_lakes_param_df,
         src._data_assimilation._great_lakes_param_df,
+    )
+    # USBR persistence state must survive too, or a restarted run diverges from an
+    # uninterrupted one at type-7 reservoirs.
+    pd.testing.assert_frame_equal(
+        dst._data_assimilation._reservoir_usbr_param_df,
+        src._data_assimilation._reservoir_usbr_param_df,
     )
     # load_state applies waterbody elevation from restored q0...
     assert dst._network.waterbody_updated is True
