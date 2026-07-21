@@ -207,6 +207,10 @@ class Model:
                 coastal_boundary_depth_df=self._network.coastal_boundary_depth_df,
                 unrefactored_topobathy_df=self._network.unrefactored_topobathy_df,
                 qlat_add_loc=qlat_add_loc,
+                # Without this the parameter defaults to an empty dict and the
+                # diversion is silently disabled under BMI, which is the path ngen
+                # drives. NHF only: other network types do not resolve this map.
+                diversion_da=getattr(self._network, "diversion_da", {}) or {},
             )
 
             # create initial conditions for next loop iteration

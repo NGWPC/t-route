@@ -1489,7 +1489,17 @@ def _resolve_diversion_da(
         if pos >= len(river_reaches) or river_reaches[pos] != ms_id:
             continue  # segment not in this subnetwork job
         if gage_seg_id not in usgs_df_sub.index:
-            continue  # gage not assimilated in this job
+            # The donor segment IS in this job but its gage is not, so the
+            # diversion cannot be applied here. Silently skipping leaves the donor
+            # carrying water that should have been transferred, with no signal, so
+            # warn: build_compute_package injects the missing gage row precisely to
+            # keep this from happening.
+            LOG.warning(
+                "diversion DA: donor segment %s is in this job but gage link %s is "
+                "not in its observation set; no diversion applied for this job.",
+                ms_id, gage_seg_id,
+            )
+            continue
         gage_i = int(usgs_df_sub.index.get_loc(gage_seg_id))
         kernel_map[pos] = gage_i
     return kernel_map

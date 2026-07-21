@@ -235,7 +235,7 @@ class NudgingDA(AbstractDA):
                     self._last_obs_df = _reindex_link_to_lake_id(self._last_obs_df, network.link_lake_crosswalk)
                 
                 self._usgs_df = _create_usgs_df(data_assimilation_parameters, streamflow_da_parameters, run_parameters, network, da_run)
-                if ('canada_timeslice_files' in da_run) & (not network.canadian_gage_df.empty):
+                if ('canada_timeslice_files' in da_run) and (not network.canadian_gage_df.empty):
                     self._canada_df = _create_canada_df(data_assimilation_parameters, streamflow_da_parameters, run_parameters, network, da_run)
                     self._canada_is_created = True
 
@@ -305,7 +305,7 @@ class NudgingDA(AbstractDA):
         
         if streamflow_da_parameters.get('streamflow_nudging', False):
             self._usgs_df = _create_usgs_df(data_assimilation_parameters, streamflow_da_parameters, run_parameters, network, da_run)
-            if ('canada_timeslice_files' in da_run) & (not network.canadian_gage_df.empty):
+            if ('canada_timeslice_files' in da_run) and (not network.canadian_gage_df.empty):
                 self._canada_df = _create_canada_df(data_assimilation_parameters, streamflow_da_parameters, run_parameters, network, da_run)
             else:
                 self._canada_df = pd.DataFrame()
@@ -1315,10 +1315,13 @@ def _fill_diversion_historical_median(
         t0 = network.t0
         dt = run_parameters.get("dt", 300)  # seconds
         nts = run_parameters.get("nts", 0)
-        # Observation frequency is 5-minute regardless of routing dt
-        obs_freq = "5min"
-        n_obs = max(1, int(nts * dt / 300) + 1)
-        time_index = pd.date_range(t0, periods=n_obs, freq=obs_freq)
+        # One column per ROUTING timestep, not a fixed 5-minute grid. The kernel
+        # indexes this frame as usgs_values[gage_i, timestep], where timestep is the
+        # routing step, so a 5-minute grid only lines up when dt happens to be 300.
+        # With dt=60 the columns ran out about a fifth of the way through the run;
+        # with dt=900 the timestamps advanced three times too slowly.
+        n_obs = max(1, nts + 1)
+        time_index = pd.date_range(t0, periods=n_obs, freq=pd.Timedelta(seconds=dt))
         usgs_df = pd.DataFrame(
             index=pd.Index([], dtype="int64"), columns=time_index, dtype=float
         )
@@ -1330,6 +1333,16 @@ def _fill_diversion_historical_median(
     # crosswalk maps fp_id (int) -> site_no (str)
     for fp_id, gage_id in diversion_gage_crosswalk.items():
         gage_id = str(gage_id)
+        if gage_id not in diversion_site_to_node:
+            # Happens when the gage never resolved to a routing link, e.g. the
+            # network carries no waterbodies and preprocessing returned early.
+            # Filling would raise KeyError, and silently skipping would leave the
+            # donor subtraction running with no fallback.
+            LOG.warning(
+                "persist_historical_median: gage %s has no routing link; the "
+                "diversion for flowpath %s will not be applied.", gage_id, fp_id,
+            )
+            continue
         link_id = int(diversion_site_to_node[gage_id])
 
         monthly_means = _DIVERSION_MONTHLY_MEANS.get(gage_id)
@@ -1355,6 +1368,16 @@ def _fill_diversion_historical_median(
         nan_mask = row.isna()
         if nan_mask.any():
             row[nan_mask] = historical[nan_mask]
+            # A substituted climatological value is not an observation. Say so, and
+            # say how much of the window it covers, so an operator can tell a short
+            # gap from a sustained gage outage being papered over indefinitely.
+            n_filled = int(nan_mask.sum())
+            n_total = int(len(nan_mask))
+            LOG.warning(
+                "persist_historical_median: gage %s substituted monthly climatology "
+                "for %d of %d timesteps (%.0f%%) in this window; these are not "
+                "observations", gage_id, n_filled, n_total, 100.0 * n_filled / n_total,
+            )
 
         if link_id in usgs_df.index:
             usgs_df.loc[link_id] = row

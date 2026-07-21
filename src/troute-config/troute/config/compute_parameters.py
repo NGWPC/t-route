@@ -289,6 +289,29 @@ class ReservoirRfcParametersDisabled(BaseModel):
     reservoir_rfc_forecasts: Literal[False] = False
 
 
+class DiversionDA(BaseModel):
+    """
+    Parameters controlling diversion DA: a managed transfer of flow out of one
+    flowpath, measured by a streamgage, as at the Old River Control Structure.
+
+    The observed discharge is subtracted from the donor flowpath in the routing
+    kernel. The receiving river gains the same water through ordinary streamflow
+    nudging at the diversion gage, which sits on a headwater flowpath of the
+    receiving system, so ``streamflow_da.streamflow_nudging`` must be enabled for
+    the transfer to conserve mass.
+    """
+    diversion_gage_crosswalk: Dict[int, str] = {}
+    """
+    Donor flowpath ``fp_id`` -> site number of the gage measuring the diverted flow.
+    """
+    persist_historical_median: bool = False
+    """
+    Fill gaps in the diversion gage record with hardcoded monthly climatology, so
+    forecast timesteps (which have no observations) still divert. Substituted values
+    are logged; they are climatology, not observations.
+    """
+
+
 class ReservoirDA(BaseModel):
     """
     Parameters controlling reservoir DA.
@@ -353,7 +376,7 @@ class DataAssimilationParameters(BaseModel):
     
     streamflow_da: StreamflowDA = None
     reservoir_da: Optional[ReservoirDA] = None
-    diversion_da: Optional[Dict[str, Any]] = None
+    diversion_da: Optional[DiversionDA] = None
 
     qc_threshold: float = Field(1, ge=0, le=1)
     """
@@ -368,8 +391,32 @@ class DataAssimilationParameters(BaseModel):
         if values.get("qc_threshold") is None:
             values["qc_threshold"] = 1
         if values.get("timeslice_lookback_hours") is None:
-            values["timeslice_lookback_hours"] = 24 
+            values["timeslice_lookback_hours"] = 24
         return values
+
+    @model_validator(mode='after')
+    def check_diversion_requires_nudging(self):
+        """A diversion only conserves mass when streamflow nudging is enabled.
+
+        The kernel subtracts the observed diversion from the donor flowpath, but
+        nothing adds it to the receiving river: that water arrives because ordinary
+        nudging imposes the observed discharge at the diversion gage, which sits on
+        a headwater of the receiving system. With nudging off, the subtraction still
+        runs and the water is simply destroyed.
+        """
+        diversion = self.diversion_da
+        if diversion is None or not diversion.diversion_gage_crosswalk:
+            return self
+        nudging = bool(self.streamflow_da and self.streamflow_da.streamflow_nudging)
+        if not nudging:
+            raise ValueError(
+                "diversion_da.diversion_gage_crosswalk requires "
+                "streamflow_da.streamflow_nudging: true. The diverted flow is removed "
+                "from the donor flowpath by the routing kernel but only reaches the "
+                "receiving river through nudging at the diversion gage, so with "
+                "nudging disabled the transferred water is lost."
+            )
+        return self
 
 
 class ForcingParameters(BaseModel):

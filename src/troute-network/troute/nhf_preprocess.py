@@ -1075,17 +1075,23 @@ class NHFPreprocessMixin:
         # Streamflow DA
         if gages.empty:
             self.gages = {}
-            self.canadian_gage_df = {}
+            # An empty DataFrame, not an empty dict: consumers call .empty on this.
+            self.canadian_gage_df = pd.DataFrame(columns=["gages"])
             gages_join = pd.DataFrame()
         else:
             gages_join = gages.merge(
-                self.dataframe.reset_index()[["vfp_id", "up_node_id"]],
+                self.dataframe.reset_index()[["vfp_id", "up_node_id", "segment_order"]],
                 left_on="virtual_fp_id",
                 right_on="vfp_id",
                 how="left",
             )
-            usgs_sub = gages_join[gages_join["status"].isin(["USGS-active", "USGS-discontinued"])]
-            canada_sub = gages_join[gages_join["status"] == "CADWR_ENVCA"]
+            usgs_sub = self._one_link_per_gage(
+                gages_join[gages_join["status"].isin(["USGS-active", "USGS-discontinued"])],
+                "USGS",
+            )
+            canada_sub = self._one_link_per_gage(
+                gages_join[gages_join["status"] == "CADWR_ENVCA"], "Canadian"
+            )
             self.gages = (
                 usgs_sub.set_index("up_node_id")[["site_no"]]
                 .rename(columns={"site_no": "gages"})
@@ -1098,6 +1104,44 @@ class NHFPreprocessMixin:
             )
 
         self._resolve_diversion_da(gages_join)
+
+    @staticmethod
+    def _one_link_per_gage(sub: pd.DataFrame, label: str) -> pd.DataFrame:
+        """Reduce a gage-to-link join to exactly one routing link per gage.
+
+        ``vfp_id`` is not unique in the link table: flowpaths longer than the
+        discretization length are split into several routing links that all inherit
+        the parent ``vfp_id``. Joining on it alone is therefore one-to-many, and
+        indexing the result on ``up_node_id`` registered every gage at every link of
+        its flowpath (a median of 8 links per gage on the CONUS hydrofabric). That
+        assimilated a single observation at many consecutive segments and split the
+        cached execution plan at all of them.
+
+        The gage's own ``segment_order`` is not usable for placement: it is a
+        different quantity from the link table's ``segment_order`` and matches only
+        about a fifth of gages. The outlet link (highest ``segment_order`` within the
+        flowpath) is the placement used elsewhere in this module for diversion gages.
+        """
+        if sub.empty:
+            return sub
+        placed = sub.dropna(subset=["up_node_id"])
+        n_unplaced = sub["site_no"].nunique() - placed["site_no"].nunique()
+        if n_unplaced:
+            LOG.warning(
+                "gages: %d %s gage(s) have no routing link for their virtual flowpath "
+                "and are excluded from streamflow DA", n_unplaced, label,
+            )
+        if placed.empty:
+            return placed
+        outlet = placed.loc[placed.groupby("site_no")["segment_order"].idxmax()].copy()
+        outlet["up_node_id"] = outlet["up_node_id"].astype("int64")
+        n_collisions = len(outlet) - outlet["up_node_id"].nunique()
+        if n_collisions:
+            LOG.warning(
+                "gages: %d %s gage(s) share a routing link with another gage; only "
+                "one observation per link is assimilated", n_collisions, label,
+            )
+        return outlet
 
     def _resolve_diversion_da(self, gages_join: pd.DataFrame) -> None:
         """Transform fp_id to self.dataframe link ID and gage site_no to link ID of gage link."""

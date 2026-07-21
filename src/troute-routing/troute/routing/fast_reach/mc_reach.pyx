@@ -423,6 +423,7 @@ cpdef object compute_network_structured(
     # replace initial conditions with gage observations, wherever available
     cdef int gages_size = usgs_positions.shape[0]
     cdef int gage_maxtimestep = usgs_values.shape[1]
+    cdef bint has_diversion = len(diversion_da) > 0
     cdef int gage_i, usgs_position_i
     cdef float a, da_decay_minutes, da_weighted_shift, replacement_val  # , original_val, lastobs_val,
     cdef float [:] lastobs_values, lastobs_times
@@ -825,7 +826,10 @@ cpdef object compute_network_structured(
                     flowveldepth[segment.id, timestep, 0] = out_buf[_i, 0] - ssout - eloss_array[segment.id, qlat_ts_previous]
 
                     # Subtract diverted flow for control-structure reaches (e.g., Old River).
-                    if segment.id in diversion_da:
+                    # has_diversion is hoisted out of the loops below: without it every
+                    # one of the ~1.1M CONUS segments pays a Python dict membership test
+                    # at every one of the ~288 timesteps on runs that divert nothing.
+                    if has_diversion and segment.id in diversion_da:
                         gage_i = diversion_da[segment.id]
                         if timestep < gage_maxtimestep and not isnan(usgs_values[gage_i, timestep]):
                             flowveldepth[segment.id, timestep, 0] -= usgs_values[gage_i, timestep]
