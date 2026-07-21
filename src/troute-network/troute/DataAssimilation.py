@@ -313,6 +313,14 @@ class NudgingDA(AbstractDA):
         # Re-apply historical median fill for next loop iteration
         diversion_da_parameters = data_assimilation_parameters.get('diversion_da', {}) or {}
         if diversion_da_parameters.get('persist_historical_median', False):
+            if not (streamflow_da_parameters or {}).get('streamflow_nudging', False):
+                # With nudging off this frame holds only the diversion gage's rows and
+                # nothing above rebuilt it, so leaving it in place froze the run on the
+                # FIRST loop's columns: the kernel restarts its timestep index at zero
+                # each loop, so every later loop re-read loop one's values and a run
+                # spanning several months kept diverting the first month's climatology.
+                # Clearing it makes the fill rebuild the index at the advanced t0.
+                self._usgs_df = pd.DataFrame()
             self._usgs_df = _fill_diversion_historical_median(
                 self._usgs_df,
                 diversion_da_parameters,
@@ -557,8 +565,13 @@ class PersistenceDA(AbstractDA):
         else:
 
             if usgs_persistence:
-                # if usgs_df is already created, make reservoir_usgs_df from that rather than reading in data again
-                if not self._usgs_df.empty: 
+                # if usgs_df is already created, make reservoir_usgs_df from that rather than reading in data again.
+                # Gate on nudging actually being on, not merely on the frame being
+                # non-empty: with nudging off the diversion's climatological fill also
+                # populates this frame, and it holds only the diversion gage's row, so
+                # taking this shortcut derived reservoir observations from it and left
+                # USGS reservoir persistence with nothing.
+                if (streamflow_da_parameters or {}).get('streamflow_nudging', False) and not self._usgs_df.empty:
                     
                     gage_lake_df = (
                         network.usgs_lake_gage_crosswalk.
@@ -793,7 +806,9 @@ class PersistenceDA(AbstractDA):
         streamflow_da_parameters = data_assimilation_parameters.get('streamflow_da', {})
         reservoir_da_parameters = data_assimilation_parameters.get('reservoir_da', {})
         
-        if not self.usgs_df.empty:
+        # Same gate as in __init__: the diversion's climatological fill can make this
+        # frame non-empty while holding only the diversion gage's row.
+        if (streamflow_da_parameters or {}).get('streamflow_nudging', False) and not self.usgs_df.empty:
 
             if reservoir_da_parameters.get('reservoir_persistence_da',{}).get('reservoir_persistence_usgs', False):
                 

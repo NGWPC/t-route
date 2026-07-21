@@ -11,8 +11,8 @@ The observed discharge at the diversion gage is SUBTRACTED from the donor flowpa
 inside the routing kernel. Nothing adds it to the receiving river in code: the gage
 sits on a headwater flowpath of the receiving system, so ordinary streamflow
 nudging imposes the observed discharge there and the existing topology routes it
-downstream. The transfer therefore conserves mass only while nudging is enabled,
-which the configuration layer now enforces.
+downstream. Either source populates that row and conserves the transfer: nudging
+from timeslices, or the climatological fill in forecast mode.
 """
 
 from __future__ import annotations
@@ -177,3 +177,58 @@ class TestHistoricalMedianFallback:
             original, {"diversion_gage_crosswalk": {}}, network, {"dt": 300, "nts": 3}
         )
         assert out is original
+
+
+class TestMultiWindowFallback:
+    """The climatology must follow the calendar as the run advances.
+
+    A run in median-only mode covers several forcing loops. The kernel restarts its
+    timestep index at zero in each loop, so if the observation frame is not rebuilt
+    at the new t0 every loop re-reads the first loop's columns and a multi-month run
+    keeps diverting the first month's climatology.
+    """
+
+    @staticmethod
+    def _network_at(t0: str):
+        class _Network:
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        n = _Network()
+        n.t0 = pd.Timestamp(t0)
+        return n
+
+    @pytest.fixture
+    def params(self) -> dict:
+        return {
+            "diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+            "persist_historical_median": True,
+        }
+
+    def test_rebuilt_frame_follows_the_calendar_month(self, params):
+        run = {"dt": 300, "nts": 3}
+        april = _fill_diversion_historical_median(
+            pd.DataFrame(), params, self._network_at("2011-04-14"), run
+        )
+        july = _fill_diversion_historical_median(
+            pd.DataFrame(), params, self._network_at("2011-07-14"), run
+        )
+        means = _DIVERSION_MONTHLY_MEANS[DIVERSION_GAGE]
+        assert means[4] != means[7], "fixture months must differ for this to mean anything"
+        np.testing.assert_allclose(april.loc[GAGE_LINK].to_numpy(), means[4])
+        np.testing.assert_allclose(july.loc[GAGE_LINK].to_numpy(), means[7])
+
+    def test_stale_frame_is_not_refilled(self, params):
+        """A fully populated frame has no gaps, so the fill cannot correct it.
+
+        This is why the caller must clear the frame between loops rather than relying
+        on the fill to notice that the calendar moved.
+        """
+        run = {"dt": 300, "nts": 3}
+        april = _fill_diversion_historical_median(
+            pd.DataFrame(), params, self._network_at("2011-04-14"), run
+        )
+        again = _fill_diversion_historical_median(
+            april.copy(), params, self._network_at("2011-07-14"), run
+        )
+        means = _DIVERSION_MONTHLY_MEANS[DIVERSION_GAGE]
+        np.testing.assert_allclose(again.loc[GAGE_LINK].to_numpy(), means[4])
