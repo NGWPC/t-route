@@ -48,6 +48,16 @@ WATERBODY_DF_FIELDS = [
 RESERVOIR_DA_SITE_ID_FIELD = "site_no"
 RESERVOIR_DA_SITE_TYPE_FIELD = "da_type"
 
+def _sql_in(field: str, values, quote: bool = False) -> str:
+    """An OGR ``where`` clause restricting *field* to *values*."""
+    vals = sorted({str(v) for v in values if pd.notna(v)})
+    if quote:
+        items = ",".join("'" + v.replace("'", "''") + "'" for v in vals)
+    else:
+        items = ",".join(str(int(float(v))) for v in vals)
+    return f"{field} IN ({items})"
+
+
 def _validate_flowpaths_channel_params(flowpaths):
     """Raise if any MC-kernel channel parameter is non-finite (NaN/Inf)."""
     if flowpaths is None or flowpaths.empty:
@@ -1082,6 +1092,90 @@ class NHFPreprocessMixin:
 
         self._preprocess_streamflow_and_diversion_da(gages)
 
+    def _gage_selection_rank(self, sub: pd.DataFrame) -> pd.DataFrame:
+        """Rank co-located gages so the survivor is chosen deterministically.
+
+        Several gages can sit on one virtual flowpath (4096 of them across 1729
+        flowpaths on the CONUS hydrofabric), and only one observation can be
+        assimilated per routing link. Nothing in the gages layer separates them
+        positionally: their ``segment_order`` and ``dn_virtual_nex_id`` are identical
+        within every colliding group, so they cannot be placed on distinct sub-links.
+
+        The survivor is therefore chosen by, in order:
+
+        1. an active gage over a discontinued one, since assimilation needs current
+           observations;
+        2. the gage physically closest to the flowpath's downstream nexus, which is
+           the one that best represents flow at the outlet link the gage is placed on;
+        3. the lowest site number, purely so the result cannot depend on the order
+           rows happen to appear in the geopackage.
+
+        On CONUS this leaves 85 groups undecided after (1) and (2), and none after
+        (3). Distance is computed only for colliding gages, so the geometry read
+        covers about 1700 nexus points rather than the full 1.65 M.
+        """
+        sub = sub.copy()
+        sub["_inactive"] = (sub["status"] != "USGS-active").astype("int8")
+        sub["_dist_m"] = np.inf
+
+        colliding = sub[sub.duplicated("virtual_fp_id", keep=False)]
+        nex_ids = sorted(
+            {int(x) for x in colliding["dn_virtual_nex_id"].dropna().unique()}
+        )
+        if nex_ids:
+            try:
+                geo = self.supernetwork_parameters["geo_file_path"]
+                pts = self._read_nexus_points(geo, nex_ids)
+                if pts is not None and not pts.empty:
+                    gg = gpd.read_file(
+                        geo, layer="gages",
+                        where=_sql_in("site_no", colliding["site_no"], quote=True),
+                    )
+                    sub = self._attach_nexus_distance(sub, gg, pts)
+            except Exception as exc:  # geometry is an optimisation, never a hard dep
+                LOG.warning(
+                    "gages: could not rank co-located gages by distance to their "
+                    "downstream nexus (%s); falling back to status and site number.",
+                    exc,
+                )
+        return sub.sort_values(["_inactive", "_dist_m", "site_no"])
+
+    @staticmethod
+    def _read_nexus_points(geo_file_path, nex_ids: list[int]):
+        """Geometry for just the virtual nexus points named, in OGR-sized chunks."""
+        frames = []
+        for i in range(0, len(nex_ids), 400):
+            chunk = nex_ids[i : i + 400]
+            frames.append(
+                gpd.read_file(
+                    geo_file_path, layer="virtual_nexus",
+                    where=_sql_in("virtual_nex_id", chunk),
+                    columns=["virtual_nex_id"],
+                )
+            )
+        if not frames:
+            return None
+        return pd.concat(frames).drop_duplicates("virtual_nex_id").set_index("virtual_nex_id")
+
+    @staticmethod
+    def _attach_nexus_distance(sub, gage_points, nexus_points):
+        """Set ``_dist_m`` to each gage's distance from its downstream nexus."""
+        pts = gage_points[["site_no", "geometry"]].dropna(subset=["geometry"])
+        merged = sub.merge(pts, on="site_no", how="left", suffixes=("", "_pt"))
+        merged = merged.merge(
+            nexus_points[["geometry"]].rename(columns={"geometry": "_nex_geom"}),
+            left_on="dn_virtual_nex_id", right_index=True, how="left",
+        )
+        ok = merged["geometry"].notna() & merged["_nex_geom"].notna()
+        if not ok.any():
+            return sub
+        # Equal-area projection so the distance is in metres, not degrees.
+        crs = gage_points.crs
+        a = gpd.GeoSeries(merged.loc[ok, "geometry"].values, crs=crs).to_crs(5070)
+        b = gpd.GeoSeries(merged.loc[ok, "_nex_geom"].values, crs=crs).to_crs(5070)
+        merged.loc[ok, "_dist_m"] = a.distance(b, align=False).to_numpy()
+        return merged.drop(columns=["_nex_geom"], errors="ignore")
+
     @staticmethod
     def _one_link_per_gage(sub: pd.DataFrame, label: str, quiet: bool = False) -> pd.DataFrame:
         """Reduce a gage-to-link join to exactly one routing link per gage.
@@ -1117,11 +1211,26 @@ class NHFPreprocessMixin:
         outlet = placed.loc[placed.groupby("site_no")["link_segment_order"].idxmax()].copy()
         outlet["up_node_id"] = outlet["up_node_id"].astype("int64")
         n_collisions = len(outlet) - outlet["up_node_id"].nunique()
-        if n_collisions and not quiet:
-            LOG.warning(
-                "gages: %d %s gage(s) share a routing link with another gage; only "
-                "one observation per link is assimilated", n_collisions, label,
-            )
+        if n_collisions:
+            # Restore the ranking. The groupby above sorts by site_no, which discards
+            # the order _gage_selection_rank established, so without this the dedupe
+            # below would keep the lowest site number rather than the best gage.
+            rank_cols = [c for c in ("_inactive", "_dist_m", "site_no") if c in outlet]
+            outlet = outlet.sort_values(rank_cols)
+            # Only one observation can be assimilated per link, so co-located gages
+            # must be reduced to one. `outlet` arrives ordered by
+            # _gage_selection_rank (active, then closest to the downstream nexus,
+            # then site number), so keeping the first is a deterministic choice
+            # rather than whichever row the geopackage happened to list last.
+            dropped = outlet[outlet.duplicated("up_node_id", keep="first")]
+            outlet = outlet.drop_duplicates("up_node_id", keep="first")
+            if not quiet:
+                LOG.warning(
+                    "gages: %d %s gage(s) share a routing link with another gage; "
+                    "keeping the active gage nearest the downstream nexus and "
+                    "dropping the rest, e.g. %s",
+                    n_collisions, label, sorted(dropped["site_no"].astype(str))[:5],
+                )
         # Worth an INFO line of its own: this count is how many links the cached
         # execution plan splits reaches at, so a jump here is a routing slowdown
         # with no other visible cause.
@@ -1156,11 +1265,18 @@ class NHFPreprocessMixin:
                 how="left",
             )
             usgs_sub = self._one_link_per_gage(
-                gages_join[gages_join["status"].isin(["USGS-active", "USGS-discontinued"])],
+                self._gage_selection_rank(
+                    gages_join[
+                        gages_join["status"].isin(["USGS-active", "USGS-discontinued"])
+                    ]
+                ),
                 "USGS",
             )
             canada_sub = self._one_link_per_gage(
-                gages_join[gages_join["status"] == "CADWR_ENVCA"], "Canadian"
+                self._gage_selection_rank(
+                    gages_join[gages_join["status"] == "CADWR_ENVCA"]
+                ),
+                "Canadian",
             )
             self.gages = (
                 usgs_sub.set_index("up_node_id")[["site_no"]]
@@ -1193,7 +1309,7 @@ class NHFPreprocessMixin:
         # meant the two disagreed on any multi-link flowpath, so the diversion could
         # not find its observations and silently applied nothing.
         self._diversion_site_to_node = (
-            self._one_link_per_gage(gages_join, "diversion", quiet=True)
+            self._one_link_per_gage(self._gage_selection_rank(gages_join), "diversion", quiet=True)
             .set_index("site_no")["up_node_id"]
             .astype("int64")
             .to_dict()
