@@ -445,10 +445,14 @@ class PersistenceDA(AbstractDA):
             
             if usbr_persistence:
 
+                # USBR observations, gage-indexed, before the lake crosswalk is applied.
+                # Defined on every branch so the join below cannot raise NameError.
+                usbr_station_df = pd.DataFrame()
+
                 if (legacy_bmi_df):
 
                     # THIS LINE WAS REPLACED BY THE BMI TRANSPORT STUFF
-                    reservoir_usbr_df = value_dict['reservoir_usbr_df']
+                    usbr_station_df = value_dict['reservoir_usbr_df']
 
                 else:
 
@@ -479,15 +483,19 @@ class PersistenceDA(AbstractDA):
 
                         # Decode station ID axis
                         stationAxisName = 'stationId'
-                        reservoir_usbr_df = a2df._stations_retrieve_from_arrays\
+                        usbr_station_df = a2df._stations_retrieve_from_arrays\
                                 (df_withDates_reservoirUsbr, stationArray_reservoir_usbr, \
                                 stationStringLengthArray_reservoir_usbr, stationAxisName)
 
+                # Join the USBR observations decoded just above, NOT reservoir_usgs_df.
+                # Joining the USGS frame here assimilated USGS discharge into USBR
+                # reservoirs (or produced no USBR observations at all when the two gage
+                # sets did not overlap).
                 reservoir_usbr_df = (
                     network.usbr_lake_gage_crosswalk.
                     reset_index().
                     set_index('usbr_gage_id').
-                    join(reservoir_usgs_df).
+                    join(usbr_station_df).
                     set_index('usbr_lake_id')
                     )
 

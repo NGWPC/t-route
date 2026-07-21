@@ -270,14 +270,8 @@ class Model:
 
     def create_state(self):
         """Create a dictionary of data that can be serialized using `pickle.dumps`."""
-        # save current subnetwork and convert defaultdicts to dicts
-        subnetwork = list(self._subnetwork)
-        for i, value in enumerate(subnetwork):
-            if isinstance(value, dict):
-                subnetwork[i] = dict(value)
         return {
             "time": self._time,
-            "subnetwork": subnetwork,
             # updated data stored on AbstractNetwork
             "q0": self._network._q0,
             "t0": self._network._t0,
@@ -285,18 +279,25 @@ class Model:
             "last_obs": self._data_assimilation._last_obs_df,
             "usgs": self._data_assimilation._reservoir_usgs_param_df,
             "usace": self._data_assimilation._reservoir_usace_param_df,
+            # USBR persistence state is updated every window alongside USGS and
+            # USACE (_set_persistence_reservoir_da_params), so omitting it made a
+            # restarted run diverge from an uninterrupted one at type-7 reservoirs.
+            "usbr": self._data_assimilation._reservoir_usbr_param_df,
             "rfc": self._data_assimilation._reservoir_rfc_param_df,
             "gl": self._data_assimilation._great_lakes_param_df,
         }
 
     def load_state(self, data: dict):
         self._time = data["time"]
-        self._subnetwork = data["subnetwork"]
         self._network._q0 = data["q0"]
         self._network._t0 = data["t0"]
         self._data_assimilation._last_obs_df = data["last_obs"]
         self._data_assimilation._reservoir_usgs_param_df = data["usgs"]
         self._data_assimilation._reservoir_usace_param_df = data["usace"]
+        # .get for backward compatibility with state files written before USBR
+        # persistence state was included.
+        if "usbr" in data:
+            self._data_assimilation._reservoir_usbr_param_df = data["usbr"]
         self._data_assimilation._reservoir_rfc_param_df = data["rfc"]
         self._data_assimilation._great_lakes_param_df = data["gl"]
         self._network.update_waterbody_water_elevation()

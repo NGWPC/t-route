@@ -100,3 +100,46 @@ def test_all_great_lakes_unanchored_returns_empty_but_da_enabled():
     anchored, gl_da_enabled = _great_lakes_for_da(gl, _da(True))
     assert gl_da_enabled is True
     assert anchored.empty
+
+
+# nhf_1.2.2 moved the Great Lakes off fp_id: the two lakes carrying real USGS
+# gages (4800002 -> 04127885, 4800004 -> 04159130) have a null fp_id and are
+# anchored through virtual_fp_id instead. Verified against the CONUS 1.2.2 lakes
+# layer. Anchoring on fp_id dropped exactly those two, which silently severed the
+# type-6 DA path for the lakes the feature exists to serve.
+_GL_VFP_IDS = {
+    4800002: 1_278_347_000_000_000.0,   # null fp_id in 1.2.2
+    4800004: 1_276_841_000_000_000.0,   # null fp_id in 1.2.2
+    4800006: 1_286_155_000_000_000.0,
+    4800007: 1_287_248_000_000_000.0,
+}
+
+
+def _gl_df_122():
+    idx = pd.Index(list(_GL_VFP_IDS), name="lake_id")
+    return pd.DataFrame(
+        {
+            "fp_id": [np.nan, np.nan, 1_286_193_000_000_000.0, 1_287_248_000_000_000.0],
+            "virtual_fp_id": [_GL_VFP_IDS[i] for i in idx],
+            "LkArea": np.nan,
+            "LkMxE": [180.5, 351.2, 170.0, 73.5],
+        },
+        index=idx,
+    )
+
+
+def test_gage_bearing_great_lakes_survive_when_fp_id_is_null():
+    """The 1.2.2 shape: all four anchor through virtual_fp_id, including the two
+    with a null fp_id that the gage crosswalk depends on."""
+    anchored, enabled = _great_lakes_for_da(_gl_df_122(), _da(True))
+    assert enabled is True
+    assert set(anchored.index) == set(GREAT_LAKES_IDS)
+    # the two gage-bearing lakes must be present despite having no fp_id
+    assert 4800002 in anchored.index and 4800004 in anchored.index
+    assert anchored["virtual_fp_id"].dtype.kind == "i"
+
+
+def test_da_disabled_still_excludes_all_great_lakes_on_122():
+    anchored, enabled = _great_lakes_for_da(_gl_df_122(), _da(False))
+    assert enabled is False
+    assert anchored.empty

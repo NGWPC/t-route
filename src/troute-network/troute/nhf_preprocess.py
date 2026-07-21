@@ -516,8 +516,8 @@ def _great_lakes_for_da(gl_df: pd.DataFrame, data_assimilation_parameters: dict)
     included only when Great Lakes persistence DA is enabled; otherwise
     ``compute.py`` demotes the type-6 reservoirs to level pool and the kernel
     crashes on their missing parameters (with DA off their flowpaths still route
-    as MC channels). Only Great Lakes with an ``fp_id`` can be anchored to a
-    flowpath; their ``fp_id`` is cast to int to match the link table.
+    Only Great Lakes with a ``virtual_fp_id`` can be anchored to a flowpath; that
+    id is cast to int to match the link table.
 
     Parameters
     ----------
@@ -540,9 +540,16 @@ def _great_lakes_for_da(gl_df: pd.DataFrame, data_assimilation_parameters: dict)
     )
     if not gl_da_enabled or gl_df.empty:
         return gl_df.iloc[0:0].copy(), gl_da_enabled
-    anchored = gl_df[gl_df["fp_id"].notna()].copy()
+    # Anchor on virtual_fp_id where it exists. _refactor_reservoirs resolves
+    # reservoirs through the virtual flowpath, and on nhf_1.2.2 the two Great Lakes
+    # carrying real USGS gages (04127885 and 04159130) have a null fp_id but a valid
+    # virtual_fp_id, so filtering on fp_id silently dropped exactly the lakes this
+    # function exists to keep. Older hydrofabrics that predate the column still
+    # anchor on fp_id rather than raising KeyError.
+    anchor_col = "virtual_fp_id" if "virtual_fp_id" in gl_df.columns else "fp_id"
+    anchored = gl_df[gl_df[anchor_col].notna()].copy()
     if not anchored.empty:
-        anchored["fp_id"] = anchored["fp_id"].astype(int)
+        anchored[anchor_col] = anchored[anchor_col].astype("int64")
     return anchored, gl_da_enabled
 
 
@@ -646,8 +653,8 @@ class NHFPreprocessMixin:
                 n_unanchored = len(gl_df) - len(gl_anchored)
                 if n_unanchored:
                     LOG.warning(
-                        "waterbodies: %d Great Lake(s) have no fp_id and cannot "
-                        "be anchored for reservoir_type 6 DA", n_unanchored,
+                        "waterbodies: %d Great Lake(s) have no virtual_fp_id and "
+                        "cannot be anchored for reservoir_type 6 DA", n_unanchored,
                     )
                 if not gl_anchored.empty:
                     # Set nhf_lake_id values to lake_id values,
@@ -670,14 +677,19 @@ class NHFPreprocessMixin:
                 data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
             ).sort_index()
 
-            # Mark the Great Lakes as reservoir_type 6, matched by ORIGINAL id.
+            # Mark the Great Lakes as reservoir_type 6, matched by NATIVE lake id.
+            # Must intersect on gl_anchored, not gl_df: gl_anchored was re-indexed
+            # above from nhf_lake_id to the native lake_id (4800002 etc), and the
+            # waterbody table now carries those native ids, so intersecting the
+            # nhf_lake_id-indexed gl_df against it was always empty and the type-6
+            # marking never happened.
             # When GL DA is enabled they were re-added above and survive here as
             # type 6 (so compute.py can link climatology/observations); when GL DA
-            # is disabled they are absent and the intersection is empty (they stay
+            # is disabled gl_anchored is empty and so is the intersection (they stay
             # out of the reservoir set). A GL that was demoted in
             # _refactor_reservoirs (no single inlet -> outlet chain) is likewise
             # absent here and not marked type 6.
-            gl_present = gl_df.index.intersection(self._waterbody_types_df.index)
+            gl_present = gl_anchored.index.intersection(self._waterbody_types_df.index)
             self._waterbody_types_df.loc[gl_present, "reservoir_type"] = 6
 
             self._waterbody_type_specified = True
@@ -878,10 +890,13 @@ class NHFPreprocessMixin:
         wb_index = self.waterbody_dataframe.index.tolist()
         self.waterbody_connections = dict(zip(wb_index, wb_index))
 
-        row_df = pd.DataFrame(df_rows, index=index_vals)
-        row_df.index.name = self.dataframe.index.name
-        row_df = row_df.astype(self.dataframe.dtypes.to_dict())
-        self.dataframe = pd.concat([self.dataframe, row_df])
+        # Guard the empty case: with no synthetic reservoir rows the frame has no
+        # columns, and astype against the link-table dtypes raises KeyError.
+        if df_rows:
+            row_df = pd.DataFrame(df_rows, index=index_vals)
+            row_df.index.name = self.dataframe.index.name
+            row_df = row_df.astype(self.dataframe.dtypes.to_dict())
+            self.dataframe = pd.concat([self.dataframe, row_df])
 
     def preprocess_data_assimilation(self, reservoir_da: pd.DataFrame):
         if reservoir_da.empty or self.waterbody_dataframe.empty:
@@ -971,7 +986,14 @@ class NHFPreprocessMixin:
             }
         )
         if not usgs_da:
-            self.waterbody_dataframe.loc[usgs_indices, "reservoir_type"] = 1
+            # Never demote a Great Lake to level pool. The Great Lakes carry no
+            # level-pool parameters, so demoting them crashes the kernel on the
+            # missing values (see _great_lakes_for_da). They are gated by
+            # reservoir_persistence_greatLake, not by reservoir_persistence_usgs,
+            # so a config with USGS persistence off and Great Lake DA on must
+            # leave them at type 6.
+            demote_indices = reservoir_da[type_2_mask & ~great_lake_mask].index.values
+            self.waterbody_dataframe.loc[demote_indices, "reservoir_type"] = 1
 
         # USACE DA
         usace_da = (

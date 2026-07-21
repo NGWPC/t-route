@@ -20,9 +20,9 @@ module module_persistence_levelpool_hybrid
     use module_persistence_levelpool_hybrid_state, only: hybrid_state_interface
     use module_levelpool, only: levelpool
     use module_reservoir_utilities, only: modify_for_projected_storage, warn_negative_inflow, &
-    use, intrinsic :: iso_c_binding, only: C_INT64_T
                                           create_hybrid_diagnostic_log_file, &
                                           log_hybrid_diagnostic_data
+    use, intrinsic :: iso_c_binding, only: C_INT64_T
     use module_reservoir, only: reservoir, reservoir_input, reservoir_output
     use module_reservoir_read_timeslice_data, only: usgs_timeslice_data, usace_timeslice_data, timeslice_data_type
     use module_hydro_stop, only: HYDRO_stop

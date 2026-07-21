@@ -368,7 +368,11 @@ contains
         character(len=*), intent(in) :: netcdf_array_name
         character(len=*), intent(in) :: reservoir_parameter_file
         integer, intent(out) :: lake_id_index
-        integer, allocatable, dimension(:) :: temp_lake_id_array
+        ! Must match the width of lake_number: NHF lake ids exceed the range of a
+        ! default integer, so reading them into a default-integer array either
+        ! overflows or fails the netCDF type conversion, and the comparison below
+        ! then never matches.
+        integer(C_INT64_T), allocatable, dimension(:) :: temp_lake_id_array
         integer :: var_id, status, number_of_lakes, lake_index
         integer, dimension(nf90_max_var_dims) :: dim_ids
 
