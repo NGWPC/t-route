@@ -1118,6 +1118,13 @@ class NHFPreprocessMixin:
                 "gages: %d %s gage(s) share a routing link with another gage; only "
                 "one observation per link is assimilated", n_collisions, label,
             )
+        # Worth an INFO line of its own: this count is how many links the cached
+        # execution plan splits reaches at, so a jump here is a routing slowdown
+        # with no other visible cause.
+        LOG.info(
+            "gages: %d %s gage(s) placed on %d routing link(s)",
+            len(outlet), label, outlet["up_node_id"].nunique(),
+        )
         return outlet
 
     def _preprocess_streamflow_and_diversion_da(self, gages: pd.DataFrame) -> None:
@@ -1175,11 +1182,15 @@ class NHFPreprocessMixin:
             return
 
         # Map gage site_no to network links
+        # Must use the SAME placement rule as the streamflow crosswalk. The gage's
+        # observations are looked up in usgs_df by this link, and usgs_df places the
+        # gage at its flowpath OUTLET. Taking the first joined sub-link here instead
+        # meant the two disagreed on any multi-link flowpath, so the diversion could
+        # not find its observations and silently applied nothing.
         self._diversion_site_to_node = (
-            gages_join.dropna(subset=["up_node_id"])
-            .drop_duplicates(subset=["site_no"], keep="first")
+            self._one_link_per_gage(gages_join, "diversion")
             .set_index("site_no")["up_node_id"]
-            .astype(int)
+            .astype("int64")
             .to_dict()
         )
 

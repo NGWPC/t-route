@@ -122,7 +122,16 @@ class Model:
         self._data_assimilation = DataAssimilation(
             network=self._network,
             data_assimilation_parameters=self.data_assimilation_parameters,
-            run_parameters={},
+            # Not an empty dict: the observation readers need dt and nts. With them
+            # missing, file-based nudging computed its resampling frequency from
+            # dt=None, and the climatological diversion fallback fell back to
+            # dt=300/nts=0 and built a single column, which the kernel (indexing from
+            # timestep 1) never reads.
+            run_parameters={
+                "dt": self.dt,
+                "nts": self.nts,
+                "cpu_pool": self.cpu_pool,
+            },
             waterbody_parameters=self.waterbody_parameters,
             from_files=True,
             value_dict=None,
@@ -179,7 +188,10 @@ class Model:
                 qlats=run.get("qlats", qlats),
                 eloss_df=self._network._eloss if self._network._eloss is not None else pd.DataFrame(0.0, index=qlats.index, columns=qlats.columns),
                 ssout=self.forcing_parameters.get("ssout"),
-                usgs_df=self._data_assimilation.usgs_df,
+                # The window-sliced frame computed above, not the full one. Passing
+                # the unsliced frame restarted nudging and the donor subtraction from
+                # observation column zero on every BMI update.
+                usgs_df=usgs_df,
                 lastobs_df=self._data_assimilation.lastobs_df,
                 reservoir_usgs_df=self._data_assimilation.reservoir_usgs_df,
                 reservoir_usgs_param_df=self._data_assimilation.reservoir_usgs_param_df,

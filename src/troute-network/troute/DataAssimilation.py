@@ -1456,8 +1456,16 @@ def _create_usgs_df(data_assimilation_parameters, streamflow_da_parameters, run_
     qc_threshold           = data_assimilation_parameters.get("qc_threshold",1)
     interpolation_limit    = data_assimilation_parameters.get("interpolation_limit_min",59)
     LOG.info("Reading and preprocessing usgs timeslice files is started.")
-    usgs_df_start_time = time.time()    
+    usgs_df_start_time = time.time()
     # TODO: join timeslice folder and files into complete path upstream
+    if usgs_timeslices_folder is None:
+        raise ValueError(
+            "streamflow_da.streamflow_nudging is enabled but "
+            "streamflow_da.usgs_timeslices_folder is not set, so there is nowhere to "
+            "read gage observations from. Set the folder, or disable nudging. "
+            "(Without this check the run failed inside pathlib with a TypeError about "
+            "NoneType, which gave no indication of the missing setting.)"
+        )
     usgs_timeslices_folder = pathlib.Path(usgs_timeslices_folder)
     usgs_files = [usgs_timeslices_folder.joinpath(f) for f in 
                   da_run['usgs_timeslice_files']]
