@@ -102,6 +102,13 @@ class BmiTroute(Bmi):
         self._model = Model(bmi_cfg_file, self.get_start_time())
 
     def update(self):
+        import pickle
+        with open("./catchment_ids.pkl", "w") as writer:
+            cat_ids = self._values[BmiVars.CATCHMENT_ID]
+            pickle.dump(cat_ids, writer)
+        with open("./catchment_values.pkl", "w") as writer:
+            cat_values = self._values[BmiVars.CATCHMENT_VALUE]
+            pickle.dump(cat_values, writer)
         self._model.run(self._values)
         # clear current flow values
         for inputs_var in [BmiVars.NEXUS_VALUE, BmiVars.CATCHMENT_VALUE]:
