@@ -854,7 +854,12 @@ class PersistenceDA(AbstractDA):
                 if network.link_lake_crosswalk:
                     self._usgs_df = _reindex_link_to_lake_id(self.usgs_df, network.link_lake_crosswalk)
         
-        elif reservoir_da_parameters.get('reservoir_persistence_usgs', False):
+        # reservoir_persistence_usgs lives under reservoir_persistence_da, the same
+        # nesting the USACE branch below reads. Looked up one level too high this
+        # branch never fired, so whenever the frame above was not refreshed the
+        # type-2 reservoir observations stayed frozen on the first window's values
+        # while the kernel kept recomputing offsets against the current t0.
+        elif reservoir_da_parameters.get('reservoir_persistence_da', {}).get('reservoir_persistence_usgs', False):
             (
                 self._reservoir_usgs_df,
                 _,
@@ -872,7 +877,7 @@ class PersistenceDA(AbstractDA):
             # otherwise, gage data will not be assimilated at waterbody outlet
             # segments.
             if network.link_lake_crosswalk:
-                usgs_df = _reindex_link_to_lake_id(usgs_df, network.link_lake_crosswalk)
+                self._usgs_df = _reindex_link_to_lake_id(self.usgs_df, network.link_lake_crosswalk)
         
         # USACE
         if reservoir_da_parameters.get('reservoir_persistence_da').get('reservoir_persistence_usace', False):
