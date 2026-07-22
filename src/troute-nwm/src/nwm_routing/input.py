@@ -43,7 +43,7 @@ def _input_handler_v04(args):
         data = yaml.load(custom_file, Loader=yaml.SafeLoader)
     
     troute_configuration = Config.with_strict_mode(**data)
-    config_dict = troute_configuration.dict()
+    config_dict = troute_configuration.model_dump()
 
     log_parameters = config_dict.get('log_parameters')
     compute_parameters = config_dict.get('compute_parameters')

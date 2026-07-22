@@ -279,6 +279,10 @@ class Model:
             "last_obs": self._data_assimilation._last_obs_df,
             "usgs": self._data_assimilation._reservoir_usgs_param_df,
             "usace": self._data_assimilation._reservoir_usace_param_df,
+            # USBR persistence state is updated every window alongside USGS and
+            # USACE (_set_persistence_reservoir_da_params), so omitting it made a
+            # restarted run diverge from an uninterrupted one at type-7 reservoirs.
+            "usbr": self._data_assimilation._reservoir_usbr_param_df,
             "rfc": self._data_assimilation._reservoir_rfc_param_df,
             "gl": self._data_assimilation._great_lakes_param_df,
         }
@@ -290,6 +294,10 @@ class Model:
         self._data_assimilation._last_obs_df = data["last_obs"]
         self._data_assimilation._reservoir_usgs_param_df = data["usgs"]
         self._data_assimilation._reservoir_usace_param_df = data["usace"]
+        # .get for backward compatibility with state files written before USBR
+        # persistence state was included.
+        if "usbr" in data:
+            self._data_assimilation._reservoir_usbr_param_df = data["usbr"]
         self._data_assimilation._reservoir_rfc_param_df = data["rfc"]
         self._data_assimilation._great_lakes_param_df = data["gl"]
         self._network.update_waterbody_water_elevation()

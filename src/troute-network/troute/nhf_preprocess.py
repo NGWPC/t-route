@@ -27,9 +27,12 @@ _FLOWPATHS_CHANNEL_COLS = (
     "topwdthcc", "ncc", "chslp", "musx", "musk", "mainstem_lp",
 )
 _BAD_FPID_PREVIEW_LIMIT = 10
-LAKE_ID_FIELD = "lake_id"
-LEVEL_POOL_PARAMS = [
+LAKE_ID_FIELD = "nhf_lake_id"
+RECORD_LAKE_ID_FIELD = "og_" + LAKE_ID_FIELD
+NATIVE_LAKE_ID_FIELD = "lake_id"  # Index of lake in its source dataset
+WATERBODY_DF_FIELDS = [
                 LAKE_ID_FIELD,
+                NATIVE_LAKE_ID_FIELD,
                 "fp_id",
                 "virtual_fp_id",
                 "ifd",
@@ -42,6 +45,8 @@ LEVEL_POOL_PARAMS = [
                 "WeirE",
                 "WeirL",
             ]
+RESERVOIR_DA_SITE_ID_FIELD = "site_no"
+RESERVOIR_DA_SITE_TYPE_FIELD = "da_type"
 
 def _validate_flowpaths_channel_params(flowpaths):
     """Raise if any MC-kernel channel parameter is non-finite (NaN/Inf)."""
@@ -160,11 +165,12 @@ LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
     ),
     ("virtual_nexus", None, True),
     (
-        "lakes", 
-        LEVEL_POOL_PARAMS + ["hy_id", "ref_fp_id"], 
-        True),
+        "lakes",
+        WATERBODY_DF_FIELDS + ["hy_id", "ref_fp_id"],
+        False),
     ("gages", None, True),
     ("hydrolocations", None, True),
+    ("reservoir_da", ["nhf_lake_id", "lake_id", "site_no", "da_type"], True),
 ]
 
 def read_qlat_file(f):
@@ -394,9 +400,9 @@ def _clean_waterbodies(
       4. elevation consistency: OrificeE <= WeirE <= LkMxE must hold for
          level-pool routing; violating lakes are dropped with a warning
          (previously the whole run failed on the first violation).
-      5. fp_id anchoring: drop lakes with no fp_id -- they cannot be placed
-         on a routing flowpath (the hydrofabric fix for these is tracked
-         upstream).
+      5. virtual_fp_id anchoring: drop lakes with no virtual_fp_id -- they
+         cannot be anchored to a routing flowpath (the hydrofabric fix for
+         these is tracked upstream).
       6. parameter completeness: drop lakes missing any level-pool
          parameter.
 
@@ -426,7 +432,9 @@ def _clean_waterbodies(
         LOG.warning("waterbodies: dropped %d duplicated parameter rows", n_dup)
 
     # 3. Great Lakes
-    gl_df = waterbody_df[waterbody_df.index.isin(GREAT_LAKES_IDS)].copy()
+    gl_str = [str(i) for i in GREAT_LAKES_IDS]
+    gl_mask = waterbody_df[NATIVE_LAKE_ID_FIELD].astype(str).isin(gl_str)
+    gl_df = waterbody_df[gl_mask].copy()
     if not gl_df.empty:
         LOG.warning(
             "waterbodies: %d Great Lakes present; they carry no level-pool "
@@ -442,7 +450,7 @@ def _clean_waterbodies(
         # step 6 to drop them for missing parameters -- also prevents a Great Lake
         # that happens to carry valid level-pool parameters from surviving,
         # getting synthetic-renamed, and silently routing as a type-1 reservoir.
-        waterbody_df = waterbody_df[~waterbody_df.index.isin(GREAT_LAKES_IDS)]
+        waterbody_df = waterbody_df[~gl_mask]
 
     # 4. elevation consistency: a level-pool reservoir violating
     # OrificeE <= WeirE <= LkMxE is physically inconsistent and cannot be
@@ -508,8 +516,8 @@ def _great_lakes_for_da(gl_df: pd.DataFrame, data_assimilation_parameters: dict)
     included only when Great Lakes persistence DA is enabled; otherwise
     ``compute.py`` demotes the type-6 reservoirs to level pool and the kernel
     crashes on their missing parameters (with DA off their flowpaths still route
-    as MC channels). Only Great Lakes with an ``fp_id`` can be anchored to a
-    flowpath; their ``fp_id`` is cast to int to match the link table.
+    Only Great Lakes with a ``virtual_fp_id`` can be anchored to a flowpath; that
+    id is cast to int to match the link table.
 
     Parameters
     ----------
@@ -532,9 +540,23 @@ def _great_lakes_for_da(gl_df: pd.DataFrame, data_assimilation_parameters: dict)
     )
     if not gl_da_enabled or gl_df.empty:
         return gl_df.iloc[0:0].copy(), gl_da_enabled
-    anchored = gl_df[gl_df["fp_id"].notna()].copy()
-    if not anchored.empty:
-        anchored["fp_id"] = anchored["fp_id"].astype(int)
+    # Keep a Great Lake if EITHER anchor is present, deciding per row rather than
+    # per column. _refactor_reservoirs resolves reservoirs through the virtual
+    # flowpath, and on nhf_1.2.2 the two Great Lakes carrying real USGS gages
+    # (04127885 and 04159130) have a null fp_id but a valid virtual_fp_id, so
+    # filtering on fp_id alone silently dropped exactly the lakes this function
+    # exists to keep. Choosing a single column for the whole frame has the mirror
+    # failure: a lake with a valid fp_id and a null virtual_fp_id would be dropped
+    # even though it is perfectly anchorable.
+    anchors = [c for c in ("virtual_fp_id", "fp_id") if c in gl_df.columns]
+    if not anchors:
+        return gl_df.iloc[0:0].copy(), gl_da_enabled
+    keep = gl_df[anchors].notna().any(axis=1)
+    anchored = gl_df[keep].copy()
+    for col in anchors:
+        # Int64 (nullable) so a lake anchored by only one of the two columns keeps
+        # its null in the other rather than forcing the column back to float.
+        anchored[col] = anchored[col].astype("Int64")
     return anchored, gl_da_enabled
 
 
@@ -598,18 +620,37 @@ class NHFPreprocessMixin:
 
     def preprocess_waterbodies(self, lakes):
         if not lakes.empty:
+            # Add lat, lon, and crs columns for LAKEOUT files:
+            if self.output_parameters.get("lakeout_output", None):
+                lakes = lakes.to_crs(crs=4326)
+                lakes["crs"] = 4326  # Why you need to list crs when your coordinate keys are lat/lon eludes me...
+                lakes["lon"] = lakes.geometry.x
+                lakes["lat"] = lakes.geometry.y
+                lake_cols = WATERBODY_DF_FIELDS + ["crs", "lat", "lon"]
+            else:
+                lake_cols = WATERBODY_DF_FIELDS
+
             # Step-by-step cleanup; every dropped category is counted and logged
             # as a warning (see _clean_waterbodies).
-            self.waterbody_dataframe = lakes[LEVEL_POOL_PARAMS]
+            self.waterbody_dataframe = lakes[lake_cols]
             self._waterbody_df, gl_df = _clean_waterbodies(
                 self._waterbody_df, LAKE_ID_FIELD
             )
 
             # Add a large value to the lake_ids to create synthetic IDs and avoid conflicts.
             max_df_id = max(self.dataframe.index) + 1 if not self.dataframe.index.empty else 0
+            self.waterbody_dataframe[RECORD_LAKE_ID_FIELD] = self.waterbody_dataframe.index
             self._waterbody_df.index = np.arange(len(self._waterbody_df)) + max_df_id
             self._waterbody_df = self._waterbody_df.rename_axis(LAKE_ID_FIELD)
-            self._duplicate_ids_df = pd.DataFrame()  # Relic from how hyfeatures and NHD handled this. We add relationship to _fp_outlet_crosswalk 
+            # Add conversion back to original nhf_lake_id for lakeout table
+            self._duplicate_ids_df = self._waterbody_df.reset_index()[
+                [RECORD_LAKE_ID_FIELD, LAKE_ID_FIELD]
+            ].rename(
+                columns={
+                    RECORD_LAKE_ID_FIELD: "lake_id",
+                    LAKE_ID_FIELD: "synthetic_ids",
+                }
+            )
 
             # Process great lakes reaches, if necessary
             gl_anchored, gl_da_enabled = _great_lakes_for_da(
@@ -619,37 +660,43 @@ class NHFPreprocessMixin:
                 n_unanchored = len(gl_df) - len(gl_anchored)
                 if n_unanchored:
                     LOG.warning(
-                        "waterbodies: %d Great Lake(s) have no fp_id and cannot "
-                        "be anchored for reservoir_type 6 DA", n_unanchored,
+                        "waterbodies: %d Great Lake(s) have no virtual_fp_id and "
+                        "cannot be anchored for reservoir_type 6 DA", n_unanchored,
                     )
                 if not gl_anchored.empty:
-                    self._waterbody_df = pd.concat([self._waterbody_df, gl_anchored])
+                    # Set nhf_lake_id values to lake_id values,
+                    # because those have been hard coded throughout this repo.
+                    gl_anchored.index = gl_anchored[NATIVE_LAKE_ID_FIELD].astype(int)
+                    gl_anchored.index.name = self.waterbody_dataframe.index.name
+                    gl_anchored[RECORD_LAKE_ID_FIELD] = gl_anchored.index.astype(int)
+                    collision_mask = self.waterbody_dataframe.index.isin(gl_anchored.index)
+                    if collision_mask.any():
+                        raise RuntimeError(f"Name collision: nhf_lake_id values of {GREAT_LAKES_IDS} are reserved, but received {self._waterbody_df.loc[collision_mask].index.values}")
+                    self.waterbody_dataframe = pd.concat([self.waterbody_dataframe, gl_anchored])
                 self.great_lakes_climatology_df = get_great_lakes_climatology()
             else:
                 self.great_lakes_climatology_df = pd.DataFrame()
 
             # Condense flowpaths in a reservoir to single level pool node
-            self._refactor_reservoirs()
-
-            # Add lat, lon, and crs columns for LAKEOUT files:
-            lakeout = self.output_parameters.get("lakeout_output", None)
-            if lakeout:
-                raise NotImplementedError("The lakeout feature has not been developed for NHF.")
-
-            
+            self._refactor_reservoirs()          
 
             self._waterbody_types_df = pd.DataFrame(
                 data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
             ).sort_index()
 
-            # Mark the Great Lakes as reservoir_type 6, matched by ORIGINAL id.
+            # Mark the Great Lakes as reservoir_type 6, matched by NATIVE lake id.
+            # Must intersect on gl_anchored, not gl_df: gl_anchored was re-indexed
+            # above from nhf_lake_id to the native lake_id (4800002 etc), and the
+            # waterbody table now carries those native ids, so intersecting the
+            # nhf_lake_id-indexed gl_df against it was always empty and the type-6
+            # marking never happened.
             # When GL DA is enabled they were re-added above and survive here as
             # type 6 (so compute.py can link climatology/observations); when GL DA
-            # is disabled they are absent and the intersection is empty (they stay
+            # is disabled gl_anchored is empty and so is the intersection (they stay
             # out of the reservoir set). A GL that was demoted in
             # _refactor_reservoirs (no single inlet -> outlet chain) is likewise
             # absent here and not marked type 6.
-            gl_present = gl_df.index.intersection(self._waterbody_types_df.index)
+            gl_present = gl_anchored.index.intersection(self._waterbody_types_df.index)
             self._waterbody_types_df.loc[gl_present, "reservoir_type"] = 6
 
             self._waterbody_type_specified = True
@@ -700,11 +747,6 @@ class NHFPreprocessMixin:
             the appropriate waterbody link (``wb_link``).
             7. Redirect all lateral inflows (qlats) from ``all_fp`` to ``qlat_link``.
 
-        Parameters
-        ----------
-        lake_id_field : str, optional
-            Column name used to uniquely identify waterbodies in the input
-            dataframe. Default is ``"lake_id"``.
 
         """
         # Precompute the routing links of every waterbody flowpath ONCE. The
@@ -855,212 +897,176 @@ class NHFPreprocessMixin:
         wb_index = self.waterbody_dataframe.index.tolist()
         self.waterbody_connections = dict(zip(wb_index, wb_index))
 
+        # Guard the empty case: with no synthetic reservoir rows the frame has no
+        # columns, and astype against the link-table dtypes raises KeyError.
         if df_rows:
             row_df = pd.DataFrame(df_rows, index=index_vals)
             row_df.index.name = self.dataframe.index.name
             row_df = row_df.astype(self.dataframe.dtypes.to_dict())
             self.dataframe = pd.concat([self.dataframe, row_df])
 
+    def preprocess_data_assimilation(self, reservoir_da: pd.DataFrame):
+        if reservoir_da.empty or self.waterbody_dataframe.empty:
+            self._gages = {}
+            self._usgs_lake_gage_crosswalk = pd.DataFrame()
+            self._usace_lake_gage_crosswalk = pd.DataFrame()
+            self._usbr_lake_gage_crosswalk = pd.DataFrame()
+            self._rfc_lake_gage_crosswalk = pd.DataFrame()
+            return
 
-    def preprocess_data_assimilation(
-        self,
-        flowpaths,
-        reference_flowpaths,
-        virtual_flowpaths,
-        virtual_nexus,
-        waterbodies,
-        gages
-    ):
-        # TODO enable DA methods
-        # gages_df = network[["id", "hl_uri", "hydroseq"]].drop_duplicates()
-        # # clear out missing values
-        # gages_df = gages_df[~gages_df["hl_uri"].isnull()]
-        # gages_df = gages_df[~gages_df["hydroseq"].isnull()]
-        # # make 'id' an integer
-        # gages_df["id"] = gages_df["id"].str.split("-", expand=True).loc[:, 1].astype(float).astype(int)
-        # # split the hl_uri column into type and value
-        # gages_df[["type", "value"]] = gages_df.hl_uri.str.split("-", expand=True, n=1)
-        # # filter for 'Gages' only
-        # gages_df = gages_df[gages_df["type"].isin(["gages", "nid", "usbr"])]
-        # # Some IDs have multiple gages associated with them. This will expand the dataframe so
-        # # there is a unique row per gage ID. Also adds lake ids to the dataframe for creating
-        # # lake-gage crosswalk dataframes.
-        # gages_df = gages_df[["id", "value", "hydroseq", "type"]]
-        # gages_df["value"] = gages_df.value.str.split(" ")
-        # gages_df = (
-        #     gages_df.explode(column="value")
-        #     .set_index("id")
-        #     .join(pd.DataFrame().from_dict(self.waterbody_connections, orient="index", columns=["lake_id"]))
-        # )
-        # # transform dataframe into a dictionary where key is segment ID and value is gage ID
-        # usgs_ind = gages_df.value.str.isnumeric()  # usgs gages used for streamflow DA
-        # # Use hydroseq information to determine furthest downstream gage when multiple are present.
-        # idx_id = gages_df.index.name
-        # if not idx_id:
-        #     idx_id = "index"
-        # self._gages = (
-        #     gages_df.loc[usgs_ind]
-        #     .reset_index()
-        #     .sort_values("hydroseq")
-        #     .drop_duplicates(["value"], keep="last")
-        #     .set_index(idx_id)[["value"]]
-        #     .rename(columns={"value": "gages"})
-        #     .rename_axis(None, axis=0)
-        #     .to_dict()
-        # )
+        ### reservoir_da validation and formatting ###
+        reservoir_da = reservoir_da.copy()
+        if RECORD_LAKE_ID_FIELD not in self.waterbody_dataframe.columns:
+            raise KeyError(f"Column {RECORD_LAKE_ID_FIELD} must be in waterbody_dataframe, but only got {self.waterbody_dataframe.columns.to_list()}.")
+        if  self.waterbody_dataframe.index.name != LAKE_ID_FIELD:
+            raise KeyError(f"Column {LAKE_ID_FIELD} must be index of waterbody_dataframe, but found index '{self.waterbody_dataframe.index.name}'.")
+        if LAKE_ID_FIELD not in reservoir_da.columns:
+            raise KeyError(f"Column {LAKE_ID_FIELD} must be in reservoir_da, but only got {reservoir_da.columns.to_list()}.")
+        reservoir_da[LAKE_ID_FIELD] = reservoir_da[LAKE_ID_FIELD].astype(int)
 
-        # # FIXME: temporary solution, add canadian gage crosswalk dataframe. This should come from
-        # # the hydrofabric.
-        # self._canadian_gage_link_df = pd.DataFrame(columns=["gages", "link"]).set_index("link")
+        # Process great lakes
+        gl_str = [str(i) for i in GREAT_LAKES_IDS]
+        gl_present = reservoir_da[NATIVE_LAKE_ID_FIELD].astype(str).isin(gl_str)
+        if gl_present.any():
+            reservoir_da.loc[gl_present, LAKE_ID_FIELD] = reservoir_da.loc[gl_present, NATIVE_LAKE_ID_FIELD].astype(int)
 
-        # # Find furthest downstream gage and create our lake_gage_df to make crosswalk dataframes.
-        # lake_gage_hydroseq_df = gages_df[~gages_df["lake_id"].isnull()][["lake_id", "value", "hydroseq", "type"]].rename(
-        #     columns={"value": "gages"}
-        # )
-        # lake_gage_hydroseq_df["lake_id"] = lake_gage_hydroseq_df["lake_id"].astype(int)
-        # lake_gage_df = lake_gage_hydroseq_df[["lake_id", "gages", "type"]].drop_duplicates()
-        # lake_gage_hydroseq_df = (
-        #     lake_gage_hydroseq_df.groupby(["lake_id", "gages", "type"]).max("hydroseq").reset_index().set_index("lake_id")
-        # )
+        # In NHF, the reservoir_da table is one-to-one with lakes table.
+        if not reservoir_da[LAKE_ID_FIELD].is_unique:
+            raise ValueError(
+                f"NHF networks must have only one gage per value in {LAKE_ID_FIELD}"
+            )
+        # Check that all lakes are in reservoir_da table
+        id_diff = set(
+            self.waterbody_dataframe[RECORD_LAKE_ID_FIELD].to_numpy()
+        ).difference(reservoir_da[LAKE_ID_FIELD].to_numpy())
+        if len(id_diff) > 0:
+            raise ValueError(
+                f"Missing {RECORD_LAKE_ID_FIELD} values {id_diff} in reservoir_da table"
+            )
+        reservoir_da = reservoir_da[
+            reservoir_da[LAKE_ID_FIELD].isin(
+                self.waterbody_dataframe[RECORD_LAKE_ID_FIELD].to_numpy()
+            )
+        ]
 
-        # # FIXME: temporary solution, handles USGS and USACE reservoirs. Need to update for
-        # # RFC reservoirs...
-        # # NOTE: In the event a lake ID has multiple gages, this also finds the gage furthest
-        # # downstream (based on hydroseq) separately for USGS and USACE crosswalks.
-        # usgs_ind = lake_gage_df.gages.str.isnumeric()
-        # self._usgs_lake_gage_crosswalk = (
-        #     lake_gage_df.loc[usgs_ind]
-        #     .drop("type", axis=1)  # dropping type to ensure no dups when merging
-        #     .rename(columns={"lake_id": "usgs_lake_id", "gages": "usgs_gage_id"})
-        #     .set_index("usgs_lake_id")
-        #     .merge(
-        #         lake_gage_hydroseq_df.rename_axis("usgs_lake_id").rename(columns={"gages": "usgs_gage_id"}),
-        #         on=["usgs_lake_id", "usgs_gage_id"],
-        #     )
-        #     .sort_values(["usgs_gage_id", "hydroseq"])
-        #     .groupby("usgs_lake_id")
-        #     .last()
-        #     .drop("hydroseq", axis=1)
-        # )
+        # Format reservoir_da table
+        reservoir_da = reservoir_da[
+            [LAKE_ID_FIELD, NATIVE_LAKE_ID_FIELD, RESERVOIR_DA_SITE_ID_FIELD, RESERVOIR_DA_SITE_TYPE_FIELD]
+        ]
+        reservoir_da = reservoir_da.set_index(LAKE_ID_FIELD, drop=True)
+        reservoir_da = reservoir_da.rename(
+            columns={RESERVOIR_DA_SITE_TYPE_FIELD: "reservoir_type"}
+        )
+        # map new waterbody ids to reservoir da table
+        record_to_id_lookup = (
+            self.waterbody_dataframe.reset_index()
+            .set_index(RECORD_LAKE_ID_FIELD)[LAKE_ID_FIELD]
+            .to_dict()
+        )
+        reservoir_da.index = reservoir_da.index.map(record_to_id_lookup)
 
-        # self._usace_lake_gage_crosswalk = (
-        #     lake_gage_df.loc[~usgs_ind]
-        #     .drop("type", axis=1)  # dropping type to ensure no dups when merging
-        #     .rename(columns={"lake_id": "usace_lake_id", "gages": "usace_gage_id"})
-        #     .set_index("usace_lake_id")
-        #     .merge(
-        #         lake_gage_hydroseq_df.rename_axis("usace_lake_id").rename(columns={"gages": "usace_gage_id"}),
-        #         on=["usace_lake_id", "usace_gage_id"],
-        #     )
-        #     .sort_values(["usace_gage_id", "hydroseq"])
-        #     .groupby("usace_lake_id")
-        #     .last()
-        #     .drop("hydroseq", axis=1)
-        # )
-
-        # # Using the USBR type to set the crosswalk
-        # self._usbr_lake_gage_crosswalk = (
-        #     lake_gage_df[lake_gage_df["type"] == "usbr"]
-        #     .drop("type", axis=1)  # dropping type to ensure no dups when merging
-        #     .rename(columns={"lake_id": "usbr_lake_id", "gages": "usbr_gage_id"})
-        #     .set_index("usbr_lake_id")
-        #     .merge(
-        #         lake_gage_hydroseq_df.rename_axis("usbr_lake_id").rename(columns={"gages": "usbr_gage_id"}),
-        #         on=["usbr_lake_id", "usbr_gage_id"],
-        #     )
-        #     .sort_values(["usbr_gage_id", "hydroseq"])
-        #     .groupby("usbr_lake_id")
-        #     .last()
-        #     .drop("hydroseq", axis=1)
-        # )
-
-        # # Set waterbody types if DA is turned on:
-        # usgs_da = (
-        #     self.data_assimilation_parameters.get("reservoir_da", {})
-        #     .get("reservoir_persistence_da", {})
-        #     .get("reservoir_persistence_usgs", False)
-        # )
-        # usace_da = (
-        #     self.data_assimilation_parameters.get("reservoir_da", {})
-        #     .get("reservoir_persistence_da", {})
-        #     .get("reservoir_persistence_usace", False)
-        # )
-        # usbr_da = (
-        #     self.data_assimilation_parameters.get("reservoir_da", {})
-        #     .get("reservoir_persistence_da", {})
-        #     .get("reservoir_persistence_usbr", False)
-        # )
-        # rfc_da = (
-        #     self.data_assimilation_parameters.get("reservoir_da", {})
-        #     .get("reservoir_rfc_da", {})
-        #     .get("reservoir_rfc_forecasts", False)
-        # )
-        # # NOTE: The order here matters. Some waterbody IDs have both a USGS gage designation and
-        # # a NID ID used for USACE gages. It seems the USGS gages should take precedent (based on
-        # # gages in timeslice files), so setting type 2 reservoirs second should overwrite type 3
-        # # designations
-        # # FIXME: Related to FIXME above, but we should re-think how to handle waterbody_types...
-        # if usbr_da:
-        #     self._waterbody_types_df.loc[self._usace_lake_gage_crosswalk.index, "reservoir_type"] = 7
-        # if usace_da:
-        #     self._waterbody_types_df.loc[self._usace_lake_gage_crosswalk.index, "reservoir_type"] = 3
-        # if usgs_da:
-        #     self._waterbody_types_df.loc[self._usgs_lake_gage_crosswalk.index, "reservoir_type"] = 2
-        # if rfc_da:
-        #     # FIXME: Temporary fix, load predefined rfc lake gage crosswalk info for rfc reservoirs.
-        #     # Replace relevant waterbody_types as type 4.
-        #     rfc_lake_gage_crosswalk = get_rfc_lake_gage_crosswalk().reset_index()
-        #     self._rfc_lake_gage_crosswalk = rfc_lake_gage_crosswalk[
-        #         rfc_lake_gage_crosswalk["rfc_lake_id"].isin(self.waterbody_dataframe.index)
-        #     ].set_index("rfc_lake_id")
-        #     self._waterbody_types_df.loc[self._rfc_lake_gage_crosswalk.index, "reservoir_type"] = 4
-        # else:
-        #     self._rfc_lake_gage_crosswalk = pd.DataFrame()
-
-        self._gages = {}
-        self._usgs_lake_gage_crosswalk = pd.DataFrame({"usgs_lake_id": [4800002, 4800004],"usgs_gage_id": ["04127885", "04159130"]})
-        self._usace_lake_gage_crosswalk = pd.DataFrame()
-        self._usbr_lake_gage_crosswalk = pd.DataFrame()
-        self._rfc_lake_gage_crosswalk = pd.DataFrame()
-
-    ######################################################################
-    # FIXME Temporary solution to hydrofabric issues.
-    def bandaid(
-        self,
-    ):
-        # Identify waterbody IDs that have problematic data. There are underlying stream
-        # segments that should be referenced to the waterbody ID, but are not. This causes
-        # our connections dictionary to have multiple downstream segments for waterbodies which
-        # is not allowed:
-        conn_df = self.dataframe.reset_index()[["key", "downstream"]]
-        lake_id = self.waterbody_dataframe.index.unique()
-
-        wbody_conn_df = self.dataframe["waterbody"].dropna().astype(int).reset_index()
-        wbody_conn_df = wbody_conn_df[wbody_conn_df["waterbody"].isin(lake_id)]
-
-        conn_df2 = (
-            conn_df.merge(wbody_conn_df, on="key", how="left")
-            .assign(key=lambda x: x["waterbody"].fillna(x["key"]))
-            .drop("waterbody", axis=1)
-            .merge(wbody_conn_df.rename(columns={"key": "downstream"}), on="downstream", how="left")
-            .assign(downstream=lambda x: x["waterbody"].fillna(x["downstream"]))
-            .drop("waterbody", axis=1)
-            .drop_duplicates()
-            .query("key != downstream")
-            .astype(int)
+        # Join types.  These will be overwritten later based on config.
+        self.waterbody_dataframe = self.waterbody_dataframe.merge(
+            reservoir_da["reservoir_type"], right_index=True, left_index=True
         )
 
-        # Find missing segments
-        bad_lake_ids = conn_df2.loc[conn_df2.duplicated(subset=["key"])].key.unique()
-        # Drop waterbodies that are problematic. Instead t-route will simply treat them as
-        # flowpaths and run MC routing.
-        self._waterbody_df = self.waterbody_dataframe.drop(bad_lake_ids)
+        # USGS DA
+        usgs_da = (
+            self.data_assimilation_parameters.get("reservoir_da", {})
+            .get("reservoir_persistence_da", {})
+            .get("reservoir_persistence_usgs", False)
+        )
+        type_2_mask = (reservoir_da["reservoir_type"] == 2)
+        great_lake_mask = reservoir_da[NATIVE_LAKE_ID_FIELD].isin(["4800002", "4800004"])
+        usgs_mask = type_2_mask | great_lake_mask
+        usgs_indices = reservoir_da[usgs_mask].index.values
+        # Also add some Great Lakes gages, if present
+        self.usgs_lake_gage_crosswalk = (
+            reservoir_da.loc[usgs_indices, RESERVOIR_DA_SITE_ID_FIELD]
+            .reset_index()
+            .copy()
+        )
+        self.usgs_lake_gage_crosswalk = self.usgs_lake_gage_crosswalk.rename(
+            columns={
+                LAKE_ID_FIELD: "usgs_lake_id",
+                RESERVOIR_DA_SITE_ID_FIELD: "usgs_gage_id",
+            }
+        )
+        if not usgs_da:
+            # Never demote a Great Lake to level pool. The Great Lakes carry no
+            # level-pool parameters, so demoting them crashes the kernel on the
+            # missing values (see _great_lakes_for_da). They are gated by
+            # reservoir_persistence_greatLake, not by reservoir_persistence_usgs,
+            # so a config with USGS persistence off and Great Lake DA on must
+            # leave them at type 6.
+            demote_indices = reservoir_da[type_2_mask & ~great_lake_mask].index.values
+            self.waterbody_dataframe.loc[demote_indices, "reservoir_type"] = 1
 
-        # This chunk replaces waterbody_id 1711354 with 1710676. I don't know where the
-        # former came from, but the latter is listed in the flowpath_attributes table
-        # and exists in NWMv2.1 LAKEPARM file. See hydrofabric github issue 16:
-        # https://github.com/NOAA-OWP/hydrofabric/issues/16
-        self._dataframe["waterbody"] = self._dataframe["waterbody"].replace("1711354", "1710676")
-        self._waterbody_df.rename(index={1711354: 1710676}, inplace=True)
+        # USACE DA
+        usace_da = (
+            self.data_assimilation_parameters.get("reservoir_da", {})
+            .get("reservoir_persistence_da", {})
+            .get("reservoir_persistence_usace", False)
+        )
+        usace_indices = reservoir_da[reservoir_da["reservoir_type"] == 3].index.values
+        self.usace_lake_gage_crosswalk = (
+            reservoir_da.loc[usace_indices, RESERVOIR_DA_SITE_ID_FIELD]
+            .reset_index()
+            .copy()
+        )
+        self.usace_lake_gage_crosswalk = self.usace_lake_gage_crosswalk.rename(
+            columns={
+                LAKE_ID_FIELD: "usace_lake_id",
+                RESERVOIR_DA_SITE_ID_FIELD: "usace_gage_id",
+            }
+        )
+        if not usace_da:
+            self.waterbody_dataframe.loc[usace_indices, "reservoir_type"] = 1
 
-    #######################################################################
+        # RFC DA
+        rfc_da = (
+            self.data_assimilation_parameters.get("reservoir_da", {})
+            .get("reservoir_rfc_da", {})
+            .get("reservoir_rfc_forecasts", False)
+        )
+        rfc_indices = reservoir_da[reservoir_da["reservoir_type"] == 4].index.values
+        self.rfc_lake_gage_crosswalk = (
+            reservoir_da.loc[rfc_indices, RESERVOIR_DA_SITE_ID_FIELD]
+            .reset_index()
+            .copy()
+        )
+        self.rfc_lake_gage_crosswalk = self.rfc_lake_gage_crosswalk.rename(
+            columns={
+                LAKE_ID_FIELD: "rfc_lake_id",
+                RESERVOIR_DA_SITE_ID_FIELD: "rfc_gage_id",
+            }
+        )
+        if not rfc_da:
+            self.waterbody_dataframe.loc[rfc_indices, "reservoir_type"] = 1
+
+        # USBR DA
+        usbr_da = (
+            self.data_assimilation_parameters.get("reservoir_da", {})
+            .get("reservoir_persistence_da", {})
+            .get("reservoir_persistence_usbr", False)
+        )
+        usbr_indices = reservoir_da[reservoir_da["reservoir_type"] == 7].index.values
+        self.usbr_lake_gage_crosswalk = (
+            reservoir_da.loc[usbr_indices, RESERVOIR_DA_SITE_ID_FIELD]
+            .reset_index()
+            .copy()
+        )
+        self.usbr_lake_gage_crosswalk = self.usbr_lake_gage_crosswalk.rename(
+            columns={
+                LAKE_ID_FIELD: "usbr_lake_id",
+                RESERVOIR_DA_SITE_ID_FIELD: "usbr_gage_id",
+            }
+        )
+        if not usbr_da:
+            self.waterbody_dataframe.loc[usbr_indices, "reservoir_type"] = 1
+
+        self.waterbody_types_dataframe = self.waterbody_dataframe[
+            ["reservoir_type"]
+        ].copy()
+
+        self._gages = {}

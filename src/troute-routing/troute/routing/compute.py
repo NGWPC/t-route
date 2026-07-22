@@ -495,28 +495,28 @@ class ComputeInputs:
     time_since_lastobs_init: Float32Array
     da_decay_coefficient: float
     reservoir_usgs_obs: Float32Array
-    reservoir_usgs_wbody_idx: Int32Array
+    reservoir_usgs_wbody_idx: Int64Array
     reservoir_usgs_time: Float32Array
     reservoir_usgs_update_time: Float32Array
     reservoir_usgs_prev_persisted_flow: Float32Array
     reservoir_usgs_persistence_update_time: Float32Array
     reservoir_usgs_persistence_index: Float32Array
     reservoir_usace_obs: Float32Array
-    reservoir_usace_wbody_idx: Int32Array
+    reservoir_usace_wbody_idx: Int64Array
     reservoir_usace_time: Float32Array
     reservoir_usace_update_time: Float32Array
     reservoir_usace_prev_persisted_flow: Float32Array
     reservoir_usace_persistence_update_time: Float32Array
     reservoir_usace_persistence_index: Float32Array
     reservoir_usbr_obs: Float32Array
-    reservoir_usbr_wbody_idx: Int32Array
+    reservoir_usbr_wbody_idx: Int64Array
     reservoir_usbr_time: Float32Array
     reservoir_usbr_update_time: Float32Array
     reservoir_usbr_prev_persisted_flow: Float32Array
     reservoir_usbr_persistence_update_time: Float32Array
     reservoir_usbr_persistence_index: Float32Array
     reservoir_rfc_obs: Float32Array
-    reservoir_rfc_wbody_idx: Int32Array
+    reservoir_rfc_wbody_idx: Int64Array
     reservoir_rfc_totalCounts: Int32Array
     reservoir_rfc_file: list[str]
     reservoir_rfc_use_forecast: Int32Array
@@ -1088,7 +1088,7 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
     reservoir_usbr_persistence_update_time (ndarray): update time (sec) of persisted value at USBR reservoirs
     reservoir_usbr_persistence_index       (ndarray): index denoting elapsed persistence epochs at USBR reservoirs
     '''
-    if not reservoir_usgs_df.empty:
+    if not reservoir_usgs_df.empty and not waterbody_types_df_sub.empty:
         usgs_wbodies_sub      = waterbody_types_df_sub[
                                     waterbody_types_df_sub['reservoir_type']==2
                                 ].index
@@ -1117,7 +1117,7 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
             waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 2] = 1
 
     # select USACE reservoir DA data waterbodies in sub-domain
-    if not reservoir_usace_df.empty:
+    if not reservoir_usace_df.empty and not waterbody_types_df_sub.empty:
         usace_wbodies_sub      = waterbody_types_df_sub[
                                     waterbody_types_df_sub['reservoir_type']==3
                                 ].index
@@ -1143,7 +1143,7 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
             waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 3] = 1
 
     # select USBR reservoir DA data waterbodies in sub-domain
-    if not reservoir_usbr_df.empty:
+    if not reservoir_usbr_df.empty and not waterbody_types_df_sub.empty:
         usbr_wbodies_sub      = waterbody_types_df_sub[
                                     waterbody_types_df_sub['reservoir_type']==7
                                 ].index
@@ -1169,7 +1169,7 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
             waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 7] = 1
     
     # RFC reservoirs
-    if not reservoir_rfc_df.empty:
+    if not reservoir_rfc_df.empty and not waterbody_types_df_sub.empty:
         rfc_wbodies_sub = waterbody_types_df_sub[
             waterbody_types_df_sub['reservoir_type']==4
             ].index
@@ -1197,7 +1197,7 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
                 waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 4] = 1
     
     # Great Lakes
-    if not great_lakes_df.empty:
+    if not great_lakes_df.empty and not waterbody_types_df_sub.empty:
         gl_wbodies_sub = waterbody_types_df_sub[
             waterbody_types_df_sub['reservoir_type']==6
             ].index
@@ -1600,7 +1600,7 @@ def build_compute_package(
         da_decay_coefficient=config.da_decay_coefficient,
         # USGS Hybrid Reservoir DA data
         reservoir_usgs_obs=reservoir_usgs_df_sub.to_numpy(dtype="float32"),
-        reservoir_usgs_wbody_idx=reservoir_usgs_df_sub.index.to_numpy(dtype="int32"),
+        reservoir_usgs_wbody_idx=reservoir_usgs_df_sub.index.to_numpy(dtype="int64"),
         reservoir_usgs_time=reservoir_usgs_df_time.astype("float32"),
         reservoir_usgs_update_time=reservoir_usgs_update_time.astype("float32"),
         reservoir_usgs_prev_persisted_flow=reservoir_usgs_prev_persisted_flow.astype(
@@ -1614,7 +1614,7 @@ def build_compute_package(
         ),
         # USACE Hybrid Reservoir DA data
         reservoir_usace_obs=reservoir_usace_df_sub.to_numpy(dtype="float32"),
-        reservoir_usace_wbody_idx=reservoir_usace_df_sub.index.to_numpy(dtype="int32"),
+        reservoir_usace_wbody_idx=reservoir_usace_df_sub.index.to_numpy(dtype="int64"),
         reservoir_usace_time=reservoir_usace_df_time.astype("float32"),
         reservoir_usace_update_time=reservoir_usace_update_time.astype("float32"),
         reservoir_usace_prev_persisted_flow=reservoir_usace_prev_persisted_flow.astype(
@@ -1628,7 +1628,7 @@ def build_compute_package(
         ),
         # USBR Hybrid Reservoir DA data
         reservoir_usbr_obs=reservoir_usbr_df_sub.to_numpy(dtype="float32"),
-        reservoir_usbr_wbody_idx=reservoir_usbr_df_sub.index.to_numpy(dtype="int32"),
+        reservoir_usbr_wbody_idx=reservoir_usbr_df_sub.index.to_numpy(dtype="int64"),
         reservoir_usbr_time=reservoir_usbr_df_time.astype("float32"),
         reservoir_usbr_update_time=reservoir_usbr_update_time.astype("float32"),
         reservoir_usbr_prev_persisted_flow=reservoir_usbr_prev_persisted_flow.astype(
@@ -1642,7 +1642,7 @@ def build_compute_package(
         ),
         # RFC Reservoir DA data
         reservoir_rfc_obs=reservoir_rfc_df_sub.to_numpy(dtype="float32"),
-        reservoir_rfc_wbody_idx=reservoir_rfc_df_sub.index.to_numpy(dtype="int32"),
+        reservoir_rfc_wbody_idx=reservoir_rfc_df_sub.index.to_numpy(dtype="int64"),
         reservoir_rfc_totalCounts=reservoir_rfc_totalCounts.astype("int32"),
         reservoir_rfc_file=reservoir_rfc_file,
         reservoir_rfc_use_forecast=reservoir_rfc_use_forecast.astype("int32"),

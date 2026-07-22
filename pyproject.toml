@@ -31,3 +31,10 @@ jupyter = [
     "xarray>=2024.1.1",
     "matplotlib-inline>=0.1.6",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+addopts = "--continue-on-collection-errors"
+markers = [
+    "integration: end-to-end NHF model runs (require preprocessed data; run with -m integration)",
+]

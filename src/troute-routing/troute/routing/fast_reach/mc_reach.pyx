@@ -3,6 +3,7 @@
 from enum import IntEnum
 import numpy as np
 from itertools import chain
+from libc.stdint cimport int64_t
 from operator import itemgetter
 from array import array
 from numpy cimport ndarray  # TODO: Do we need to import numpy and ndarray separately?
@@ -212,28 +213,28 @@ cpdef object compute_network_structured(
     const float[:] time_since_lastobs_init,
     const double da_decay_coefficient,
     const float[:,:] reservoir_usgs_obs,
-    const int[:] reservoir_usgs_wbody_idx,
+    const int64_t[:] reservoir_usgs_wbody_idx,
     const float[:] reservoir_usgs_time,
     const float[:] reservoir_usgs_update_time,
     const float[:] reservoir_usgs_prev_persisted_flow,
     const float[:] reservoir_usgs_persistence_update_time,
     const float[:] reservoir_usgs_persistence_index,
     const float[:,:] reservoir_usace_obs,
-    const int[:] reservoir_usace_wbody_idx,
+    const int64_t[:] reservoir_usace_wbody_idx,
     const float[:] reservoir_usace_time,
     const float[:] reservoir_usace_update_time,
     const float[:] reservoir_usace_prev_persisted_flow,
     const float[:] reservoir_usace_persistence_update_time,
     const float[:] reservoir_usace_persistence_index,
     const float[:,:] reservoir_usbr_obs,
-    const int[:] reservoir_usbr_wbody_idx,
+    const int64_t[:] reservoir_usbr_wbody_idx,
     const float[:] reservoir_usbr_time,
     const float[:] reservoir_usbr_update_time,
     const float[:] reservoir_usbr_prev_persisted_flow,
     const float[:] reservoir_usbr_persistence_update_time,
     const float[:] reservoir_usbr_persistence_index,
     const float[:,:] reservoir_rfc_obs,
-    const int[:] reservoir_rfc_wbody_idx,
+    const int64_t[:] reservoir_rfc_wbody_idx,
     const int[:] reservoir_rfc_totalCounts,
     list reservoir_rfc_file,
     const int[:] reservoir_rfc_use_forecast,
@@ -450,10 +451,10 @@ cpdef object compute_network_structured(
     #---------------------------------------------------------------------------------------------
 
     # reservoir id index arrays
-    cdef np.ndarray[int, ndim=1] usgs_idx  = np.asarray(reservoir_usgs_wbody_idx)
-    cdef np.ndarray[int, ndim=1] usace_idx = np.asarray(reservoir_usace_wbody_idx)
-    cdef np.ndarray[int, ndim=1] usbr_idx = np.asarray(reservoir_usbr_wbody_idx)
-    cdef np.ndarray[int, ndim=1] rfc_idx = np.asarray(reservoir_rfc_wbody_idx)
+    cdef np.ndarray[np.int64_t, ndim=1] usgs_idx  = np.asarray(reservoir_usgs_wbody_idx)
+    cdef np.ndarray[np.int64_t, ndim=1] usace_idx = np.asarray(reservoir_usace_wbody_idx)
+    cdef np.ndarray[np.int64_t, ndim=1] usbr_idx = np.asarray(reservoir_usbr_wbody_idx)
+    cdef np.ndarray[np.int64_t, ndim=1] rfc_idx = np.asarray(reservoir_rfc_wbody_idx)
 
     # reservoir update time arrays
     cdef np.ndarray[float, ndim=1] usgs_update_time  = np.asarray(reservoir_usgs_update_time)

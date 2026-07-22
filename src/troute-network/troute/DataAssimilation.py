@@ -445,10 +445,14 @@ class PersistenceDA(AbstractDA):
             
             if usbr_persistence:
 
+                # USBR observations, gage-indexed, before the lake crosswalk is applied.
+                # Defined on every branch so the join below cannot raise NameError.
+                usbr_station_df = pd.DataFrame()
+
                 if (legacy_bmi_df):
 
                     # THIS LINE WAS REPLACED BY THE BMI TRANSPORT STUFF
-                    reservoir_usbr_df = value_dict['reservoir_usbr_df']
+                    usbr_station_df = value_dict['reservoir_usbr_df']
 
                 else:
 
@@ -479,15 +483,19 @@ class PersistenceDA(AbstractDA):
 
                         # Decode station ID axis
                         stationAxisName = 'stationId'
-                        reservoir_usbr_df = a2df._stations_retrieve_from_arrays\
+                        usbr_station_df = a2df._stations_retrieve_from_arrays\
                                 (df_withDates_reservoirUsbr, stationArray_reservoir_usbr, \
                                 stationStringLengthArray_reservoir_usbr, stationAxisName)
 
+                # Join the USBR observations decoded just above, NOT reservoir_usgs_df.
+                # Joining the USGS frame here assimilated USGS discharge into USBR
+                # reservoirs (or produced no USBR observations at all when the two gage
+                # sets did not overlap).
                 reservoir_usbr_df = (
                     network.usbr_lake_gage_crosswalk.
                     reset_index().
                     set_index('usbr_gage_id').
-                    join(reservoir_usgs_df).
+                    join(usbr_station_df).
                     set_index('usbr_lake_id')
                     )
 
@@ -826,8 +834,25 @@ class PersistenceDA(AbstractDA):
                 da_run,
                 lake_gage_crosswalk = network.usace_lake_gage_crosswalk,
                 res_source = 'usace')
-        
-        # if there are no TimeSlice files available for hybrid reservoir DA in the next loop, 
+
+        # USBR. Without this, type-7 reservoirs kept the first window's observations
+        # for the whole run: the next loop's usbr timeslices were never read.
+        if reservoir_da_parameters.get('reservoir_persistence_da').get('reservoir_persistence_usbr', False):
+
+            (
+                self._reservoir_usbr_df,
+                _,
+            ) = _create_reservoir_df(
+                data_assimilation_parameters,
+                reservoir_da_parameters,
+                streamflow_da_parameters,
+                run_parameters,
+                network,
+                da_run,
+                lake_gage_crosswalk = network.usbr_lake_gage_crosswalk,
+                res_source = 'usbr')
+
+        # if there are no TimeSlice files available for hybrid reservoir DA in the next loop,
         # but there are DA parameters from the previous loop, then create a
         # dummy observations df. This allows the reservoir persistence to continue across loops.
         # USGS Reservoirs
@@ -840,12 +865,23 @@ class PersistenceDA(AbstractDA):
                         columns = [network.t0]
                     )
 
-            # USACE Reservoirs   
+            # USACE Reservoirs
             if 3 in network.waterbody_types_dataframe['reservoir_type'].unique():
                 if self.reservoir_usace_df.empty and len(self.reservoir_usace_param_df.index) > 0:
                     self._reservoir_usace_df = pd.DataFrame(
-                        data    = np.nan, 
-                        index   = self.reservoir_usace_param_df.index, 
+                        data    = np.nan,
+                        index   = self.reservoir_usace_param_df.index,
+                        columns = [network.t0]
+                    )
+
+            # USBR Reservoirs. Same continuation rule as USGS and USACE above: with
+            # no timeslices this loop but persistence state carried from the last
+            # one, a dummy frame lets that persistence continue instead of stalling.
+            if 7 in network.waterbody_types_dataframe['reservoir_type'].unique():
+                if self.reservoir_usbr_df.empty and len(self.reservoir_usbr_param_df.index) > 0:
+                    self._reservoir_usbr_df = pd.DataFrame(
+                        data    = np.nan,
+                        index   = self.reservoir_usbr_param_df.index,
                         columns = [network.t0]
                     )
 
@@ -1544,6 +1580,20 @@ def _set_persistence_reservoir_da_params(run_results):
             tmp_usbr['persistence_index'] = r[6][3]
             reservoir_usbr_param_df = pd.concat([reservoir_usbr_param_df, tmp_usbr])
 
+    # A reservoir that sits on a sub-domain boundary appears as an
+    # offnetwork upstream in a downstream compute job AND as a home reach
+    # in its own job.  Both jobs run the reservoir through the DA kernel
+    # and emit results, so pd.concat above produces duplicate index entries.
+    # On the next loop iteration _prep_reservoir_da_dataframes calls
+    # .loc[lake_id].to_numpy() and gets a 2-row result for a 1-element
+    # index, causing a shape mismatch when the kernel output is unpacked.
+    # Deduplicate by keeping the last entry for each lake (both duplicates
+    # carry the same computed state, so the choice of first vs. last is
+    # inconsequential).
+    reservoir_usgs_param_df  = reservoir_usgs_param_df[~reservoir_usgs_param_df.index.duplicated(keep='last')]
+    reservoir_usace_param_df = reservoir_usace_param_df[~reservoir_usace_param_df.index.duplicated(keep='last')]
+    reservoir_usbr_param_df  = reservoir_usbr_param_df[~reservoir_usbr_param_df.index.duplicated(keep='last')]
+
     return reservoir_usgs_param_df, reservoir_usace_param_df, reservoir_usbr_param_df
 
 def _set_rfc_reservoir_da_params(reservoir_rfc_param_df, run_results):
@@ -2098,7 +2148,7 @@ def _read_timeseries_files(filepath, timeseries_dates, t0, final_persist_datetim
         sliceStartTime = datetime.strptime(ds.attrs.get('sliceStartTimeUTC'), '%Y-%m-%d_%H:%M:%S')
         sliceTimeResolutionMinutes = ds.attrs.get('sliceTimeResolutionMinutes')
         df = ds.to_dataframe().reset_index().sort_values('forecastInd')[['stationId','discharges','synthetic_values','totalCounts','timeSteps']]
-        df['Datetime'] = pd.date_range(sliceStartTime, periods=df.shape[0], freq=sliceTimeResolutionMinutes+'T')
+        df['Datetime'] = pd.date_range(sliceStartTime, periods=df.shape[0], freq=sliceTimeResolutionMinutes+'min')
         # Filter out forecasts that go beyond the rfc_persist_days parameter. This isn't necessary, but removes
         # excess data, keeping the dataframe of observations as small as possible.
         df = df[df['Datetime']<final_persist_datetime]

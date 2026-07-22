@@ -305,6 +305,10 @@ class AbstractNetwork(ABC):
     @property
     def waterbody_types_dataframe(self):
         return self._waterbody_types_df
+
+    @waterbody_types_dataframe.setter
+    def waterbody_types_dataframe(self, val):
+        self._waterbody_types_df = val
     
     @property
     def waterbody_type_specified(self):
@@ -401,20 +405,36 @@ class AbstractNetwork(ABC):
         return self._link_gage_df.copy()
 
     @property
-    def usgs_lake_gage_crosswalk(self):
+    def usgs_lake_gage_crosswalk(self) -> pd.DataFrame:
         return self._usgs_lake_gage_crosswalk
+
+    @usgs_lake_gage_crosswalk.setter
+    def usgs_lake_gage_crosswalk(self, val: pd.DataFrame):
+        self._usgs_lake_gage_crosswalk = val
     
     @property
-    def usace_lake_gage_crosswalk(self):
+    def usace_lake_gage_crosswalk(self) -> pd.DataFrame:
         return self._usace_lake_gage_crosswalk
+
+    @usace_lake_gage_crosswalk.setter
+    def usace_lake_gage_crosswalk(self, val: pd.DataFrame):
+        self._usace_lake_gage_crosswalk = val
 
     @property
     def usbr_lake_gage_crosswalk(self):
         return self._usbr_lake_gage_crosswalk
+
+    @usbr_lake_gage_crosswalk.setter
+    def usbr_lake_gage_crosswalk(self, val: pd.DataFrame):
+        self._usbr_lake_gage_crosswalk = val
     
     @property
     def rfc_lake_gage_crosswalk(self):
         return self._rfc_lake_gage_crosswalk
+
+    @rfc_lake_gage_crosswalk.setter
+    def rfc_lake_gage_crosswalk(self, val: pd.DataFrame):
+        self._rfc_lake_gage_crosswalk = val
 
     @property
     @abstractmethod
