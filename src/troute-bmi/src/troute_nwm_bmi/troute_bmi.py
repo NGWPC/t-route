@@ -103,10 +103,10 @@ class BmiTroute(Bmi):
 
     def update(self):
         import pickle
-        with open("./catchment_ids.pkl", "w") as writer:
+        with open("./catchment_ids.pkl", "wb") as writer:
             cat_ids = self._values[BmiVars.CATCHMENT_ID]
             pickle.dump(cat_ids, writer)
-        with open("./catchment_values.pkl", "w") as writer:
+        with open("./catchment_values.pkl", "wb") as writer:
             cat_values = self._values[BmiVars.CATCHMENT_VALUE]
             pickle.dump(cat_values, writer)
         self._model.run(self._values)
