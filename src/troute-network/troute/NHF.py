@@ -59,10 +59,12 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         verbose=False,
         showtiming=False,
         from_files=True,
-        value_dict={},
-        bmi_parameters={},
+        value_dict=None,
+        bmi_parameters=None,
     ):
         """ """
+        if value_dict is None:
+            value_dict = {}
         self.supernetwork_parameters = supernetwork_parameters
         self.waterbody_parameters = waterbody_parameters
         self.data_assimilation_parameters = data_assimilation_parameters
@@ -259,7 +261,19 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # Append virtual mapping
         for k, v in merged_mapping.items():
             self._fp_outlet_crosswalk[k].extend(v)
-        
+
+        temporary_ids = set(self.div_reverse_lookup)
+        empty_links = []
+        for link_id, fp_ids in self._fp_outlet_crosswalk.items():
+            output_fp_ids = [fp_id for fp_id in fp_ids if fp_id not in temporary_ids]
+            if len(output_fp_ids) == len(fp_ids):
+                continue
+            if output_fp_ids:
+                self._fp_outlet_crosswalk[link_id] = output_fp_ids
+            else:
+                empty_links.append(link_id)
+        for link_id in empty_links:
+            del self._fp_outlet_crosswalk[link_id]
 
     def _build_div_weighting_matrix(self, virtual_flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]) -> pd.DataFrame:
         """Create weights that can be used to expand div direct runoff into vfp direct runoff.
@@ -319,7 +333,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # Warn about divs whose weights don't sum near 1 and are not forced-routing headwaters
         forced_ids = set(self.div_reverse_lookup.keys()) | set(self.div_reverse_lookup.values())
         bad_mask = ~np.isclose(known_sum, 1.0, atol=0.01)
-        bad_divs = [int(uniq_divs[i]) for i in np.where(bad_mask)[0] if int(uniq_divs[i]) not in forced_ids]
+        bad_divs = [uniq_divs[i] for i in np.where(bad_mask)[0] if uniq_divs[i] not in forced_ids]
         if bad_divs:
             LOG.warning(
                 "%d div_id(s) have percentage_area_contribution that does not sum close to 100 "
@@ -338,7 +352,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
     def _load_forcing(self, run: dict[str, Any]) -> pd.DataFrame:
         """Load channel forcing data for a run set."""
-        qlat_input_folder = run.get("qlat_input_folder", None)
+        qlat_input_folder = run.get("qlat_input_folder")
 
         if qlat_input_folder:
             qlat_input_folder = Path(qlat_input_folder)
@@ -411,7 +425,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # mapping catchments to flowpath IDs
         mapping_dict = dict(zip(
             self._dataframe['divide_id'].values,
-            self._dataframe.index.values
+            self._dataframe.index.values,
+            strict=True,
         ))
         # Vectorized divide_id -> flowpath-id lookup (replaces a per-element
         # Python loop over the full forcing). map() yields NaN for any divide_id
