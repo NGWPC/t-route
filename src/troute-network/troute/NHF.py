@@ -329,17 +329,39 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # raw values would allocate a max(div_id)-sized array.
         codes, uniq_divs = pd.factorize(vfp_map["div_id"].astype("int64").to_numpy(), sort=False)
         known_sum = np.bincount(codes, weights=self.weights)
+        vfp_count = np.bincount(codes)
+
+        # A forced-routing headwater carries a temporary div holding a single vfp with
+        # a partial share, and that share is applied against the ORIGINAL div's runoff
+        # once div_id is mapped back a few lines below. Topping it up to 1.0 would hand
+        # the headwater the whole divide on top of what its siblings already take, so
+        # these are exempt from both the redistribution and the warning.
+        forced_ids = set(self.div_reverse_lookup.keys()) | set(self.div_reverse_lookup.values())
+        forced_group = np.fromiter(
+            (d in forced_ids for d in uniq_divs), dtype=bool, count=len(uniq_divs)
+        )
 
         # Warn about divs whose weights don't sum near 1 and are not forced-routing headwaters
-        forced_ids = set(self.div_reverse_lookup.keys()) | set(self.div_reverse_lookup.values())
         bad_mask = ~np.isclose(known_sum, 1.0, atol=0.01)
-        bad_divs = [uniq_divs[i] for i in np.where(bad_mask)[0] if uniq_divs[i] not in forced_ids]
+        bad_divs = [uniq_divs[i] for i in np.where(bad_mask & ~forced_group)[0]]
         if bad_divs:
             LOG.warning(
                 "%d div_id(s) have percentage_area_contribution that does not sum close to 100 "
                 "(and are not forced-routing headwaters), e.g. %s",
                 len(bad_divs), bad_divs[:10]
             )
+
+        # In case NHF percents per div don't sum to 100, distribute the remainder
+        # evenly. Warning without redistributing means the divide's whole direct
+        # runoff is never routed: an 80% divide silently loses a fifth of its lateral
+        # inflow, everywhere downstream, for the whole run.
+        share = np.divide(
+            1 - known_sum,
+            vfp_count,
+            out=np.zeros_like(vfp_count, dtype=float),
+            where=(vfp_count != 0) & ~forced_group,
+        )
+        self.weights = self.weights + share[codes]
 
         # Reverse temporary div_id assignment for any forced-routing headwaters
         vfp_map["div_id"] = vfp_map["div_id"].replace(self.div_reverse_lookup)
