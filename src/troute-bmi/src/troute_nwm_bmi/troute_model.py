@@ -29,6 +29,53 @@ if typing.TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+def _write_merged_netcdf(files: list[Path], dest: Path) -> None:
+    """Concatenate *files* along time and write the result to *dest*."""
+    with xr.open_mfdataset(
+        files,
+        concat_dim="time",
+        combine="nested",
+        data_vars="minimal",
+        coords="minimal",
+        compat="override",
+    ) as ds:
+        # Materialize before writing. The lazy dask graph reads the same files the
+        # writer holds open, which is where an integrated ngen run hung.
+        ds.load().to_netcdf(dest)
+
+
+def _merge_into_first(files: list[Path], write: typing.Callable[[Path], None]) -> None:
+    """Replace ``files[0]`` with the merge of every file in *files*.
+
+    Two properties this has to hold, both of which the earlier in-place version and
+    its first fix got wrong:
+
+    The temporary file is created in the DESTINATION directory. Created anywhere
+    else, the final rename can cross a filesystem boundary and fail with EXDEV; the
+    lakeout branch used to borrow the stream output directory, which is a different
+    directory in every shipped config and possibly a different mount.
+
+    The rename happens BEFORE the other parts are deleted. ``Path.replace`` is
+    atomic, so up to that point every input is still on disk and a failure is
+    retryable; deleting first turned any rename error into total output loss,
+    because the exception handler then removed the merged copy as well.
+    """
+    out_path = files[0].resolve()
+    with NamedTemporaryFile(
+        suffix=out_path.suffix, dir=out_path.parent, delete=False
+    ) as tmp:
+        combo_path = Path(tmp.name)
+    try:
+        write(combo_path)
+        combo_path.chmod(out_path.stat().st_mode)
+        combo_path.replace(out_path)
+    except Exception:
+        combo_path.unlink(missing_ok=True)
+        raise
+    for f in files[1:]:
+        f.unlink()
+
+
 class BmiVars:
     CATCHMENT_ID = "catchment_water_source__id"
     CATCHMENT_VALUE = "catchment_water_source__volume_flow_rate"
@@ -461,58 +508,35 @@ class Model:
     def _merge_run_results(self):
         stream_params = self.output_parameters.get("stream_output")
         if isinstance(stream_params, dict):
-            stream_dir = stream_params["stream_output_directory"]
             stream_type = stream_params.get("stream_output_type")
             files = sorted(
-                Path(stream_dir).glob("troute_output_*" + stream_type),
+                Path(stream_params["stream_output_directory"]).glob(
+                    "troute_output_*" + stream_type
+                ),
                 key=lambda f: f.stem
             )
             if len(files) > 1:
                 start_time = time.time()
-                out_path = str(files[0].resolve())
-                with NamedTemporaryFile(
-                    suffix=stream_type,
-                    dir=stream_dir,
-                    delete=False
-                ) as tmp:
-                    combo_path = tmp.name
-                try:
+
+                def write_stream(dest: Path) -> None:
                     if stream_type == ".nc":
-                        with xr.open_mfdataset(
-                            files,
-                            concat_dim="time",
-                            combine="nested",
-                            data_vars="minimal",
-                            coords="minimal",
-                            compat="override"
-                        ) as ds:
-                            ds.load().to_netcdf(combo_path)
+                        _write_merged_netcdf(files, dest)
                     elif stream_type == ".csv":
-                        df = pd.concat(
+                        pd.concat(
                             (pd.read_csv(f) for f in files),
                             ignore_index=True
-                        )
-                        df.to_csv(combo_path, index=False)
+                        ).to_csv(dest, index=False)
                     elif stream_type == ".pkl":
-                        df = pd.concat(
+                        pd.concat(
                             (pd.read_pickle(f) for f in files),
                             ignore_index=False
-                        )
-                        df.to_pickle(combo_path)
+                        ).to_pickle(dest)
                     else:
                         err = f"Cannot merge output formats other than .nc, .csv, or .pkl. Format provided in the config file: {stream_type}"
                         LOG.error(err)
                         raise RuntimeError(err)
 
-                    original_mode = files[0].stat().st_mode
-                    Path(combo_path).chmod(original_mode)
-
-                    for f in files:
-                        f.unlink()
-                    Path(combo_path).rename(out_path)
-                except Exception:
-                    Path(combo_path).unlink(missing_ok=True)
-                    raise
+                _merge_into_first(files, write_stream)
                 self._timings["output_time"] = time.time() - start_time
         wbdy_dir = self.output_parameters.get("lakeout_output", None)
         if isinstance(wbdy_dir, Path):
@@ -522,33 +546,7 @@ class Model:
             )
             if len(files) > 1:
                 start_time = time.time()
-                out_path = str(files[0].resolve())
-                with NamedTemporaryFile(
-                    suffix=stream_type,
-                    dir=stream_dir,
-                    delete=False
-                ) as tmp:
-                    combo_path = tmp.name
-                try:
-                    with xr.open_mfdataset(
-                        files,
-                        concat_dim="time",
-                        combine="nested",
-                        data_vars="minimal",
-                        coords="minimal",
-                        compat="override"
-                    ) as ds:
-                        ds.load().to_netcdf(combo_path)
-
-                    original_mode = files[0].stat().st_mode
-                    Path(combo_path).chmod(original_mode)
-
-                    for f in files:
-                        f.unlink()
-                    Path(combo_path).rename(out_path)
-                except Exception:
-                    Path(combo_path).unlink(missing_ok=True)
-                    raise
+                _merge_into_first(files, lambda dest: _write_merged_netcdf(files, dest))
                 self._timings["output_time"] = time.time() - start_time
 
     def _is_nhf(self):

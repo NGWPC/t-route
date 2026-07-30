@@ -5,6 +5,16 @@ import numpy as np
 
 # This function was removed a while ago.
 # TODO: update these tests
+#
+# The import stayed commented out while the tests below kept calling the function,
+# so every one of them failed with NameError on every run: thirteen permanent reds
+# that said nothing about the code. Skipped at module level instead, which keeps the
+# cases around as the specification for whatever replaces the function.
+pytest.skip(
+    "distribute_catchment_discharge was removed; these cases still describe the "
+    "behavior its replacement needs and are kept for that rewrite.",
+    allow_module_level=True,
+)
 
 # from troute.nhf_discretize import distribute_catchment_discharge
 

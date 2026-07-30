@@ -148,6 +148,69 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # it exists, and only read in SCHISM data during 'assemble_forcings' if it doesn't
         self._coastal_boundary_depth_df = pd.DataFrame()
 
+    def initial_warmstate_preprocess(self, from_files, value_dict):
+        """Read the warm state, then broadcast an fp-keyed restart onto routing links.
+
+        A lite channel restart pickle stores q0 at flowpath level, keyed by a
+        'feature_id' column, but routing is indexed by 'up_node_id', so every link
+        belonging to a flowpath takes that flowpath's value. Links whose fp_id is
+        absent from the restart (e.g. synthetic waterbody headwaters) are zero-filled
+        rather than left NaN. This lives here, not in nhf_routing, so the BMI gets the
+        same treatment as the CLI: both build the network through this class.
+        """
+        super().initial_warmstate_preprocess(from_files, value_dict)
+
+        if not (from_files and self.restart_parameters.get("lite_channel_restart_file", None)):
+            return
+
+        restart_file = self.restart_parameters["lite_channel_restart_file"]
+        restart = self._q0
+        missing = [c for c in ("feature_id", "qd0", "h0", "qu0", "ql0") if c not in restart]
+        if missing:
+            raise ValueError(
+                f"lite_channel_restart_file {restart_file} is missing column(s) {missing}. "
+                "An NHF channel restart holds fp-level q0 keyed by a 'feature_id' column."
+            )
+        if restart["feature_id"].duplicated().any():
+            raise ValueError(
+                f"lite_channel_restart_file {restart_file} has duplicate feature_id values, "
+                "so a flowpath would take whichever row the merge happened to pick."
+            )
+
+        q0 = pd.merge(
+            restart,
+            self._dataframe.reset_index()[["up_node_id", "fp_id"]],
+            left_on="feature_id",
+            right_on="fp_id",
+            how="right",
+        )
+
+        # Report what the zero-fill below is covering up. A restart that is
+        # truncated, or built against a different hydrofabric, otherwise proceeds as
+        # a nominal warm start while cold-starting real channels, which shows up only
+        # as an unexplained transient. Synthetic waterbody headwaters are expected to
+        # be absent, so they are counted separately rather than raising the alarm.
+        uncovered = q0.loc[q0["feature_id"].isna(), "fp_id"]
+        if not uncovered.empty:
+            synthetic = set(getattr(self, "div_reverse_lookup", {}) or {})
+            real = uncovered[~uncovered.isin(synthetic)]
+            if not real.empty:
+                LOG.warning(
+                    "channel restart %s covers %d of %d routing links; %d link(s) on "
+                    "%d real flowpath(s) are cold-started at zero, e.g. %s. Check that "
+                    "the restart matches this hydrofabric and time.",
+                    restart_file, len(q0) - len(uncovered), len(q0), len(real),
+                    real.nunique(), sorted(real.unique().tolist())[:5],
+                )
+            LOG.debug(
+                "channel restart: %d link(s) on synthetic waterbody headwaters "
+                "zero-filled as expected", len(uncovered) - len(real),
+            )
+
+        self._q0 = (
+            q0.set_index("up_node_id")[["qd0", "h0", "qu0", "ql0"]].fillna(0).astype("float32")
+        )
+
     def extract_waterbody_connections(rows, target_col, waterbody_null=-9999):
         """Extract waterbody mapping from dataframe.
         TODO deprecate in favor of waterbody_connections property"""

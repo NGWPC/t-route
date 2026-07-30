@@ -239,6 +239,14 @@ def build_channel_initial_state(
             0, index=segment_index, columns=["qu0", "qd0", "h0"], dtype="float32",
         )
   
+    # The kernel's initial-conditions array is four wide (qu0, qd0, h0, ql0) and it
+    # assigns the whole row at once, so a three-column frame fails outright with
+    # "shape mismatch: value array of shape (n,3) could not be broadcast to
+    # indexing result of shape (n,4)". Every branch above predates ql0, which is
+    # why the V3/V4 NHD runs stopped working. Zero is what a cold start means here.
+    if "ql0" not in q0:
+        q0["ql0"] = np.float32(0)
+
     # TODO: If needed for performance improvement consider filtering mask file on read.
     if not segment_index.empty:
         q0 = q0[q0.index.isin(segment_index)]
