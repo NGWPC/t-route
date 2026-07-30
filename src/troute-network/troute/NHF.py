@@ -146,6 +146,32 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # it exists, and only read in SCHISM data during 'assemble_forcings' if it doesn't
         self._coastal_boundary_depth_df = pd.DataFrame()
 
+    def initial_warmstate_preprocess(self, from_files, value_dict):
+        """Read the warm state, then broadcast an fp-keyed restart onto routing links.
+
+        A lite channel restart pickle stores q0 at flowpath level, keyed by a
+        'feature_id' column, but routing is indexed by 'up_node_id', so every link
+        belonging to a flowpath takes that flowpath's value. Links whose fp_id is
+        absent from the restart (e.g. synthetic waterbody headwaters) are zero-filled
+        rather than left NaN. This lives here, not in nhf_routing, so the BMI gets the
+        same treatment as the CLI: both build the network through this class.
+        """
+        super().initial_warmstate_preprocess(from_files, value_dict)
+
+        if not (from_files and self.restart_parameters.get("lite_channel_restart_file", None)):
+            return
+
+        q0 = pd.merge(
+            self._q0,
+            self._dataframe.reset_index()[["up_node_id", "fp_id"]],
+            left_on="feature_id",
+            right_on="fp_id",
+            how="right",
+        )
+        self._q0 = (
+            q0.set_index("up_node_id")[["qd0", "h0", "qu0", "ql0"]].fillna(0).astype("float32")
+        )
+
     def extract_waterbody_connections(rows, target_col, waterbody_null=-9999):
         """Extract waterbody mapping from dataframe.
         TODO deprecate in favor of waterbody_connections property"""
