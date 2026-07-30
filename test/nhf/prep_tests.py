@@ -56,7 +56,10 @@ def main() -> None:
         parser.error(f"--nhf-gpkg '{args.nhf_gpkg}' does not exist. ")
 
     for test in tests:
-        FUNC_LOOKUP[test](NHF_GPKG_DEFAULT, refresh=args.refresh)
+        # gpkg_path, not NHF_GPKG_DEFAULT: --nhf-gpkg was validated above and then
+        # thrown away, so every prep read the container path regardless of what was
+        # passed and failed anywhere else.
+        FUNC_LOOKUP[test](gpkg_path, refresh=args.refresh)
 
 
 if __name__ == "__main__":

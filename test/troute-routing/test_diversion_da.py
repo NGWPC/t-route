@@ -18,11 +18,13 @@ from timeslices, or the climatological fill in forecast mode.
 from __future__ import annotations
 
 import logging
+from functools import partial
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from troute import nhd_network
 from troute.DataAssimilation import (
     _DIVERSION_MONTHLY_MEANS,
     _fill_diversion_historical_median,
@@ -262,6 +264,7 @@ class TestMassBalanceMonitor:
 
     @staticmethod
     def _obs(values):
+        """Observations on the kernel's grid: column 0 is t0, column j+1 feeds flow[j]."""
         return pd.DataFrame(
             [values],
             index=pd.Index([GAGE_LINK], dtype="int64"),
@@ -276,13 +279,51 @@ class TestMassBalanceMonitor:
             _warn_diverted_mass_imbalance(
                 self._results([0.0, 50.0, 0.0]),
                 {DONOR_FP_ID: GAGE_LINK},
-                self._obs([100.0, 10.0, 200.0]),
+                self._obs([-1.0, 100.0, 10.0, 200.0]),
                 dt=300,
             )
         assert "Mass is not conserved" in caplog.text
         assert "2 of 3" in caplog.text
         # upper bound on created water: (100 + 200) m3/s over one 300 s step each
         assert "9e+04" in caplog.text or "90000" in caplog.text
+
+    def test_observation_slice_matches_the_kernel(self, caplog):
+        """flow[j] must be paired with observation column j + 1, not column j.
+
+        The kernel runs timestep 1..nts subtracting usgs_values[gage_i, timestep] and
+        returns flowveldepth[:, 1:], so column 0 (t0, the initial-condition slot) is
+        never subtracted from anything. Pairing from column 0 shifted every clamp
+        report one timestep early: here it would blame the second step, where nothing
+        was requested, and miss the first, where 100 m3/s was taken from a dry donor.
+        """
+        from troute.routing.compute import _warn_diverted_mass_imbalance
+
+        with caplog.at_level(logging.WARNING):
+            _warn_diverted_mass_imbalance(
+                self._results([0.0, 500.0]),
+                {DONOR_FP_ID: GAGE_LINK},
+                self._obs([np.nan, 100.0, np.nan]),
+                dt=300,
+            )
+        assert "1 of 2" in caplog.text
+        assert "3e+04" in caplog.text or "30000" in caplog.text
+
+    def test_observations_shorter_than_the_run_compare_over_the_overlap(self, caplog):
+        """Fewer observation columns than routed steps must not raise.
+
+        usgs_df spans the DA window, which can end before the routing does, so the
+        two arrays are not the same length and only the overlap is comparable.
+        """
+        from troute.routing.compute import _warn_diverted_mass_imbalance
+
+        with caplog.at_level(logging.WARNING):
+            _warn_diverted_mass_imbalance(
+                self._results([0.0, 0.0, 0.0, 0.0]),
+                {DONOR_FP_ID: GAGE_LINK},
+                self._obs([np.nan, 100.0]),
+                dt=300,
+            )
+        assert "1 of 1" in caplog.text
 
     def test_dry_reach_with_nothing_to_divert_is_not_reported(self, caplog):
         """Zero flow is only a mass-balance problem if a transfer was requested.
@@ -296,7 +337,7 @@ class TestMassBalanceMonitor:
             _warn_diverted_mass_imbalance(
                 self._results([0.0, 0.0]),
                 {DONOR_FP_ID: GAGE_LINK},
-                self._obs([np.nan, 0.0]),
+                self._obs([-1.0, np.nan, 0.0]),
                 dt=300,
             )
         assert "Mass is not conserved" not in caplog.text
@@ -308,7 +349,127 @@ class TestMassBalanceMonitor:
             _warn_diverted_mass_imbalance(
                 self._results([500.0, 400.0]),
                 {DONOR_FP_ID: GAGE_LINK},
-                self._obs([100.0, 100.0]),
+                self._obs([-1.0, 100.0, 100.0]),
                 dt=300,
             )
         assert "Mass is not conserved" not in caplog.text
+
+
+class TestDonorIsItsOwnReach:
+    """The donor has to end a reach for the subtraction to reach the river.
+
+    ``compute_reach_kernel`` routes a whole reach in one call, feeding each
+    segment's outflow straight into the next as ``quc``; the diversion is
+    subtracted afterwards, when the results are copied back out. A donor in the
+    middle of a reach therefore hands its downstream neighbours the undiverted
+    flow, and the water is only removed from the donor's own reported row. Worse,
+    the next timestep is inconsistent rather than merely uncorrected: ``qup`` comes
+    from the donor's reduced previous value while ``quc`` comes from its
+    undiverted current one.
+
+    ``compute_nhd_routing_v02`` therefore folds the donors into the plan's split
+    set. These tests pin the property that makes that work.
+    """
+
+    # 5 -> 4 -> 3 -> 2 -> 1, a plain mainstem with no junctions.
+    RCONN = {1: [2], 2: [3], 3: [4], 4: [5], 5: []}
+    DONOR = 3
+
+    def _reaches(self, split_nodes):
+        path_func = partial(
+            nhd_network.split_at_gages_and_junctions, split_nodes, self.RCONN
+        )
+        return nhd_network.dfs_decomposition(self.RCONN, path_func, source_nodes=[1])
+
+    def test_unsplit_mainstem_is_one_reach(self):
+        """Without a split the donor sits mid-reach, which is the broken case."""
+        reaches = self._reaches(set())
+        assert reaches == [[5, 4, 3, 2, 1]]
+        assert reaches[0][-1] != self.DONOR
+
+    def test_donor_becomes_a_single_segment_reach(self):
+        """Split at the donor and it is its own reach, so it is that reach's tail.
+
+        The kernel gathers a reach's inflow as flowveldepth[upstream_tail, timestep]
+        at the current timestep, so once the donor is a tail the reduced value is
+        exactly what the next reach downstream routes on.
+        """
+        reaches = self._reaches({self.DONOR})
+        assert [self.DONOR] in reaches
+        # and nothing downstream of it shares the reach
+        for reach in reaches:
+            if self.DONOR in reach:
+                assert reach == [self.DONOR]
+
+    def test_every_segment_still_routed_exactly_once(self):
+        """Splitting must not drop or duplicate segments."""
+        routed = [seg for reach in self._reaches({self.DONOR}) for seg in reach]
+        assert sorted(routed) == [1, 2, 3, 4, 5]
+
+
+class TestObservationGridAlignment:
+    """The observation frame must sit on the kernel's timestep grid.
+
+    ``build_da_sets`` reads timeslices from ``t0 - timeslice_lookback_hours`` so the
+    interpolator has context before the run starts. Those padding columns used to
+    survive into the frame the kernel indexes positionally, so with the default
+    24 hour lookback every assimilated observation was read a day away from the
+    step it was applied to.
+    """
+
+    T0 = pd.Timestamp("2023-04-02 00:00")
+    DT = 300
+    NTS = 4
+
+    def _frame(self, start, periods):
+        return pd.DataFrame(
+            [np.arange(periods, dtype=float)],
+            index=pd.Index([GAGE_LINK], dtype="int64"),
+            columns=pd.date_range(start, periods=periods, freq=pd.Timedelta(seconds=self.DT)),
+        )
+
+    def _align(self, df):
+        from troute.routing.compute import _align_obs_to_model_steps
+
+        return _align_obs_to_model_steps(df, self.T0, self.DT, self.NTS)
+
+    def test_lookback_padding_is_dropped(self):
+        """Column 0 must land on t0, not on t0 minus the lookback."""
+        # two steps of pad ahead of t0, then the run window
+        padded = self._frame(self.T0 - pd.Timedelta(seconds=2 * self.DT), 2 + self.NTS + 1)
+        out = self._align(padded)
+        assert out.columns[0] == self.T0
+        assert out.shape[1] == self.NTS + 1
+        # the value the kernel now reads at model step 1 is the observation at t0+dt
+        assert out.iloc[0, 1] == padded.loc[GAGE_LINK, self.T0 + pd.Timedelta(seconds=self.DT)]
+
+    def test_already_aligned_frame_is_returned_untouched(self):
+        aligned = self._frame(self.T0, self.NTS + 1)
+        assert self._align(aligned) is aligned
+
+    def test_short_window_is_padded_with_nan_not_truncated(self):
+        """A DA window ending before the run does must not shorten the grid.
+
+        The kernel sizes gage_maxtimestep from this frame and skips NaN, so missing
+        steps have to be present and empty rather than absent.
+        """
+        out = self._align(self._frame(self.T0, 2))
+        assert out.shape[1] == self.NTS + 1
+        assert out.iloc[0, 2:].isna().all()
+
+    def test_non_datetime_columns_pass_through(self):
+        """The BMI array path can hand over positional columns already on the grid."""
+        df = pd.DataFrame([[1.0, 2.0]], index=pd.Index([GAGE_LINK], dtype="int64"))
+        assert self._align(df) is df
+
+    def test_empty_frame_passes_through(self):
+        empty = pd.DataFrame()
+        assert self._align(empty) is empty
+
+    def test_window_that_misses_the_run_is_reported(self, caplog):
+        """Silently assimilating nothing is the failure mode worth a warning."""
+        stale = self._frame(self.T0 - pd.Timedelta(days=7), 3)
+        with caplog.at_level(logging.WARNING):
+            out = self._align(stale)
+        assert out.notna().to_numpy().sum() == 0
+        assert "no observation column lines up" in caplog.text

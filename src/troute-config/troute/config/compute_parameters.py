@@ -327,6 +327,11 @@ class DiversionDA(BaseModel):
     Fill gaps in the diversion gage record with hardcoded monthly climatology, so
     forecast timesteps (which have no observations) still divert. Substituted values
     are logged; they are climatology, not observations.
+
+    Despite the field name the stored values are monthly MEANS retrieved from NWIS
+    (``_DIVERSION_MONTHLY_MEANS`` in ``troute.DataAssimilation``), and they exist for
+    the Old River gage only. A diversion gage with no entry there is skipped with a
+    warning rather than filled.
     """
 
 

@@ -1220,6 +1220,19 @@ def get_obs_from_timeslices(
     
     # interpolate and resample frequency
     buffer_df = observation_df_T.resample(frequency).asfreq()
+
+    # No column means the crosswalk matched no gage in this domain, which is an
+    # ordinary outcome for a small subset. The interpolation loop below then builds
+    # no chunks and np.concatenate raised "need at least one array to concatenate",
+    # taking the whole run down instead of reporting that there is nothing to
+    # assimilate. The all-empty-timeslice case above already returns this way.
+    if observation_df_T.shape[1] == 0:
+        LOG.debug(
+            "%s crosswalk matched no gage in the timeslice files; returning an empty "
+            "observation frame.", crosswalk_dest_field,
+        )
+        return pd.DataFrame()
+
     with Parallel(n_jobs=cpu_pool) as parallel:
         
         jobs = []

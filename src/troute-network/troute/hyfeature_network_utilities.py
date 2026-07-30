@@ -61,6 +61,11 @@ def build_da_sets(da_params, run_sets, t0):
     # User-specified DA ON/OFF preferences
     usace_da = False
     usgs_da = False
+    # Bound here, not only inside the reservoir_persistence_da branch below: the
+    # `not usbr_da` test further down runs unconditionally, so a config with
+    # streamflow nudging and no reservoir persistence DA raised UnboundLocalError
+    # before it could build a single TimeSlice set.
+    usbr_da = False
     GreatLakes_da = False
     reservoir_persistence_da = da_params.get('reservoir_da', {}).get('reservoir_persistence_da', False)
     if reservoir_persistence_da:
