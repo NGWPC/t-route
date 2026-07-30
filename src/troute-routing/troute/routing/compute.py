@@ -2000,6 +2000,13 @@ def compute_nhd_routing_v02(
     reach_data = ReachData(param_df)
     waterbody_data = WaterbodyData(waterbodies_df, waterbody_types_df)
     wbody_init = waterbodies_df[["h0", "qd0"]]
+    # The kernel reads eloss_array[segment, qlat_ts] unconditionally, so a frame with
+    # no columns is an IndexError rather than "no channel loss". Callers that do not
+    # model ET pass an empty DataFrame, which is what took the V3 and V4 NHD runs
+    # down; default it here so every caller gets the same treatment rather than each
+    # one remembering to build the zeros itself.
+    if eloss_df.empty:
+        eloss_df = pd.DataFrame(0.0, index=qlats.index, columns=qlats.columns)
     forcing_data = ForcingData(qlats, q0, eloss_df, wbody_init)
     assimilation_data = AssimilationData(
         reservoir_usgs_df = reservoir_usgs_df,
