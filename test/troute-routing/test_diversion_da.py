@@ -262,6 +262,7 @@ class TestMassBalanceMonitor:
 
     @staticmethod
     def _obs(values):
+        """Observations on the kernel's grid: column 0 is t0, column j+1 feeds flow[j]."""
         return pd.DataFrame(
             [values],
             index=pd.Index([GAGE_LINK], dtype="int64"),
@@ -276,13 +277,51 @@ class TestMassBalanceMonitor:
             _warn_diverted_mass_imbalance(
                 self._results([0.0, 50.0, 0.0]),
                 {DONOR_FP_ID: GAGE_LINK},
-                self._obs([100.0, 10.0, 200.0]),
+                self._obs([-1.0, 100.0, 10.0, 200.0]),
                 dt=300,
             )
         assert "Mass is not conserved" in caplog.text
         assert "2 of 3" in caplog.text
         # upper bound on created water: (100 + 200) m3/s over one 300 s step each
         assert "9e+04" in caplog.text or "90000" in caplog.text
+
+    def test_observation_slice_matches_the_kernel(self, caplog):
+        """flow[j] must be paired with observation column j + 1, not column j.
+
+        The kernel runs timestep 1..nts subtracting usgs_values[gage_i, timestep] and
+        returns flowveldepth[:, 1:], so column 0 (t0, the initial-condition slot) is
+        never subtracted from anything. Pairing from column 0 shifted every clamp
+        report one timestep early: here it would blame the second step, where nothing
+        was requested, and miss the first, where 100 m3/s was taken from a dry donor.
+        """
+        from troute.routing.compute import _warn_diverted_mass_imbalance
+
+        with caplog.at_level(logging.WARNING):
+            _warn_diverted_mass_imbalance(
+                self._results([0.0, 500.0]),
+                {DONOR_FP_ID: GAGE_LINK},
+                self._obs([np.nan, 100.0, np.nan]),
+                dt=300,
+            )
+        assert "1 of 2" in caplog.text
+        assert "3e+04" in caplog.text or "30000" in caplog.text
+
+    def test_observations_shorter_than_the_run_compare_over_the_overlap(self, caplog):
+        """Fewer observation columns than routed steps must not raise.
+
+        usgs_df spans the DA window, which can end before the routing does, so the
+        two arrays are not the same length and only the overlap is comparable.
+        """
+        from troute.routing.compute import _warn_diverted_mass_imbalance
+
+        with caplog.at_level(logging.WARNING):
+            _warn_diverted_mass_imbalance(
+                self._results([0.0, 0.0, 0.0, 0.0]),
+                {DONOR_FP_ID: GAGE_LINK},
+                self._obs([np.nan, 100.0]),
+                dt=300,
+            )
+        assert "1 of 1" in caplog.text
 
     def test_dry_reach_with_nothing_to_divert_is_not_reported(self, caplog):
         """Zero flow is only a mass-balance problem if a transfer was requested.
@@ -296,7 +335,7 @@ class TestMassBalanceMonitor:
             _warn_diverted_mass_imbalance(
                 self._results([0.0, 0.0]),
                 {DONOR_FP_ID: GAGE_LINK},
-                self._obs([np.nan, 0.0]),
+                self._obs([-1.0, np.nan, 0.0]),
                 dt=300,
             )
         assert "Mass is not conserved" not in caplog.text
@@ -308,7 +347,7 @@ class TestMassBalanceMonitor:
             _warn_diverted_mass_imbalance(
                 self._results([500.0, 400.0]),
                 {DONOR_FP_ID: GAGE_LINK},
-                self._obs([100.0, 100.0]),
+                self._obs([-1.0, 100.0, 100.0]),
                 dt=300,
             )
         assert "Mass is not conserved" not in caplog.text

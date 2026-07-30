@@ -1504,9 +1504,16 @@ def _warn_diverted_mass_imbalance(
             gage_link = diversion_da[sid]
             if gage_link not in usgs_df.index:
                 continue
-            requested = pd.to_numeric(
-                usgs_df.loc[gage_link], errors="coerce"
-            ).to_numpy(dtype=float)[: flow.shape[0]]
+            # Observation column 0 sits at t0 and only ever seeds the initial condition:
+            # the kernel loops timestep 1..nts subtracting usgs_values[gage_i, timestep]
+            # and then returns flowveldepth[:, 1:], so returned flow[j] was reduced by
+            # observation column j + 1. Comparing flow against column j instead reports
+            # clamp events one timestep away from where they happened.
+            obs = pd.to_numeric(usgs_df.loc[gage_link], errors="coerce").to_numpy(dtype=float)
+            requested = obs[1 : 1 + flow.shape[0]]
+            # The observations can run out before the routed flow does, so compare only
+            # over the overlap rather than letting the two shapes broadcast-error.
+            flow = flow[: requested.shape[0]]
             # A clamp event is a timestep where a transfer was actually requested and
             # the donor still came out at zero. A dry reach with nothing to divert is
             # not a mass-balance problem and must not be reported as one.
