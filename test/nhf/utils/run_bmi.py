@@ -34,7 +34,7 @@ def run_bmi(config_path: str):
 
     # Read first file to get IDs (all files share the same feature_id index)
     first_df = pd.read_csv(forcing_files[0]).set_index("feature_id")
-    feature_ids = np.array(first_df.index, dtype=np.intc)
+    feature_ids = np.array(first_df.index, dtype=np.int64)
 
     # Set the IDs (constant across all timesteps)
     model.set_value("catchment_water_source__id", feature_ids)

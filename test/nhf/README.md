@@ -272,6 +272,8 @@ python test/nhf/utils/generate_reference_data.py [OPTIONS]
 Options:
   --config PATH          Path to the t-route config YAML.
   --output-dir PATH      Directory to write gage_reference_data.nc.
+  --dv-only              Skip instantaneous-value (IV) requests; derive all values
+                         from daily means interpolated to the retrospective time index.
 ```
 
 ## `utils/generate_diagnostics.py`

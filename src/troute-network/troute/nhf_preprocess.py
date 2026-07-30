@@ -48,6 +48,16 @@ WATERBODY_DF_FIELDS = [
 RESERVOIR_DA_SITE_ID_FIELD = "site_no"
 RESERVOIR_DA_SITE_TYPE_FIELD = "da_type"
 
+def _sql_in(field: str, values, quote: bool = False) -> str:
+    """An OGR ``where`` clause restricting *field* to *values*."""
+    vals = sorted({str(v) for v in values if pd.notna(v)})
+    if quote:
+        items = ",".join("'" + v.replace("'", "''") + "'" for v in vals)
+    else:
+        items = ",".join(str(int(float(v))) for v in vals)
+    return f"{field} IN ({items})"
+
+
 def _validate_flowpaths_channel_params(flowpaths):
     """Raise if any MC-kernel channel parameter is non-finite (NaN/Inf)."""
     if flowpaths is None or flowpaths.empty:
@@ -905,13 +915,24 @@ class NHFPreprocessMixin:
             row_df = row_df.astype(self.dataframe.dtypes.to_dict())
             self.dataframe = pd.concat([self.dataframe, row_df])
 
-    def preprocess_data_assimilation(self, reservoir_da: pd.DataFrame):
+    def preprocess_data_assimilation(self, gages: pd.DataFrame, reservoir_da: pd.DataFrame):
+        # Reservoir DA needs lakes; streamflow and diversion DA do not. Returning
+        # early here for a lake-free domain used to leave self.gages empty, which
+        # silently disabled gage nudging on every network without waterbodies (the
+        # Ohio benchmark subset among them) even though its gages layer is fully
+        # populated. Skip only the reservoir crosswalks and carry on.
         if reservoir_da.empty or self.waterbody_dataframe.empty:
-            self._gages = {}
-            self._usgs_lake_gage_crosswalk = pd.DataFrame()
-            self._usace_lake_gage_crosswalk = pd.DataFrame()
-            self._usbr_lake_gage_crosswalk = pd.DataFrame()
-            self._rfc_lake_gage_crosswalk = pd.DataFrame()
+            self.usgs_lake_gage_crosswalk = pd.DataFrame()
+            self.usace_lake_gage_crosswalk = pd.DataFrame()
+            self.usbr_lake_gage_crosswalk = pd.DataFrame()
+            self.rfc_lake_gage_crosswalk = pd.DataFrame()
+            if not self.waterbody_dataframe.empty:
+                LOG.warning(
+                    "reservoir DA: no reservoir_da records for %d waterbody(s); "
+                    "reservoir assimilation is disabled for this run.",
+                    len(self.waterbody_dataframe),
+                )
+            self._preprocess_streamflow_and_diversion_da(gages)
             return
 
         ### reservoir_da validation and formatting ###
@@ -1069,4 +1090,255 @@ class NHFPreprocessMixin:
             ["reservoir_type"]
         ].copy()
 
-        self._gages = {}
+        self._preprocess_streamflow_and_diversion_da(gages)
+
+    def _gage_selection_rank(self, sub: pd.DataFrame) -> pd.DataFrame:
+        """Rank co-located gages so the survivor is chosen deterministically.
+
+        Several gages can sit on one virtual flowpath (4096 of them across 1729
+        flowpaths on the CONUS hydrofabric), and only one observation can be
+        assimilated per routing link. Nothing in the gages layer separates them
+        positionally: their ``segment_order`` and ``dn_virtual_nex_id`` are identical
+        within every colliding group, so they cannot be placed on distinct sub-links.
+
+        The survivor is therefore chosen by, in order:
+
+        1. an active gage over a discontinued one, since assimilation needs current
+           observations;
+        2. the gage physically closest to the flowpath's downstream nexus, which is
+           the one that best represents flow at the outlet link the gage is placed on;
+        3. the lowest site number, purely so the result cannot depend on the order
+           rows happen to appear in the geopackage.
+
+        On CONUS this leaves 85 groups undecided after (1) and (2), and none after
+        (3). Distance is computed only for colliding gages, so the geometry read
+        covers about 1700 nexus points rather than the full 1.65 M.
+        """
+        sub = sub.copy()
+        sub["_inactive"] = (sub["status"] != "USGS-active").astype("int8")
+        sub["_dist_m"] = np.inf
+
+        colliding = sub[sub.duplicated("virtual_fp_id", keep=False)]
+        nex_ids = sorted(
+            {int(x) for x in colliding["dn_virtual_nex_id"].dropna().unique()}
+        )
+        if nex_ids:
+            try:
+                geo = self.supernetwork_parameters["geo_file_path"]
+                pts = self._read_nexus_points(geo, nex_ids)
+                if pts is not None and not pts.empty:
+                    gg = gpd.read_file(
+                        geo, layer="gages",
+                        where=_sql_in("site_no", colliding["site_no"], quote=True),
+                    )
+                    sub = self._attach_nexus_distance(sub, gg, pts)
+            except Exception as exc:  # geometry is an optimisation, never a hard dep
+                LOG.warning(
+                    "gages: could not rank co-located gages by distance to their "
+                    "downstream nexus (%s); falling back to status and site number.",
+                    exc,
+                )
+        return sub.sort_values(["_inactive", "_dist_m", "site_no"])
+
+    @staticmethod
+    def _read_nexus_points(geo_file_path, nex_ids: list[int]):
+        """Geometry for just the virtual nexus points named, in OGR-sized chunks."""
+        frames = []
+        for i in range(0, len(nex_ids), 400):
+            chunk = nex_ids[i : i + 400]
+            frames.append(
+                gpd.read_file(
+                    geo_file_path, layer="virtual_nexus",
+                    where=_sql_in("virtual_nex_id", chunk),
+                    columns=["virtual_nex_id"],
+                )
+            )
+        if not frames:
+            return None
+        return pd.concat(frames).drop_duplicates("virtual_nex_id").set_index("virtual_nex_id")
+
+    @staticmethod
+    def _attach_nexus_distance(sub, gage_points, nexus_points):
+        """Set ``_dist_m`` to each gage's distance from its downstream nexus."""
+        pts = gage_points[["site_no", "geometry"]].dropna(subset=["geometry"])
+        merged = sub.merge(pts, on="site_no", how="left", suffixes=("", "_pt"))
+        merged = merged.merge(
+            nexus_points[["geometry"]].rename(columns={"geometry": "_nex_geom"}),
+            left_on="dn_virtual_nex_id", right_index=True, how="left",
+        )
+        ok = merged["geometry"].notna() & merged["_nex_geom"].notna()
+        if not ok.any():
+            return sub
+        # Equal-area projection so the distance is in metres, not degrees.
+        crs = gage_points.crs
+        a = gpd.GeoSeries(merged.loc[ok, "geometry"].values, crs=crs).to_crs(5070)
+        b = gpd.GeoSeries(merged.loc[ok, "_nex_geom"].values, crs=crs).to_crs(5070)
+        merged.loc[ok, "_dist_m"] = a.distance(b, align=False).to_numpy()
+        return merged.drop(columns=["_nex_geom"], errors="ignore")
+
+    @staticmethod
+    def _one_link_per_gage(sub: pd.DataFrame, label: str, quiet: bool = False) -> pd.DataFrame:
+        """Reduce a gage-to-link join to exactly one routing link per gage.
+
+        ``vfp_id`` is not unique in the link table: flowpaths longer than the
+        discretization length are split into several routing links that all inherit
+        the parent ``vfp_id``. Joining on it alone is therefore one-to-many, and
+        indexing the result on ``up_node_id`` registered every gage at every link of
+        its flowpath (a median of 8 links per gage on the CONUS hydrofabric). That
+        assimilated a single observation at many consecutive segments and split the
+        cached execution plan at all of them.
+
+        The gage's own ``segment_order`` is not usable for placement: it is a
+        different quantity from the link table's ``segment_order`` and matches only
+        about a fifth of gages. The outlet link (highest ``segment_order`` within the
+        flowpath) is the placement used elsewhere in this module for diversion gages.
+
+        ``quiet`` suppresses the summary logs for callers that re-resolve the same
+        join for a different purpose, so the counts are reported once rather than
+        once per caller with a label that misdescribes what was counted.
+        """
+        if sub.empty:
+            return sub
+        placed = sub.dropna(subset=["up_node_id"])
+        n_unplaced = sub["site_no"].nunique() - placed["site_no"].nunique()
+        if n_unplaced and not quiet:
+            LOG.warning(
+                "gages: %d %s gage(s) have no routing link for their virtual flowpath "
+                "and are excluded from streamflow DA", n_unplaced, label,
+            )
+        if placed.empty:
+            return placed
+        outlet = placed.loc[placed.groupby("site_no")["link_segment_order"].idxmax()].copy()
+        outlet["up_node_id"] = outlet["up_node_id"].astype("int64")
+        n_collisions = len(outlet) - outlet["up_node_id"].nunique()
+        if n_collisions:
+            # Restore the ranking. The groupby above sorts by site_no, which discards
+            # the order _gage_selection_rank established, so without this the dedupe
+            # below would keep the lowest site number rather than the best gage.
+            rank_cols = [c for c in ("_inactive", "_dist_m", "site_no") if c in outlet]
+            outlet = outlet.sort_values(rank_cols)
+            # Only one observation can be assimilated per link, so co-located gages
+            # must be reduced to one. `outlet` arrives ordered by
+            # _gage_selection_rank (active, then closest to the downstream nexus,
+            # then site number), so keeping the first is a deterministic choice
+            # rather than whichever row the geopackage happened to list last.
+            dropped = outlet[outlet.duplicated("up_node_id", keep="first")]
+            outlet = outlet.drop_duplicates("up_node_id", keep="first")
+            if not quiet:
+                LOG.warning(
+                    "gages: %d %s gage(s) share a routing link with another gage; "
+                    "keeping the active gage nearest the downstream nexus and "
+                    "dropping the rest, e.g. %s",
+                    n_collisions, label, sorted(dropped["site_no"].astype(str))[:5],
+                )
+        # Worth an INFO line of its own: this count is how many links the cached
+        # execution plan splits reaches at, so a jump here is a routing slowdown
+        # with no other visible cause.
+        if not quiet:
+            LOG.info(
+                "gages: %d %s gage(s) placed on %d routing link(s)",
+                len(outlet), label, outlet["up_node_id"].nunique(),
+            )
+        return outlet
+
+    def _preprocess_streamflow_and_diversion_da(self, gages: pd.DataFrame) -> None:
+        """Resolve the gage crosswalk and the diversion map.
+
+        Independent of reservoir DA: a network with no waterbodies still has gages.
+        """
+        # Streamflow DA
+        if gages.empty:
+            self.gages = {}
+            # An empty DataFrame, not an empty dict: consumers call .empty on this.
+            self.canadian_gage_df = pd.DataFrame(columns=["gages"])
+            gages_join = pd.DataFrame()
+        else:
+            # The gages layer carries its own segment_order, which is a different
+            # quantity from the link table's, so rename to avoid a _x/_y collision.
+            link_cols = self.dataframe.reset_index()[
+                ["vfp_id", "up_node_id", "segment_order"]
+            ].rename(columns={"segment_order": "link_segment_order"})
+            gages_join = gages.merge(
+                link_cols,
+                left_on="virtual_fp_id",
+                right_on="vfp_id",
+                how="left",
+            )
+            usgs_sub = self._one_link_per_gage(
+                self._gage_selection_rank(
+                    gages_join[
+                        gages_join["status"].isin(["USGS-active", "USGS-discontinued"])
+                    ]
+                ),
+                "USGS",
+            )
+            canada_sub = self._one_link_per_gage(
+                self._gage_selection_rank(
+                    gages_join[gages_join["status"] == "CADWR_ENVCA"]
+                ),
+                "Canadian",
+            )
+            self.gages = (
+                usgs_sub.set_index("up_node_id")[["site_no"]]
+                .rename(columns={"site_no": "gages"})
+                .rename_axis(None, axis=0)
+                .to_dict()
+            )
+            self.canadian_gage_df = (
+                canada_sub.set_index("up_node_id")[["site_no"]]
+                .rename(columns={"site_no": "gages"})
+            )
+
+        self._resolve_diversion_da(gages_join)
+
+    def _resolve_diversion_da(self, gages_join: pd.DataFrame) -> None:
+        """Transform fp_id to self.dataframe link ID and gage site_no to link ID of gage link."""
+        self._diversion_site_to_node: dict[str, int] = {}
+        self.diversion_da: dict[int, int] = {}
+        _diversion_cfg = self.data_assimilation_parameters.get("diversion_da", None)
+        if not _diversion_cfg:
+            return
+        _crosswalk = _diversion_cfg.get("diversion_gage_crosswalk", {})
+        if not _crosswalk:
+            return
+
+        # Map gage site_no to network links
+        # Must use the SAME placement rule as the streamflow crosswalk. The gage's
+        # observations are looked up in usgs_df by this link, and usgs_df places the
+        # gage at its flowpath OUTLET. Taking the first joined sub-link here instead
+        # meant the two disagreed on any multi-link flowpath, so the diversion could
+        # not find its observations and silently applied nothing.
+        self._diversion_site_to_node = (
+            self._one_link_per_gage(self._gage_selection_rank(gages_join), "diversion", quiet=True)
+            .set_index("site_no")["up_node_id"]
+            .astype("int64")
+            .to_dict()
+        )
+
+        # Find most downstream routing link for each diversion flowpath
+        fp_ids_needed = set(_crosswalk.keys())
+        fp_outlet_nodes = (
+            self._dataframe[self._dataframe["fp_id"].isin(fp_ids_needed)]
+            .groupby("fp_id")["segment_order"]
+            .idxmax()
+            .astype(int)
+            .to_dict()
+        )
+
+        # Create updated diversion_da dict
+        for fp_id, site_no in _crosswalk.items():
+            from_id = fp_outlet_nodes.get(fp_id)
+            if from_id is None:
+                raise ValueError(
+                    f"diversion_gage_crosswalk: fp_id {fp_id} not found in network."
+                )
+            gage_node = self._diversion_site_to_node.get(site_no)
+            if gage_node is None:
+                raise ValueError(
+                    f"diversion_gage_crosswalk: site_no '{site_no}' not found in gages."
+                )
+            self.diversion_da[from_id] = gage_node
+            LOG.debug(
+                "Diversion configured: fp_id %s (node %s) -> gage %s (node %s)",
+                fp_id, from_id, site_no, gage_node,
+            )

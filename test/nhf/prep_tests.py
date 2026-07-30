@@ -8,6 +8,7 @@ from .great_lakes.test_great_lakes import setup as great_lakes_setup
 from .four_lakes.test_four_lakes import setup as four_lakes_setup
 from .conus.test_conus import setup as conus_setup
 from .conus.test_conus_reservoir_da import setup as conus_reservoir_da_setup
+from .old_river.test_old_river import setup as old_river_setup
 
 NHF_GPKG_DEFAULT = "/hydrofabric/nhf_1.2.1.gpkg"
 FUNC_LOOKUP = {
@@ -17,7 +18,8 @@ FUNC_LOOKUP = {
     "great_lakes": great_lakes_setup,
     "four_lakes": four_lakes_setup,
     "conus": conus_setup,
-    "conus_reservoir_da": conus_reservoir_da_setup
+    "conus_reservoir_da": conus_reservoir_da_setup,
+    "old_river": old_river_setup
 }
 ALL_TESTS = list(FUNC_LOOKUP.keys())
 
@@ -54,7 +56,10 @@ def main() -> None:
         parser.error(f"--nhf-gpkg '{args.nhf_gpkg}' does not exist. ")
 
     for test in tests:
-        FUNC_LOOKUP[test](NHF_GPKG_DEFAULT, refresh=args.refresh)
+        # gpkg_path, not NHF_GPKG_DEFAULT: --nhf-gpkg was validated above and then
+        # thrown away, so every prep read the container path regardless of what was
+        # passed and failed anywhere else.
+        FUNC_LOOKUP[test](gpkg_path, refresh=args.refresh)
 
 
 if __name__ == "__main__":

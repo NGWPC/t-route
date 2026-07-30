@@ -50,6 +50,26 @@ def get_downstream_fp_ids(gpkg_path: str, seed_fp_ids: list[int], max_depth: int
     conn.close()
     return [r[0] for r in rows]
 
+def get_offnetwork_upstreams(gpkg_path: str, fp_ids: list[int]) -> list[int]:
+    """Get all flowpaths tributary to a list of flowpaths.
+    
+    This list of flowpaths returned by this method can be forced with full
+    retrospective outflows as their qlats so that large upstream networks do
+    not need to be run to simulate retrospective scenarios.
+    """
+    fp_set = set(fp_ids)
+    placeholders = ",".join("?" * len(fp_set))
+    conn = sqlite3.connect(gpkg_path)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT fp_id FROM flowpaths
+        WHERE fp_to_id IN ({placeholders})
+        """,
+        list(fp_set),
+    ).fetchall()
+    conn.close()
+    return [r[0] for r in rows if r[0] not in fp_set]
+
 
 def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFrame]:
     """Extract all layers for the given flowpath IDs."""

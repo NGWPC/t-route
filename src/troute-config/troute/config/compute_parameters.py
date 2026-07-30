@@ -1,3 +1,5 @@
+import logging
+
 from pydantic import BaseModel, DirectoryPath, FilePath, Field, field_validator, model_validator, ConfigDict
 from datetime import datetime
 
@@ -5,6 +7,8 @@ from typing import Any, Dict, Optional, List, Union
 from typing_extensions import Literal
 
 from ._validators import coerce_datetime
+
+LOG = logging.getLogger("TROUTE")
 
 
 # ---------------------------- Compute Parameters ---------------------------- #
@@ -289,6 +293,48 @@ class ReservoirRfcParametersDisabled(BaseModel):
     reservoir_rfc_forecasts: Literal[False] = False
 
 
+class DiversionDA(BaseModel):
+    """
+    Parameters controlling diversion DA: a managed transfer of flow out of one
+    flowpath, measured by a streamgage, as at the Old River Control Structure.
+
+    The observed discharge is subtracted from the donor flowpath in the routing
+    kernel. The receiving river gains the same water through ordinary streamflow
+    nudging at the diversion gage, which sits on a headwater flowpath of the
+    receiving system, so ``streamflow_da.streamflow_nudging`` must be enabled for
+    the transfer to conserve mass.
+    """
+    diversion_gage_crosswalk: Dict[int, str] = {}
+    """
+    Donor flowpath ``fp_id`` -> site number of the gage measuring the diverted flow.
+
+    The full observed discharge is removed from the donor, which assumes the model
+    routes no flow of its own down the diversion path. That holds where the diversion
+    gage sits on a headwater flowpath, as it does at Old River. If it were ever mapped
+    to a gage with upstream contributing area, the correction would need to be the
+    observed discharge minus the simulated flow already leaving the donor, not the
+    observed discharge alone.
+
+    Mass is conserved except where the observed diversion exceeds the routed donor
+    flow: the donor is then floored at zero and gives up less than the receiving river
+    gains. Capping the transfer at the routed flow would require the donor's discharge
+    inside the receiving reach's compute job, which crosses the parallel
+    decomposition, so the condition is reported at WARNING with the volume involved
+    rather than enforced. It has not been observed over the available record.
+    """
+    persist_historical_median: bool = False
+    """
+    Fill gaps in the diversion gage record with hardcoded monthly climatology, so
+    forecast timesteps (which have no observations) still divert. Substituted values
+    are logged; they are climatology, not observations.
+
+    Despite the field name the stored values are monthly MEANS retrieved from NWIS
+    (``_DIVERSION_MONTHLY_MEANS`` in ``troute.DataAssimilation``), and they exist for
+    the Old River gage only. A diversion gage with no entry there is skipped with a
+    warning rather than filled.
+    """
+
+
 class ReservoirDA(BaseModel):
     """
     Parameters controlling reservoir DA.
@@ -353,6 +399,7 @@ class DataAssimilationParameters(BaseModel):
     
     streamflow_da: StreamflowDA = None
     reservoir_da: Optional[ReservoirDA] = None
+    diversion_da: Optional[DiversionDA] = None
 
     qc_threshold: float = Field(1, ge=0, le=1)
     """
@@ -367,8 +414,36 @@ class DataAssimilationParameters(BaseModel):
         if values.get("qc_threshold") is None:
             values["qc_threshold"] = 1
         if values.get("timeslice_lookback_hours") is None:
-            values["timeslice_lookback_hours"] = 24 
+            values["timeslice_lookback_hours"] = 24
         return values
+
+    @model_validator(mode='after')
+    def check_diversion_has_an_observation_source(self):
+        """A diversion needs the gage's discharge to reach the observation frame.
+
+        The kernel subtracts the observed diversion from the donor flowpath. Nothing
+        adds it to the receiving river in code: the gage sits on a headwater of the
+        receiving system, so imposing the observed discharge there routes the water
+        down through the existing topology. Either source populates that row,
+        ``streamflow_nudging`` from timeslices or ``persist_historical_median`` from
+        climatology, and both conserve the transfer.
+
+        With neither set the observation frame stays empty, the kernel map resolves
+        to nothing and the diversion silently does not happen, which is worth saying
+        out loud rather than leaving to be discovered in the output.
+        """
+        diversion = self.diversion_da
+        if diversion is None or not diversion.diversion_gage_crosswalk:
+            return self
+        nudging = bool(self.streamflow_da and self.streamflow_da.streamflow_nudging)
+        if not nudging and not diversion.persist_historical_median:
+            LOG.warning(
+                "diversion_da.diversion_gage_crosswalk is set but neither "
+                "streamflow_da.streamflow_nudging nor "
+                "diversion_da.persist_historical_median is enabled, so no discharge "
+                "is available at the diversion gage and no flow will be diverted."
+            )
+        return self
 
 
 class ForcingParameters(BaseModel):

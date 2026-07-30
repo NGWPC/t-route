@@ -452,9 +452,12 @@ class AbstractNetwork(ABC):
         pass
 
     @property
-    @abstractmethod
     def gages(self):
-        pass
+        return self._gages
+
+    @gages.setter
+    def gages(self, v):
+        self._gages = v
 
     @property
     def dataframe(self):
@@ -514,6 +517,10 @@ class AbstractNetwork(ABC):
     @property
     def canadian_gage_df(self):
         return self._canadian_gage_link_df
+
+    @canadian_gage_df.setter
+    def canadian_gage_df(self, v):
+        self._canadian_gage_link_df = v
 
         
     def set_synthetic_wb_segments(self, synthetic_wb_segments, synthetic_wb_id_offset):

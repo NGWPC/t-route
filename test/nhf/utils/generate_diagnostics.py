@@ -731,9 +731,10 @@ def generate_reference_gage_plots(run_context: RunContext) -> None:
         ax.set_xlabel("Time")
         ax.set_ylabel("Discharge (cfs)")
         ax.legend()
+        ax.set_title(f"USGS Site {site_no} (fp_id: {fp_id})")
         ax.set_facecolor("whitesmoke")
         fig.tight_layout()
-        fig.savefig(ref_out_dir / f"{fp_id}.png")
+        fig.savefig(ref_out_dir / f"{site_no}.png")
 
 
 def plot_reach_mass_conservation(df: pd.DataFrame, out_path: Path) -> None:

@@ -113,6 +113,7 @@ def nhf_routing(argv):
         )
     
     forcing_end_time = time.time()
+
     task_times['forcing_time'] += forcing_end_time - network_end_time
 
     parallel_compute_method = compute_parameters.get("parallel_compute_method", None)
@@ -228,7 +229,11 @@ def nhf_routing(argv):
             firstRun,
             logFileName,
             # flowveldepth_interorder=network.flowveldepth_interorder,
-            qlat_add_loc = "bottom"  # All NHF lats go in bottom
+            qlat_add_loc = "bottom",  # All NHF lats go in bottom
+            diversion_da=network.diversion_da,
+            # Static split points for the cached execution plan: every gage the
+            # network carries, not just those with observations this window.
+            gage_segments=set(network.gages.get("gages", network.gages) or ())
         )
         
         route_end_time = time.time()

@@ -28,6 +28,10 @@ def _bare_nhf_with_dataframe(dataframe):
     """An NHF instance with only the state _build_div_weighting_matrix needs."""
     net = NHF.__new__(NHF)
     net._dataframe = dataframe
+    # Set by __init__ before _build_div_weighting_matrix runs, and read there to
+    # exempt forced-routing headwaters from the weight-sum warning. Absent here the
+    # method raised AttributeError before reaching what these tests measure.
+    net.div_reverse_lookup = {}
     return net
 
 

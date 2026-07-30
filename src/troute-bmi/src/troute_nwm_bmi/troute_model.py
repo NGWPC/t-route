@@ -1,6 +1,7 @@
 """Basic Model Interface backing model for NGEN t-route."""
 from __future__ import annotations
 import math
+from tempfile import NamedTemporaryFile
 import psutil
 import time
 import typing
@@ -26,6 +27,53 @@ LOG = logging.getLogger("TROUTE")
 
 if typing.TYPE_CHECKING:
     from numpy.typing import NDArray
+
+
+def _write_merged_netcdf(files: list[Path], dest: Path) -> None:
+    """Concatenate *files* along time and write the result to *dest*."""
+    with xr.open_mfdataset(
+        files,
+        concat_dim="time",
+        combine="nested",
+        data_vars="minimal",
+        coords="minimal",
+        compat="override",
+    ) as ds:
+        # Materialize before writing. The lazy dask graph reads the same files the
+        # writer holds open, which is where an integrated ngen run hung.
+        ds.load().to_netcdf(dest)
+
+
+def _merge_into_first(files: list[Path], write: typing.Callable[[Path], None]) -> None:
+    """Replace ``files[0]`` with the merge of every file in *files*.
+
+    Two properties this has to hold, both of which the earlier in-place version and
+    its first fix got wrong:
+
+    The temporary file is created in the DESTINATION directory. Created anywhere
+    else, the final rename can cross a filesystem boundary and fail with EXDEV; the
+    lakeout branch used to borrow the stream output directory, which is a different
+    directory in every shipped config and possibly a different mount.
+
+    The rename happens BEFORE the other parts are deleted. ``Path.replace`` is
+    atomic, so up to that point every input is still on disk and a failure is
+    retryable; deleting first turned any rename error into total output loss,
+    because the exception handler then removed the merged copy as well.
+    """
+    out_path = files[0].resolve()
+    with NamedTemporaryFile(
+        suffix=out_path.suffix, dir=out_path.parent, delete=False
+    ) as tmp:
+        combo_path = Path(tmp.name)
+    try:
+        write(combo_path)
+        combo_path.chmod(out_path.stat().st_mode)
+        combo_path.replace(out_path)
+    except Exception:
+        combo_path.unlink(missing_ok=True)
+        raise
+    for f in files[1:]:
+        f.unlink()
 
 
 class BmiVars:
@@ -122,7 +170,16 @@ class Model:
         self._data_assimilation = DataAssimilation(
             network=self._network,
             data_assimilation_parameters=self.data_assimilation_parameters,
-            run_parameters={},
+            # Not an empty dict: the observation readers need dt and nts. With them
+            # missing, file-based nudging computed its resampling frequency from
+            # dt=None, and the climatological diversion fallback fell back to
+            # dt=300/nts=0 and built a single column, which the kernel (indexing from
+            # timestep 1) never reads.
+            run_parameters={
+                "dt": self.dt,
+                "nts": self.nts,
+                "cpu_pool": self.cpu_pool,
+            },
             waterbody_parameters=self.waterbody_parameters,
             from_files=True,
             value_dict=None,
@@ -179,7 +236,10 @@ class Model:
                 qlats=run.get("qlats", qlats),
                 eloss_df=self._network._eloss if self._network._eloss is not None else pd.DataFrame(0.0, index=qlats.index, columns=qlats.columns),
                 ssout=self.forcing_parameters.get("ssout"),
-                usgs_df=self._data_assimilation.usgs_df,
+                # The window-sliced frame computed above, not the full one. Passing
+                # the unsliced frame restarted nudging and the donor subtraction from
+                # observation column zero on every BMI update.
+                usgs_df=usgs_df,
                 lastobs_df=self._data_assimilation.lastobs_df,
                 reservoir_usgs_df=self._data_assimilation.reservoir_usgs_df,
                 reservoir_usgs_param_df=self._data_assimilation.reservoir_usgs_param_df,
@@ -207,6 +267,18 @@ class Model:
                 coastal_boundary_depth_df=self._network.coastal_boundary_depth_df,
                 unrefactored_topobathy_df=self._network.unrefactored_topobathy_df,
                 qlat_add_loc=qlat_add_loc,
+                # Without this the parameter defaults to an empty dict and the
+                # diversion is silently disabled under BMI, which is the path ngen
+                # drives. NHF only: other network types do not resolve this map.
+                diversion_da=getattr(self._network, "diversion_da", {}) or {},
+                # Same static split points as the -V5 driver: the plan is cached
+                # across updates, so it must not depend on this window's data.
+                gage_segments=set(
+                    (getattr(self._network, "gages", None) or {}).get(
+                        "gages", getattr(self._network, "gages", None) or {}
+                    )
+                    or ()
+                ),
             )
 
             # create initial conditions for next loop iteration
@@ -436,66 +508,45 @@ class Model:
     def _merge_run_results(self):
         stream_params = self.output_parameters.get("stream_output")
         if isinstance(stream_params, dict):
-            stream_dir = stream_params["stream_output_directory"]
             stream_type = stream_params.get("stream_output_type")
             files = sorted(
-                Path(stream_dir).glob("troute_output_*" + stream_type),
+                Path(stream_params["stream_output_directory"]).glob(
+                    "troute_output_*" + stream_type
+                ),
                 key=lambda f: f.stem
             )
             if len(files) > 1:
                 start_time = time.time()
-                orig = files[0]
-                files[0] = orig.rename(orig.with_stem('_' + orig.stem))
-                if stream_type == ".nc":
-                    with xr.open_mfdataset(
-                        files,
-                        concat_dim="time",
-                        combine="nested",
-                        data_vars="minimal",
-                        coords="minimal",
-                        compat="override"
-                    ) as ds:
-                        ds.to_netcdf(orig)
-                elif stream_type == ".csv":
-                    df = pd.concat(
-                        (pd.read_csv(f) for f in files),
-                        ignore_index=True
-                    )
-                    df.to_csv(orig, index=False)
-                elif stream_type == ".pkl":
-                    df = pd.concat(
-                        (pd.read_pickle(f) for f in files),
-                        ignore_index=False
-                    )
-                    df.to_pickle(orig)
-                else:
-                    err = f"Cannot merge output formats other than .nc, .csv, or .pkl. Format provided in the config file: {stream_type}"
-                    LOG.error(err)
-                    raise RuntimeError(err)
-                for f in files:
-                    f.unlink()
+
+                def write_stream(dest: Path) -> None:
+                    if stream_type == ".nc":
+                        _write_merged_netcdf(files, dest)
+                    elif stream_type == ".csv":
+                        pd.concat(
+                            (pd.read_csv(f) for f in files),
+                            ignore_index=True
+                        ).to_csv(dest, index=False)
+                    elif stream_type == ".pkl":
+                        pd.concat(
+                            (pd.read_pickle(f) for f in files),
+                            ignore_index=False
+                        ).to_pickle(dest)
+                    else:
+                        err = f"Cannot merge output formats other than .nc, .csv, or .pkl. Format provided in the config file: {stream_type}"
+                        LOG.error(err)
+                        raise RuntimeError(err)
+
+                _merge_into_first(files, write_stream)
                 self._timings["output_time"] = time.time() - start_time
         wbdy_dir = self.output_parameters.get("lakeout_output", None)
-        if isinstance(wbdy_dir, str):
+        if isinstance(wbdy_dir, Path):
             files = sorted(
                 Path(wbdy_dir).glob("troute_lakeout_*.nc"),
                 key=lambda f: f.stem
             )
             if len(files) > 1:
                 start_time = time.time()
-                orig = files[0]
-                files[0] = orig.rename(orig.with_stem('_' + orig.stem))
-                with xr.open_mfdataset(
-                    files,
-                    concat_dim="time",
-                    combine="nested",
-                    data_vars="minimal",
-                    coords="minimal",
-                    compat="override"
-                ) as ds:
-                    ds.to_netcdf(orig)
-                for f in files:
-                    f.unlink()
+                _merge_into_first(files, lambda dest: _write_merged_netcdf(files, dest))
                 self._timings["output_time"] = time.time() - start_time
 
     def _is_nhf(self):

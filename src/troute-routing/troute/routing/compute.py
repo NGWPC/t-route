@@ -158,6 +158,7 @@ class ComputeConfig:
     compute_func_name: str
     subnetwork_target_size: int
     backend: Literal["loky", "threading", "multiprocessing"] = "loky"
+    diversion_da: dict[ReachId, int] = field(default_factory=dict)
 
     def __post_init__(self):
         # Control serial execution by forcing single worker instead of a code change.
@@ -463,6 +464,14 @@ class AssimilationData:
     great_lakes_climatology_df: pd.DataFrame
     usgs_df: pd.DataFrame
     lastobs_df: pd.DataFrame
+    # Every gage the network carries, independent of which ones have observations
+    # this window. The execution plan splits reaches here rather than at usgs_df's
+    # index, because the plan is a topological decomposition that is cached and
+    # reused for the whole run: keying it on per-window data availability means a
+    # first window with no observations produces a plan with no gage splits, and
+    # nothing rebuilds it when observations return. Defaults to empty so callers
+    # that predate the field fall back to the observation frame.
+    gage_segments: set = field(default_factory=set)
 
 
 @dataclass
@@ -538,6 +547,7 @@ class ComputeInputs:
     da_check_gage: int = -1
     from_files: bool = True
     qlat_add_loc: int = 1
+    diversion_da: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -600,7 +610,7 @@ class ExecutionPlan:
                 subnetwork_target_size,
             )
         elif parallel_compute_method in ["serial", "by-network", "bmi"]:
-            self._init_treewise_plan(topology, reach_data, waterbody_data)
+            self._init_treewise_plan(topology, reach_data, waterbody_data, assimilation_data)
         self._init_boundary_conditions()
 
     def _build_compute_job(
@@ -660,16 +670,25 @@ class ExecutionPlan:
         topology: NetworkTopology,
         reach_data: ReachData,
         waterbody_data: WaterbodyData,
+        assimilation_data: AssimilationData,
     ) -> None:
         """Build a single-level execution plan with one computation job per tree."""
+        # Represent each whole tree as a single partition at level 0
+        partitions_by_level: dict[int, dict[int, set]] = {
+            0: {tw: set(topology.connections_by_tw[tw]) for tw in topology.tailwaters}
+        }
+        # Split at waterbodies, gages, etc
+        computable_routing_paths = self._clean_compute_jobs(
+            partitions_by_level, topology, waterbody_data, assimilation_data
+        )
         self.batches = {0: []}
-        for i in topology.tailwaters:
+        for tw, routing_paths in computable_routing_paths[0].items():
             job = self._build_compute_job(
-                topology.paths_by_tailwater[i],
-                topology.connections_by_tw[i],
+                routing_paths,
+                topology.connections_by_tw[tw],
                 waterbody_data,
                 reach_data,
-                [i],
+                [tw],
             )
             self.batches[0].append(job)
 
@@ -732,7 +751,21 @@ class ExecutionPlan:
         waterbody_data: WaterbodyData,
         assimilation_data: AssimilationData,
     ) -> dict[RoutingLevel, dict[TailwaterId, OrderedRoutingPaths]]:
-        """Decompose each partition into ordered routing paths split at gages, waterbodies, and/or junctions."""
+        """Decompose each partition into ordered routing paths split at gages, waterbodies, and/or junctions.
+
+        Gage split points come from the network's static gage set where it is
+        available, falling back to this window's observation frame. The two are the
+        same set in normal operation, because the observation frame is built by
+        left-joining the gage crosswalk, so a gage with no data still gets an all-NaN
+        row. They diverge only when a window yields no observations at all, and since
+        this plan is cached for the whole run, keying it on the observation frame
+        meant one empty first window produced a plan that never splits at gages, even
+        after the feed recovered.
+        """
+        gage_segments = set(assimilation_data.gage_segments) or set(
+            assimilation_data.usgs_df.index.to_numpy()
+        )
+        has_gages = bool(gage_segments)
         computable_routing_paths = defaultdict(dict)
         for level, partitions in partitions_by_level.items():
             for partition_tailwater, partition in partitions.items():
@@ -741,31 +774,22 @@ class ExecutionPlan:
                     for k in partition
                     if k in topology.reverse_connections
                 }
-                if (
-                    not waterbody_data.dataframe.empty
-                    and not assimilation_data.usgs_df.empty
-                ):
+                if not waterbody_data.dataframe.empty and has_gages:
                     path_func = partial(
                         nhd_network.split_at_gages_waterbodies_and_junctions,
-                        set(assimilation_data.usgs_df.index.to_numpy()),
+                        gage_segments,
                         set(waterbody_data.dataframe.index.to_numpy()),
                         rconn_subn,
                     )
 
-                elif (
-                    waterbody_data.dataframe.empty
-                    and not assimilation_data.usgs_df.empty
-                ):
+                elif waterbody_data.dataframe.empty and has_gages:
                     path_func = partial(
                         nhd_network.split_at_gages_and_junctions,
-                        set(assimilation_data.usgs_df.index.to_numpy()),
+                        gage_segments,
                         rconn_subn,
                     )
 
-                elif (
-                    not waterbody_data.dataframe.empty
-                    and assimilation_data.usgs_df.empty
-                ):
+                elif not waterbody_data.dataframe.empty and not has_gages:
                     path_func = partial(
                         nhd_network.split_at_waterbodies_and_junctions,
                         set(waterbody_data.dataframe.index.to_numpy()),
@@ -984,7 +1008,8 @@ def _prep_da_dataframes(
                      reindex(lastobs_segs)[0].
                      to_list()
                     )
-        da_positions_list_byseg = param_df_sub_idx.get_indexer(usgs_segs)
+        lookup = {v: i for i, v in enumerate(param_df_sub_idx)}
+        da_positions_list_byseg = np.array([lookup.get(seg, -1) for seg in usgs_segs])
         usgs_df_sub = usgs_df.loc[usgs_segs]
     elif usgs_df.empty and not lastobs_df.empty:
         lastobs_segs = (lastobs_df.index.
@@ -997,16 +1022,31 @@ def _prep_da_dataframes(
         # in the compute kernel below.
         usgs_df_sub = pd.DataFrame(index=lastobs_df_sub.index,columns=[])
         usgs_segs = lastobs_segs
-        da_positions_list_byseg = param_df_sub_idx.get_indexer(lastobs_segs)
+        lookup = {v: i for i, v in enumerate(param_df_sub_idx)}
+        da_positions_list_byseg = np.array([lookup.get(seg, -1) for seg in lastobs_segs])
     elif not usgs_df.empty and lastobs_df.empty:
         usgs_segs = list(usgs_df.index.intersection(subnet_segs))
-        da_positions_list_byseg = param_df_sub_idx.get_indexer(usgs_segs)
+        lookup = {v: i for i, v in enumerate(param_df_sub_idx)}
+        da_positions_list_byseg = np.array([lookup.get(seg, -1) for seg in usgs_segs])
         usgs_df_sub = usgs_df.loc[usgs_segs]
         lastobs_df_sub = pd.DataFrame(index=usgs_df_sub.index,columns=["discharge","time","model_discharge"])
     else:
         usgs_df_sub = pd.DataFrame()
         lastobs_df_sub = pd.DataFrame()
         da_positions_list_byseg = []
+
+    # -1 is the "not in this job's index" sentinel, inherited from the get_indexer
+    # this lookup replaced. The kernel uses these as row numbers into flowveldepth
+    # without checking, so a -1 would assimilate the observation onto the LAST
+    # segment of the job. Every seg here comes from an intersection with
+    # param_df_sub_idx, so it cannot happen; say so loudly if it ever does rather
+    # than silently nudging an unrelated reach.
+    if len(da_positions_list_byseg) and np.any(np.asarray(da_positions_list_byseg) < 0):
+        raise ValueError(
+            "streamflow DA: gage segment(s) resolved to no position in this "
+            "computation job's segment index. Assimilating them would write to the "
+            "wrong reach."
+        )
 
     return usgs_df_sub, lastobs_df_sub, da_positions_list_byseg
 
@@ -1445,6 +1485,137 @@ def compute_log_diff(
         preRunLog.write("\n")
 
 
+def _warn_diverted_mass_imbalance(
+    results: RoutingResultsCollection,
+    diversion_da: dict[int, int],
+    usgs_df: pd.DataFrame,
+    dt: int,
+) -> None:
+    """Report transferred water the donor could not supply.
+
+    The transfer conserves mass by construction: the observed diversion is removed
+    from the donor here and imposed at the receiving system's headwater gage, so the
+    same value leaves one river and enters the other. The one way that breaks is the
+    zero-flow clamp. When the observed diversion exceeds the routed donor flow, the
+    donor is floored at zero and so gives up less than the receiving river gains, and
+    the difference is water this run created.
+
+    Capping the transfer at the routed flow would fix it at the source, but the
+    kernel cannot see the donor's flow from the receiving reach's job, so enforcing
+    it would cut across the parallel decomposition. Observed diversion has stayed
+    below modelled Mississippi discharge over the whole overlapping record, so this
+    is monitored rather than enforced: any occurrence is reported with the volume
+    involved, which is an upper bound because the donor's pre-clamp flow is no longer
+    recoverable from the results.
+    """
+    diverted_ids = set(diversion_da.keys())
+    for r in results:
+        for i, sid in enumerate(r.ids):
+            if sid not in diverted_ids:
+                continue
+            flow = r.flow[i, 0::4]
+            gage_link = diversion_da[sid]
+            if gage_link not in usgs_df.index:
+                continue
+            # Observation column 0 sits at t0 and only ever seeds the initial condition:
+            # the kernel loops timestep 1..nts subtracting usgs_values[gage_i, timestep]
+            # and then returns flowveldepth[:, 1:], so returned flow[j] was reduced by
+            # observation column j + 1. Comparing flow against column j instead reports
+            # clamp events one timestep away from where they happened.
+            obs = pd.to_numeric(usgs_df.loc[gage_link], errors="coerce").to_numpy(dtype=float)
+            requested = obs[1 : 1 + flow.shape[0]]
+            # The observations can run out before the routed flow does, so compare only
+            # over the overlap rather than letting the two shapes broadcast-error.
+            flow = flow[: requested.shape[0]]
+            # A clamp event is a timestep where a transfer was actually requested and
+            # the donor still came out at zero. A dry reach with nothing to divert is
+            # not a mass-balance problem and must not be reported as one.
+            clamped = (flow == 0) & np.isfinite(requested) & (requested > 0)
+            n_clamped = int(clamped.sum())
+            if not n_clamped:
+                continue
+            excess_volume = float(requested[clamped].sum()) * dt
+            LOG.warning(
+                "diversion DA: donor reach %s was clamped to zero flow at %d of %d "
+                "timestep(s) where a transfer was requested. Up to %.3g m3 was added "
+                "to the receiving river without being removed here, because the "
+                "observed diversion exceeded the routed flow. Mass is not conserved "
+                "over those timesteps.",
+                sid, n_clamped, flow.shape[0], excess_volume,
+            )
+
+
+def _align_obs_to_model_steps(
+    usgs_df: pd.DataFrame, t0: datetime, dt: float, nts: int
+) -> pd.DataFrame:
+    """Put the observation frame on the kernel's timestep grid.
+
+    The kernel reads this frame positionally: it loops timestep 1..nts taking
+    ``usgs_values[gage_i, timestep]``, and column 0 is only ever used to seed the
+    initial condition. That is correct only if column j sits at ``t0 + j*dt``.
+
+    Nothing enforced that. ``build_da_sets`` pads the timeslice list backwards by
+    ``timeslice_lookback_hours`` (default 24) so the interpolator has context
+    before the run starts, and those padding columns stayed in the frame, so every
+    nudged observation and every diverted volume was read ``lookback`` hours away
+    from the step it was applied to. The pad has done its job once interpolation
+    is finished, so it is dropped here rather than by reading fewer files.
+
+    Reindexing rather than slicing also pins the spacing: a frame resampled at a
+    frequency other than dt, or one missing the timeslice at t0, would otherwise
+    still start or step in the wrong place. Absent steps become NaN, which the
+    kernel already skips.
+    """
+    if usgs_df.empty or not isinstance(usgs_df.columns, pd.DatetimeIndex):
+        return usgs_df
+    grid = pd.date_range(pd.Timestamp(t0), periods=nts + 1, freq=pd.Timedelta(seconds=dt))
+    if usgs_df.columns.equals(grid):
+        return usgs_df
+    aligned = usgs_df.reindex(columns=grid)
+    # An empty overlap means the DA window and the run do not intersect at all, or
+    # the observation grid is off the model grid. Either way nudging silently stops,
+    # so it must not pass unreported.
+    if usgs_df.notna().to_numpy().any() and not aligned.notna().to_numpy().any():
+        LOG.warning(
+            "streamflow DA: no observation column lines up with the model timestep "
+            "grid (%s to %s every %ss); observations span %s to %s. Nothing will be "
+            "assimilated this window.",
+            grid[0], grid[-1], dt, usgs_df.columns[0], usgs_df.columns[-1],
+        )
+    return aligned
+
+
+def _resolve_diversion_da(
+    diversion_da: dict[ReachId, int],
+    river_reaches: np.ndarray,
+    usgs_df_sub: pd.DataFrame,
+) -> dict:
+    """Translate a global diversion map (fp_ids) to kernel-ready indices for one job."""
+    if not diversion_da:
+        return {}
+    kernel_map: dict[int, int] = {}
+    for ms_id, gage_seg_id in diversion_da.items():
+        # Binary-search for the Mississippi segment in this job's sorted index.
+        pos = int(np.searchsorted(river_reaches, ms_id))
+        if pos >= len(river_reaches) or river_reaches[pos] != ms_id:
+            continue  # segment not in this subnetwork job
+        if gage_seg_id not in usgs_df_sub.index:
+            # The donor segment IS in this job but its gage is not, so the
+            # diversion cannot be applied here. Silently skipping leaves the donor
+            # carrying water that should have been transferred, with no signal, so
+            # warn: build_compute_package injects the missing gage row precisely to
+            # keep this from happening.
+            LOG.warning(
+                "diversion DA: donor segment %s is in this job but gage link %s is "
+                "not in its observation set; no diversion applied for this job.",
+                ms_id, gage_seg_id,
+            )
+            continue
+        gage_i = int(usgs_df_sub.index.get_loc(gage_seg_id))
+        kernel_map[pos] = gage_i
+    return kernel_map
+
+
 def build_compute_package(
     job: ComputationJob,
     forcing: ForcingData,
@@ -1506,6 +1677,18 @@ def build_compute_package(
     da_positions_list_byreach, da_positions_list_bygage = _prep_da_positions_byreach(
         job.routing_paths, lastobs_df_sub.index
     )
+
+    # The diversion gage is often in a different subnetwork than the reach
+    # being diverted, so inject its usgs_df row here if it's missing.
+    if config.diversion_da:
+        diversion_gage_ids = set(config.diversion_da.values())
+        missing_gage_ids = diversion_gage_ids - set(usgs_df_sub.index)
+        if missing_gage_ids:
+            extra = assimilation_data.usgs_df.loc[
+                assimilation_data.usgs_df.index.intersection(list(missing_gage_ids))
+            ]
+            if not extra.empty:
+                usgs_df_sub = pd.concat([usgs_df_sub, extra])
 
     # prepare reservoir DA data
     (
@@ -1663,7 +1846,8 @@ def build_compute_package(
         assume_short_ts=config.assume_short_ts,
         return_courant=config.return_courant,
         from_files=config.from_files,
-        qlat_add_loc=config.qlat_add_loc_c
+        qlat_add_loc=config.qlat_add_loc_c,
+        diversion_da=_resolve_diversion_da(config.diversion_da, job.river_reaches, usgs_df_sub),
     )
 
 
@@ -1716,8 +1900,17 @@ def compute_routing(
     # Clear boundary condition data to save some memory
     execution_plan.boundary_conditions.clear_data()
 
-    # Format and return
-    return RoutingResultsCollection(results), execution_plan
+    # Format results
+    collection = RoutingResultsCollection(results)
+
+    # Report any transfer the donor could not supply (see the function docstring:
+    # this is the one path by which the diversion can fail to conserve mass).
+    if config.diversion_da:
+        _warn_diverted_mass_imbalance(
+            collection, config.diversion_da, assimilation_data.usgs_df, config.dt
+        )
+
+    return collection, execution_plan
 
 
 def compute_nhd_routing_v02(
@@ -1763,6 +1956,8 @@ def compute_nhd_routing_v02(
     flowveldepth_interorder: dict = {},
     from_files: bool = True,
     qlat_add_loc: Literal["top", "middle", "bottom"] = "middle",
+    diversion_da: dict[ReachId, int] | None = None,
+    gage_segments: set | None = None,
 ) -> tuple[RoutingResultsCollection, ExecutionPlan]:
     """Build typed routing objects from legacy flat arguments and delegate to compute_routing."""
     if flowveldepth_interorder:
@@ -1793,7 +1988,8 @@ def compute_nhd_routing_v02(
         parallel_compute_method=parallel_compute_method,
         qlat_add_loc=qlat_add_loc,
         compute_func_name=compute_func_name,
-        subnetwork_target_size=subnetwork_target_size
+        subnetwork_target_size=subnetwork_target_size,
+        diversion_da=diversion_da or {},
     )
     topology = NetworkTopology(
         connections = connections,
@@ -1804,6 +2000,13 @@ def compute_nhd_routing_v02(
     reach_data = ReachData(param_df)
     waterbody_data = WaterbodyData(waterbodies_df, waterbody_types_df)
     wbody_init = waterbodies_df[["h0", "qd0"]]
+    # The kernel reads eloss_array[segment, qlat_ts] unconditionally, so a frame with
+    # no columns is an IndexError rather than "no channel loss". Callers that do not
+    # model ET pass an empty DataFrame, which is what took the V3 and V4 NHD runs
+    # down; default it here so every caller gets the same treatment rather than each
+    # one remembering to build the zeros itself.
+    if eloss_df.empty:
+        eloss_df = pd.DataFrame(0.0, index=qlats.index, columns=qlats.columns)
     forcing_data = ForcingData(qlats, q0, eloss_df, wbody_init)
     assimilation_data = AssimilationData(
         reservoir_usgs_df = reservoir_usgs_df,
@@ -1817,8 +2020,16 @@ def compute_nhd_routing_v02(
         great_lakes_df = great_lakes_df,
         great_lakes_param_df = great_lakes_param_df,
         great_lakes_climatology_df = great_lakes_climatology_df,
-        usgs_df = usgs_df,
+        usgs_df = _align_obs_to_model_steps(usgs_df, t0, dt, nts),
         lastobs_df = lastobs_df,
+        # Donors are split points as well as gages. The kernel routes a whole reach
+        # in one compute_reach_kernel call, chaining each segment's outflow into the
+        # next, and only subtracts the diversion afterwards on copy-out. A donor in
+        # the middle of a reach therefore hands its neighbours undiverted flow, and
+        # the transfer never leaves the river. Splitting here makes the donor its own
+        # single-segment reach, so the reduced value is what the next reach reads as
+        # its upstream inflow.
+        gage_segments = set(gage_segments or ()) | set(diversion_da or ()),
     )
 
     if isinstance(subnetwork_list, ExecutionPlan):

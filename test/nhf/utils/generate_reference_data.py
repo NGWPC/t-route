@@ -36,11 +36,14 @@ def _fetch_usgs_q(
     t_start: pd.Timestamp,
     t_end: pd.Timestamp,
     target_index: pd.DatetimeIndex,
+    dv_only: bool = False,
 ) -> pd.Series:
     """Return a discharge Series aligned to *target_index*.
 
-    Attempts instantaneous values first; falls back to daily mean values if IV
-    data are absent for the requested period.
+    Fetches instantaneous values (IV) and daily mean values (DV) in parallel.
+    IV observations take priority; any NaN gaps in IV are filled with DV values
+    linearly interpolated to the target resolution (daily values are placed at
+    noon UTC before interpolation to avoid step-function artefacts at midnight).
 
     Parameters
     ----------
@@ -60,28 +63,26 @@ def _fetch_usgs_q(
     nan_series = pd.Series(np.nan, index=target_index, name="usgs_q")
     site_id = f"USGS-{site_no}"
 
-    # --- Try instantaneous values ---
-    try:
-        iv_raw = waterdata.get_continuous(
-            monitoring_location_id=site_id,
-            parameter_code="00060",
-            time=f"{start_str}/{end_str}",
-        )[0]
-        if (
-            not iv_raw.empty
-            and "value" in iv_raw.columns
-            and not iv_raw["value"].isna().all()
-        ):
-            iv_q = iv_raw[["time", "value"]].rename(columns={"value": "usgs_q"})
-            iv_q["time"] = pd.to_datetime(iv_q["time"], utc=True)
-            iv_q = iv_q.set_index("time")
-            return iv_q["usgs_q"].reindex(
-                target_index, method="nearest", tolerance=pd.Timedelta("15min")
-            )
-    except Exception:
-        pass
+    # --- Instantaneous values ---
+    iv_series = nan_series.copy()
+    if not dv_only:
+        try:
+            iv_raw = waterdata.get_continuous(
+                monitoring_location_id=site_id,
+                parameter_code="00060",
+                time=f"{start_str}/{end_str}",
+            )[0]
+            if not iv_raw.empty and "value" in iv_raw.columns:
+                iv_q = iv_raw[["time", "value"]].rename(columns={"value": "usgs_q"})
+                iv_q["time"] = pd.to_datetime(iv_q["time"], utc=True)
+                iv_q = iv_q.set_index("time")
+                iv_series = iv_q["usgs_q"].reindex(
+                    target_index, method="nearest", tolerance=pd.Timedelta("15min")
+                )
+        except Exception:
+            pass
 
-    # --- Fallback: daily values ---
+    # --- Daily values: always fetch and use to fill any NaN gaps in IV ---
     try:
         dv_raw = waterdata.get_daily(
             monitoring_location_id=site_id,
@@ -97,15 +98,20 @@ def _fetch_usgs_q(
             dv_q = dv_raw[["time", "value"]].rename(columns={"value": "usgs_q"})
             dv_q["time"] = pd.to_datetime(dv_q["time"], utc=True)
             dv_q = dv_q.set_index("time")
-            # Upsample daily → hourly via forward-fill then align to target_index
-            dv_hourly = dv_q.resample("h").ffill()
-            return dv_hourly["usgs_q"].reindex(
-                target_index, method="nearest", tolerance=pd.Timedelta("13h")
+            # Place daily values at noon UTC then interpolate to the target index.
+            dv_q.index = dv_q.index + pd.Timedelta(hours=12)
+            combined_index = dv_q.index.union(target_index).sort_values()
+            dv_interp = (
+                dv_q["usgs_q"]
+                .reindex(combined_index)
+                .interpolate(method="time", limit_direction="both")
+                .reindex(target_index)
             )
+            iv_series = iv_series.fillna(dv_interp)
     except Exception:
         pass
 
-    return nan_series
+    return iv_series
 
 
 def generate_reference_data(
@@ -113,6 +119,7 @@ def generate_reference_data(
     t_start: pd.Timestamp,
     t_end: pd.Timestamp,
     output_dir: Path,
+    dv_only: bool = False,
 ) -> None:
     """Fetch retrospective and USGS flows for all active gages and write a NetCDF.
 
@@ -191,7 +198,7 @@ def generate_reference_data(
         # USGS observed flow (IV with DV fallback)
         site_no = gage["site_no"]
         print(f"  Fetching USGS data for site {site_no}...")
-        usgs_q = _fetch_usgs_q(site_no, t_start, t_end, retro_q.index)
+        usgs_q = _fetch_usgs_q(site_no, t_start, t_end, retro_q.index, dv_only=dv_only)
 
         fp_ids.append(fp_id)
         site_nos.append(site_no)
@@ -241,6 +248,12 @@ def main() -> None:
         required=True,
         help="Directory to write gage_reference_data.nc.",
     )
+    parser.add_argument(
+        "--dv-only",
+        action="store_true",
+        default=False,
+        help="Only fetch daily mean values (DV); skip instantaneous-value (IV) requests.",
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -264,6 +277,7 @@ def main() -> None:
         t_start=t_start,
         t_end=t_end,
         output_dir=Path(args.output_dir),
+        dv_only=args.dv_only,
     )
 
 

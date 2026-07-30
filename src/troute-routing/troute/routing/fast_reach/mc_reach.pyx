@@ -255,7 +255,8 @@ cpdef object compute_network_structured(
     bint return_courant=False,
     int da_check_gage = -1,
     bint from_files=True,
-    int qlat_add_loc = QlatLocation.MIDDLE
+    int qlat_add_loc = QlatLocation.MIDDLE,
+    dict diversion_da = {}
     ):
     
     """
@@ -269,6 +270,9 @@ cpdef object compute_network_structured(
         qlats (ndarray): a 2D array of qlat values (nodes x nsteps). The index must be shared with data_values
         initial_conditions (ndarray): an n x 3 array of initial conditions. n = nodes, column 1 = qu0, column 2 = qd0, column 3 = h0
         assume_short_ts (bool): Assume short time steps (quc = qup)
+        diversion_da (dict): maps segment position in data_idx (int) -> gage index in usgs_values (int).
+            Represents reaches where diverted flow (observed at a gage) must be subtracted from
+            MC-routed flow, e.g., Mississippi R. losses at the Old River Control Structure.
     Notes:
         Array dimensions are checked as a precondition to this method.
         This version creates python objects for segments and reaches,
@@ -419,6 +423,7 @@ cpdef object compute_network_structured(
     # replace initial conditions with gage observations, wherever available
     cdef int gages_size = usgs_positions.shape[0]
     cdef int gage_maxtimestep = usgs_values.shape[1]
+    cdef bint has_diversion = len(diversion_da) > 0
     cdef int gage_i, usgs_position_i
     cdef float a, da_decay_minutes, da_weighted_shift, replacement_val  # , original_val, lastobs_val,
     cdef float [:] lastobs_values, lastobs_times
@@ -819,6 +824,15 @@ cpdef object compute_network_structured(
 
                     # Setting flow based on the output of MC - SSOUT - ELOSS
                     flowveldepth[segment.id, timestep, 0] = out_buf[_i, 0] - ssout - eloss_array[segment.id, qlat_ts_previous]
+
+                    # Subtract diverted flow for control-structure reaches (e.g., Old River).
+                    # has_diversion is hoisted out of the loops below: without it every
+                    # one of the ~1.1M CONUS segments pays a Python dict membership test
+                    # at every one of the ~288 timesteps on runs that divert nothing.
+                    if has_diversion and segment.id in diversion_da:
+                        gage_i = diversion_da[segment.id]
+                        if timestep < gage_maxtimestep and not isnan(usgs_values[gage_i, timestep]):
+                            flowveldepth[segment.id, timestep, 0] -= usgs_values[gage_i, timestep]
 
                     if reach_has_gage[i] == da_check_gage:
                         printf("segment.id: %ld\t", segment.id)
