@@ -1035,6 +1035,19 @@ def _prep_da_dataframes(
         lastobs_df_sub = pd.DataFrame()
         da_positions_list_byseg = []
 
+    # -1 is the "not in this job's index" sentinel, inherited from the get_indexer
+    # this lookup replaced. The kernel uses these as row numbers into flowveldepth
+    # without checking, so a -1 would assimilate the observation onto the LAST
+    # segment of the job. Every seg here comes from an intersection with
+    # param_df_sub_idx, so it cannot happen; say so loudly if it ever does rather
+    # than silently nudging an unrelated reach.
+    if len(da_positions_list_byseg) and np.any(np.asarray(da_positions_list_byseg) < 0):
+        raise ValueError(
+            "streamflow DA: gage segment(s) resolved to no position in this "
+            "computation job's segment index. Assimilating them would write to the "
+            "wrong reach."
+        )
+
     return usgs_df_sub, lastobs_df_sub, da_positions_list_byseg
 
 
@@ -1532,6 +1545,46 @@ def _warn_diverted_mass_imbalance(
             )
 
 
+def _align_obs_to_model_steps(
+    usgs_df: pd.DataFrame, t0: datetime, dt: float, nts: int
+) -> pd.DataFrame:
+    """Put the observation frame on the kernel's timestep grid.
+
+    The kernel reads this frame positionally: it loops timestep 1..nts taking
+    ``usgs_values[gage_i, timestep]``, and column 0 is only ever used to seed the
+    initial condition. That is correct only if column j sits at ``t0 + j*dt``.
+
+    Nothing enforced that. ``build_da_sets`` pads the timeslice list backwards by
+    ``timeslice_lookback_hours`` (default 24) so the interpolator has context
+    before the run starts, and those padding columns stayed in the frame, so every
+    nudged observation and every diverted volume was read ``lookback`` hours away
+    from the step it was applied to. The pad has done its job once interpolation
+    is finished, so it is dropped here rather than by reading fewer files.
+
+    Reindexing rather than slicing also pins the spacing: a frame resampled at a
+    frequency other than dt, or one missing the timeslice at t0, would otherwise
+    still start or step in the wrong place. Absent steps become NaN, which the
+    kernel already skips.
+    """
+    if usgs_df.empty or not isinstance(usgs_df.columns, pd.DatetimeIndex):
+        return usgs_df
+    grid = pd.date_range(pd.Timestamp(t0), periods=nts + 1, freq=pd.Timedelta(seconds=dt))
+    if usgs_df.columns.equals(grid):
+        return usgs_df
+    aligned = usgs_df.reindex(columns=grid)
+    # An empty overlap means the DA window and the run do not intersect at all, or
+    # the observation grid is off the model grid. Either way nudging silently stops,
+    # so it must not pass unreported.
+    if usgs_df.notna().to_numpy().any() and not aligned.notna().to_numpy().any():
+        LOG.warning(
+            "streamflow DA: no observation column lines up with the model timestep "
+            "grid (%s to %s every %ss); observations span %s to %s. Nothing will be "
+            "assimilated this window.",
+            grid[0], grid[-1], dt, usgs_df.columns[0], usgs_df.columns[-1],
+        )
+    return aligned
+
+
 def _resolve_diversion_da(
     diversion_da: dict[ReachId, int],
     river_reaches: np.ndarray,
@@ -1903,7 +1956,7 @@ def compute_nhd_routing_v02(
     flowveldepth_interorder: dict = {},
     from_files: bool = True,
     qlat_add_loc: Literal["top", "middle", "bottom"] = "middle",
-    diversion_da: dict[ReachId, int] = {},
+    diversion_da: dict[ReachId, int] | None = None,
     gage_segments: set | None = None,
 ) -> tuple[RoutingResultsCollection, ExecutionPlan]:
     """Build typed routing objects from legacy flat arguments and delegate to compute_routing."""
@@ -1936,7 +1989,7 @@ def compute_nhd_routing_v02(
         qlat_add_loc=qlat_add_loc,
         compute_func_name=compute_func_name,
         subnetwork_target_size=subnetwork_target_size,
-        diversion_da=diversion_da,
+        diversion_da=diversion_da or {},
     )
     topology = NetworkTopology(
         connections = connections,
@@ -1960,9 +2013,16 @@ def compute_nhd_routing_v02(
         great_lakes_df = great_lakes_df,
         great_lakes_param_df = great_lakes_param_df,
         great_lakes_climatology_df = great_lakes_climatology_df,
-        usgs_df = usgs_df,
+        usgs_df = _align_obs_to_model_steps(usgs_df, t0, dt, nts),
         lastobs_df = lastobs_df,
-        gage_segments = set(gage_segments or ()),
+        # Donors are split points as well as gages. The kernel routes a whole reach
+        # in one compute_reach_kernel call, chaining each segment's outflow into the
+        # next, and only subtracts the diversion afterwards on copy-out. A donor in
+        # the middle of a reach therefore hands its neighbours undiverted flow, and
+        # the transfer never leaves the river. Splitting here makes the donor its own
+        # single-segment reach, so the reduced value is what the next reach reads as
+        # its upstream inflow.
+        gage_segments = set(gage_segments or ()) | set(diversion_da or ()),
     )
 
     if isinstance(subnetwork_list, ExecutionPlan):
