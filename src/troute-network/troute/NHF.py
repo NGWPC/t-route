@@ -520,6 +520,16 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             self._rfc_lake_gage_crosswalk = inputs.get("rfc_lake_gage_crosswalk", None)
 
 
+def _max_id(*columns: pd.Series) -> int:
+    """Largest id across *columns*, ignoring blanks and non-numeric entries."""
+    maxima = [
+        pd.to_numeric(c, errors="coerce").max()
+        for c in columns
+    ]
+    finite = [m for m in maxima if pd.notna(m)]
+    return int(max(finite)) if finite else 0
+
+
 def _force_headwater_routing(
     virtual_flowpaths: pd.DataFrame,
     reference_flowpaths: pd.DataFrame,
@@ -551,7 +561,11 @@ def _force_headwater_routing(
 
     ### Modify datasets ###
     # Add new up_virtual_nex_id so that vfps won't be dropped in network refactor.
-    max_up_id = int(virtual_flowpaths["up_virtual_nex_id"].max()) + 1
+    # Above BOTH nexus columns: an id taken from the upstream column alone can still
+    # be a real downstream nexus, which would wire a forced headwater onto it.
+    max_up_id = _max_id(
+        virtual_flowpaths["up_virtual_nex_id"], virtual_flowpaths["dn_virtual_nex_id"]
+    ) + 1
     new_ids = np.arange(max_up_id, max_up_id + len(forced_vfps))
     virtual_flowpaths.loc[
         virtual_flowpaths["virtual_fp_id"].astype(int).isin(forced_vfps),
@@ -563,7 +577,18 @@ def _force_headwater_routing(
     # there confluences in a div. This comes up in _build_div_weighting_matrix
     # Where having multiple options for up_node_id will confuse the lat
     # placement.
-    max_div_id = int(reference_flowpaths["div_id"].max()) + 1
+    # Allocate above every namespace the value is written into, not just div_id: the
+    # same number goes into the fp_id column two statements below. A synthetic id
+    # that collides with a real fp_id makes two flowpaths share an identifier, so
+    # the groupby("fp_id") that picks one outlet per flowpath merges them, and the
+    # crosswalk pruning that drops these temporary ids drops the real flowpath's
+    # output along with them. Being strictly above the ceiling is what rules that
+    # out, so there is nothing left to check afterwards.
+    max_div_id = _max_id(
+        reference_flowpaths["div_id"],
+        reference_flowpaths["fp_id"],
+        virtual_flowpaths["virtual_fp_id"],
+    ) + 1
     new_div_mapping = {vfp: max_div_id + ind for ind, vfp in enumerate(forced_vfps)}
     force_mask = reference_flowpaths["virtual_fp_id"].astype(int).isin(forced_vfps)
     reference_flowpaths.loc[force_mask, "new_div_id"] = reference_flowpaths.loc[
