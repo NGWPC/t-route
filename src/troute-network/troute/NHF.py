@@ -7,8 +7,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .AbstractNetwork import AbstractNetwork
+from troute.AbstractNetwork import AbstractNetwork
 from troute.nhf_discretize import discretize_flowpaths
+from troute.scaling_da import build_scaling_da_setup
 
 from troute.nhf_preprocess import (
     LAKE_ID_FIELD,
@@ -79,8 +80,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
         if self.verbose:
             LOG.info("creating NHF supernetwork connections set")
-        if self.showtiming:
-            start_time = time.time()
+        start_time = time.perf_counter() if self.showtiming else None
 
         # ------------------------------------------------
         # Load hydrofabric information
@@ -136,17 +136,35 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             # Preprocess data assimilation objects
             self.preprocess_data_assimilation(gages, reservoir_da)
 
+            # Resolved here, where the flowpaths layer is still in scope; the DA reads
+            # it to pick each gage tree's region theta.
+            self.build_gage_vpu_map(gages, flowpaths)
+
 
         if self.verbose:
             LOG.info("supernetwork connections set complete")
-        if self.showtiming:
-            LOG.info("... in %s seconds." % (time.time() - start_time))
+        if self.showtiming and start_time is not None:
+            LOG.info("... in %s seconds." % (time.perf_counter() - start_time))
 
         super().__init__(from_files, value_dict)
 
         # Create empty dataframe for coastal_boundary_depth_df. This way we can check if
         # it exists, and only read in SCHISM data during 'assemble_forcings' if it doesn't
         self._coastal_boundary_depth_df = pd.DataFrame()
+
+        # Simple-scaling DA static inputs (crosswalk, source set, gage trees):
+        # network data processing, generated here beside the other DA inputs and
+        # only when the DA is enabled. Needs the finalized routed dataframe, so it
+        # runs after super().__init__.
+        _sda = (self.data_assimilation_parameters or {}).get("streamflow_da") or {}
+        self.scaling_da_setup = None
+        if _sda.get("streamflow_scaling"):
+            self.scaling_da_setup = build_scaling_da_setup(
+                self,
+                _sda.get("streamflow_scaling_parameters") or {},
+                self.data_assimilation_parameters,
+                cpu_pool=self.compute_parameters.get("cpu_pool"),
+            )
 
     def initial_warmstate_preprocess(self, from_files, value_dict):
         """Read the warm state, then broadcast an fp-keyed restart onto routing links.
@@ -409,8 +427,9 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         bad_divs = [uniq_divs[i] for i in np.where(bad_mask & ~forced_group)[0]]
         if bad_divs:
             LOG.warning(
-                "%d div_id(s) have percentage_area_contribution that does not sum close to 100 "
-                "(and are not forced-routing headwaters), e.g. %s",
+                "%d div_id(s) had percentage_area_contribution not summing to 100 "
+                "(and are not forced-routing headwaters); redistributed the shortfall "
+                "evenly across each divide's vfps, e.g. %s",
                 len(bad_divs), bad_divs[:10]
             )
 
