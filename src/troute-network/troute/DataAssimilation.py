@@ -1481,10 +1481,8 @@ def _create_usgs_df(data_assimilation_parameters, streamflow_da_parameters, run_
     if usgs_timeslices_folder is None:
         raise ValueError(
             "streamflow_da.streamflow_nudging is enabled but "
-            "streamflow_da.usgs_timeslices_folder is not set, so there is nowhere to "
-            "read gage observations from. Set the folder, or disable nudging. "
-            "(Without this check the run failed inside pathlib with a TypeError about "
-            "NoneType, which gave no indication of the missing setting.)"
+            "data_assimilation_parameters.usgs_timeslices_folder is not set, so there is nowhere to "
+            "read gage observations from. Set the folder, or disable nudging."
         )
     usgs_timeslices_folder = pathlib.Path(usgs_timeslices_folder)
     usgs_files = [usgs_timeslices_folder.joinpath(f) for f in 
@@ -1697,27 +1695,17 @@ def _set_persistence_reservoir_da_params(run_results):
     - reservoir_usace_param_df (DataFrame): USACE reservoir DA parameters
     '''
     
-    reservoir_usgs_param_df = pd.DataFrame(data = [], 
-                                           index = [], 
-                                           columns = [
-                                               'update_time', 'prev_persisted_outflow', 
-                                               'persistence_update_time', 'persistence_index'
-                                           ]
-                                          )
-    reservoir_usace_param_df = pd.DataFrame(data = [], 
-                                           index = [], 
-                                           columns = [
-                                               'update_time', 'prev_persisted_outflow', 
-                                               'persistence_update_time', 'persistence_index'
-                                           ]
-                                          )
-    reservoir_usbr_param_df = pd.DataFrame(data = [], 
-                                           index = [], 
-                                           columns = [
-                                               'update_time', 'prev_persisted_outflow', 
-                                               'persistence_update_time', 'persistence_index'
-                                           ]
-                                          )
+    # Collect parts and concat ONCE: growing an empty seed frame in the loop is
+    # deprecated, and in pandas 3 the seed's object dtypes would win.
+    _PERSISTENCE_COLUMNS = [
+        'update_time', 'prev_persisted_outflow',
+        'persistence_update_time', 'persistence_index',
+    ]
+
+    def _empty_persistence_df():
+        return pd.DataFrame(data=[], index=[], columns=_PERSISTENCE_COLUMNS)
+
+    usgs_parts, usace_parts, usbr_parts = [], [], []
     
     for r in run_results:   # Corresponds to the ordering of the outflows from line 843 troute/routing/fast_reach/mc_reach.pyx
         
@@ -1726,21 +1714,21 @@ def _set_persistence_reservoir_da_params(run_results):
             tmp_usgs['prev_persisted_outflow'] = r[4][2]
             tmp_usgs['persistence_update_time'] = r[4][4]
             tmp_usgs['persistence_index'] = r[4][3]
-            reservoir_usgs_param_df = pd.concat([reservoir_usgs_param_df, tmp_usgs])
+            usgs_parts.append(tmp_usgs)
         
         if len(r[5][0]) > 0:
             tmp_usace = pd.DataFrame(data = r[5][1], index = r[5][0], columns = ['update_time'])
             tmp_usace['prev_persisted_outflow'] = r[5][2]
             tmp_usace['persistence_update_time'] = r[5][4]
             tmp_usace['persistence_index'] = r[5][3]
-            reservoir_usace_param_df = pd.concat([reservoir_usace_param_df, tmp_usace])
+            usace_parts.append(tmp_usace)
     
         if len(r[6][0]) > 0:
             tmp_usbr = pd.DataFrame(data = r[6][1], index = r[6][0], columns = ['update_time'])
             tmp_usbr['prev_persisted_outflow'] = r[6][2]
             tmp_usbr['persistence_update_time'] = r[6][4]
             tmp_usbr['persistence_index'] = r[6][3]
-            reservoir_usbr_param_df = pd.concat([reservoir_usbr_param_df, tmp_usbr])
+            usbr_parts.append(tmp_usbr)
 
     # A reservoir that sits on a sub-domain boundary appears as an
     # offnetwork upstream in a downstream compute job AND as a home reach
@@ -1752,6 +1740,10 @@ def _set_persistence_reservoir_da_params(run_results):
     # Deduplicate by keeping the last entry for each lake (both duplicates
     # carry the same computed state, so the choice of first vs. last is
     # inconsequential).
+    reservoir_usgs_param_df = pd.concat(usgs_parts) if usgs_parts else _empty_persistence_df()
+    reservoir_usace_param_df = pd.concat(usace_parts) if usace_parts else _empty_persistence_df()
+    reservoir_usbr_param_df = pd.concat(usbr_parts) if usbr_parts else _empty_persistence_df()
+
     reservoir_usgs_param_df  = reservoir_usgs_param_df[~reservoir_usgs_param_df.index.duplicated(keep='last')]
     reservoir_usace_param_df = reservoir_usace_param_df[~reservoir_usace_param_df.index.duplicated(keep='last')]
     reservoir_usbr_param_df  = reservoir_usbr_param_df[~reservoir_usbr_param_df.index.duplicated(keep='last')]
@@ -2306,7 +2298,11 @@ def _read_timeseries_files(filepath, timeseries_dates, t0, final_persist_datetim
     file_list = (df['Datetime'] + '.60min.' + df['ID'] + '.RFCTimeSeries.ncdf').tolist()
     rfc_df = pd.DataFrame()
     for f in file_list:
-        ds = xr.open_dataset(filepath + '/' + f)
+        # drop queryTime (non-CF units now raise on open; unused here) and force
+        # decode_timedelta (timeSteps carries a bare "seconds" unit).
+        ds = xr.open_dataset(
+            filepath + '/' + f, drop_variables="queryTime", decode_timedelta=True
+        )
         sliceStartTime = datetime.strptime(ds.attrs.get('sliceStartTimeUTC'), '%Y-%m-%d_%H:%M:%S')
         sliceTimeResolutionMinutes = ds.attrs.get('sliceTimeResolutionMinutes')
         df = ds.to_dataframe().reset_index().sort_values('forecastInd')[['stationId','discharges','synthetic_values','totalCounts','timeSteps']]
@@ -2366,9 +2362,11 @@ def assemble_rfc_dataframes(rfc_timeseries_df, rfc_lake_gage_crosswalk, t0, rfc_
     reservoir_rfc_param_df['totalCounts'] = reservoir_rfc_param_df['totalCounts'] + (new_timeseries_idx - reservoir_rfc_param_df['timeseries_idx'])
     reservoir_rfc_param_df['timeseries_idx'] = new_timeseries_idx
     # Fill in NaNs with default values.
-    reservoir_rfc_param_df['use_rfc'].fillna(False, inplace=True)
-    reservoir_rfc_param_df['totalCounts'].fillna(0, inplace=True)
-    reservoir_rfc_param_df['da_timestep'].fillna(0, inplace=True)
+    # Assign back, not df[col].fillna(inplace=True): pandas 3 copies the
+    # intermediate and the fill would stop reaching the frame.
+    reservoir_rfc_param_df['use_rfc'] = reservoir_rfc_param_df['use_rfc'].fillna(False)
+    reservoir_rfc_param_df['totalCounts'] = reservoir_rfc_param_df['totalCounts'].fillna(0)
+    reservoir_rfc_param_df['da_timestep'] = reservoir_rfc_param_df['da_timestep'].fillna(0)
     # Make sure columns are the correct types
     reservoir_rfc_param_df['totalCounts'] = reservoir_rfc_param_df['totalCounts'].astype(int)
     reservoir_rfc_param_df['da_timestep'] = reservoir_rfc_param_df['da_timestep'].astype(int)
