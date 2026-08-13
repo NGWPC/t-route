@@ -57,14 +57,20 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
     if waterbody_parameters.get("break_network_at_waterbodies", False):
         layers_to_read.extend(["lakes", "nexus"])
 
-    data_assimilation_parameters = compute_parameters.get("data_assimilation_parameters", {})
+    # Any level can be absent OR explicitly null; `or {}` collapses both (a
+    # present-but-null key defeats .get's default and crashed the old chain).
+    data_assimilation_parameters = compute_parameters.get("data_assimilation_parameters") or {}
+    reservoir_da = data_assimilation_parameters.get("reservoir_da") or {}
+    persistence_da = reservoir_da.get("reservoir_persistence_da") or {}
+    rfc_da = reservoir_da.get("reservoir_rfc_da") or {}
+    streamflow_da = data_assimilation_parameters.get("streamflow_da") or {}
     if any(
         [
-            data_assimilation_parameters.get("streamflow_da", {}).get("streamflow_nudging", False),
-            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usgs", False),
-            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usace", False),
-            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_persistence_da", False).get("reservoir_persistence_usbr", False),
-            data_assimilation_parameters.get("reservoir_da", {}).get("reservoir_rfc_da", {}).get("reservoir_rfc_forecasts", False),
+            streamflow_da.get("streamflow_nudging", False),
+            persistence_da.get("reservoir_persistence_usgs", False),
+            persistence_da.get("reservoir_persistence_usace", False),
+            persistence_da.get("reservoir_persistence_usbr", False),
+            rfc_da.get("reservoir_rfc_forecasts", False),
         ]
     ):
         layers_to_read.append("network")
@@ -127,13 +133,32 @@ def read_geopkg(file_path, compute_parameters, waterbody_parameters, cpu_pool):
         hydro = hydro.loc[mask].copy()
         hydro["hl_link"] = hydro["hl_link"].astype(int)
 
-        if not lakes.empty: 
-            # Convert lake_id to integer and merge with hydrolocations
-            lakes["lake_id"] = lakes["lake_id"].astype(int)
-            lakes = lakes.merge(hydro[["hl_link", "id", "hl_reference"]], left_on="lake_id", right_on="hl_link", how="left")
+        if lakes is not None and not lakes.empty:
+            # The lake key differs by hydrofabric vintage (v2.01: hl_link, no
+            # lake_id; v2.2: lake_id, no hl_link) and not monotonically -- key off
+            # the column actually present.
+            if "lake_id" not in lakes.columns:
+                if "hl_link" not in lakes.columns:
+                    msg = (
+                        "the 'lakes' layer has neither a 'lake_id' nor an 'hl_link' "
+                        f"column, so the lake id cannot be resolved; columns are "
+                        f"{sorted(lakes.columns)}"
+                    )
+                    raise KeyError(msg)
+                lakes["lake_id"] = lakes["hl_link"]
+            lakes["lake_id"] = lakes["lake_id"].astype(float).astype(int)
+            # Merge only attributes this vintage lacks; re-merging present ones
+            # yields _x/_y suffixes that break the downstream "id" lookups.
+            missing = [c for c in ("id", "hl_reference") if c not in lakes.columns]
+            if missing:
+                lakes = lakes.merge(
+                    hydro[["hl_link"] + missing], left_on="lake_id", right_on="hl_link", how="left"
+                )
 
-        # add hl_uri to nexus
-        nexus = nexus.merge(hydro[["nex_id", "hl_uri"]], left_on="id", right_on="nex_id", how="left")
+        # hl_uri join key is vintage-dependent too (v2.01 has no nex_id); skip
+        # the merge when absent -- hl_uri simply stays unpopulated.
+        if "nex_id" in hydro.columns:
+            nexus = nexus.merge(hydro[["nex_id", "hl_uri"]], left_on="id", right_on="nex_id", how="left")
 
     return flowpaths, lakes, network, nexus
 
@@ -184,8 +209,22 @@ def read_ngen_waterbody_df(parm_file, lake_index_field="wb-id", lake_id_mask=Non
     if Path(parm_file).suffix == ".gpkg":
         df = gpd.read_file(parm_file, layer="lakes")
 
-        df = df.drop(["id", "toid", "hl_id", "hl_reference", "hl_uri", "geometry"], axis=1).rename(
-            columns={"hl_link": "lake_id"}
+        # The lake key and non-parameter columns differ by vintage (v2.01:
+        # hl_link, no lake_id; v2.2: lake_id, no hl_link); key off what is present
+        # and drop with errors="ignore".
+        if "lake_id" not in df.columns:
+            if "hl_link" not in df.columns:
+                msg = (
+                    f"{parm_file}: the 'lakes' layer has neither a 'lake_id' nor an "
+                    f"'hl_link' column, so the lake id cannot be resolved; columns are "
+                    f"{sorted(df.columns)}"
+                )
+                raise KeyError(msg)
+            df = df.rename(columns={"hl_link": "lake_id"})
+        df = df.drop(
+            ["id", "toid", "hl_id", "hl_reference", "hl_uri", "geometry"],
+            axis=1,
+            errors="ignore",
         )
         df["lake_id"] = df.lake_id.astype(float).astype(int)
         df = df.set_index("lake_id").drop_duplicates().sort_index()
