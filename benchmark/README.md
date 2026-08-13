@@ -3,31 +3,85 @@
 This directory holds the performance harness for the routing pipeline:
 configs, bench drivers, golden output for correctness gates, and the
 PNGs that ship with `RESULTS.md`. All measurements are produced inside
-the project's DevContainer (`docker/Dockerfile.dev`, Rocky Linux 9)
+the project's DevContainer (`docker/Dockerfile.dev`, Debian bookworm)
 so they are reproducible on any host that runs Docker.
 
-## What this folder contains
+## Layout
+
+```
+benchmark/
+├── RESULTS.md     executive summary + per-change writeup. Start here.
+├── configs/       the pinned run configurations (YAML)
+├── holdouts/      gage lists withheld from assimilation (scaling-DA evaluation)
+├── docker/        benchmark-only images (frozen py3.9 arms of the study matrix)
+├── scripts/       every driver, prep, comparison and plotting script
+├── data/          input GeoPackages + synthesized forcing (gitignored, built locally)
+├── golden/        reference output netCDFs for the correctness gate (gitignored)
+├── results/       per-run JSON metrics, `{label}.json` / `.kernel.json` / `.conus.json`
+└── figures/       PNG bar charts embedded in RESULTS.md
+```
+
+Everything is invoked from the **repo root**, e.g.
+`python benchmark/scripts/bench_e2e.py`. Nothing is cwd-sensitive: each script
+resolves `data/`, `golden/`, `results/` and `figures/` from its own location,
+and a config's relative data paths resolve against **the config file's own
+directory** (hence the `../data/...` in `configs/*.yaml`).
+
+### `configs/`
 
 | File | Purpose |
 |---|---|
-| `RESULTS.md` | Executive summary plus per-change technical writeup with bar charts. **Start here.** |
 | `nhf_subset_ohio.yaml` | Tier A config: 1-day, ~11 k flowpaths, single worker. Used for correctness gates and kernel-dominated wall measurement. |
 | `conus.yaml` | Tier C config: full CONUS NHF (1.1 M flowpaths), 8 workers, 24 timesteps. Used for production-scale wall measurement. |
+
+### `holdouts/`
+
+Newline-separated USGS site numbers passed to
+`compute_parameters.data_assimilation_parameters.scaling_da.holdout_sites_file`.
+Sites listed there are excluded from assimilation so their gages stay
+available as independent evaluation targets. `holdout_vpu01*.txt` are the
+VPU-01 experiment arms, `holdout_ohio_fold1.txt` and `holdout_122.txt` the
+Ohio ones. Files whose name starts with `_` are per-run scratch written by
+the analysis harnesses and are gitignored.
+
+### `docker/`
+
+| File | Purpose |
+|---|---|
+| `Dockerfile.py39` | Frozen Python 3.9 image with the optimized code, the `after-py39` arm of the study matrix. |
+| `Dockerfile.baseline-py39` | Pristine pre-PR#94 toolchain, the `baseline` arm. |
+
+Both belong to `scripts/run_matrix.sh`, which is a **frozen study**: it backs the
+code-vs-Python attribution table already committed in `RESULTS.md`, and does not
+track the current source. `Dockerfile.py39` builds HEAD on Python 3.9, and the
+config package now uses PEP 604 annotations (`str | None`) in pydantic class
+bodies, which are a hard `TypeError` on 3.9 — so that arm only builds from a
+commit predating the scaling-DA config fields. Python 3.9 is not a runtime worth
+restoring; the production target is 3.12.
+
+Both build from the **repo root** as context (`-f benchmark/docker/...` `.`).
+The everyday dev/benchmark image is `docker/Dockerfile.dev` at the repo root,
+not one of these.
+
+### `scripts/`
+
+| File | Purpose |
+|---|---|
 | `bench_e2e.py` | Tier A driver. Runs the full `nwm_routing` CLI, measures wall/CPU/RSS (resident set size), compares output to `golden/` (PASS / FAIL gate). |
 | `bench_conus.py` | Tier C driver. Single CONUS run with `--profile {cprofile,pyspy,none}` for hot-path analysis. |
 | `bench_kernel.py` | Tier B microbenchmark. Replays harvested `compute_network_structured()` calls so the MC kernel can be timed in isolation, without the Python pipeline around it. |
+| `bench_da.py` | Marginal cost of each data-assimilation capability, measured as an A/B against the same case with that capability off. |
 | `harvest_kernel_inputs.py` | Records the kernel inputs from a real Tier A run into `data/kernel_calls.pkl`, so the kernel bench can replay them deterministically. |
 | `regression_check.sh` | **Pre-PR regression check.** Builds your working tree and a baseline ref (default `development`), runs the tiers on both, and flags performance/accuracy regressions. Exits non-zero on failure. See "Checking your changes for regressions" below. |
 | `compare_runs.py` | The baseline-vs-candidate comparison + gating step behind `regression_check.sh`; also runnable by hand on any two result tags. |
+| `compare_baseline_after.py` | Direct netCDF diff of two output directories, for eyeballing an accuracy change outside the gate. |
 | `run_matrix.sh`, `summarize_matrix.py` | Build and run the three-way study matrix (baseline / after-py39 / after-py311) and print the code-vs-Python attribution table behind `RESULTS.md`. |
-| `prep_ohio_data.py`, `prep_conus.py` | Build the Tier A and Tier C input data from the NHF v1.1.4 CONUS GeoPackage. |
+| `prep_ohio_data.py`, `prep_conus.py`, `prep_vpu.py` | Build the Tier A, Tier C and per-VPU input data from the NHF CONUS GeoPackage. |
 | `run_conus_lakes.py` | **NHF release validation.** Routes a CONUS geopackage as-is (read-only, lakes kept) and verifies finite output; the waterbody warnings during the network build are the per-release lake census. Exit code is CI-friendly. |
 | `sweep_max_loop_size.py` | Runs Tier A across a sweep of `max_loop_size` values, captures wall/CPU/RSS per point, writes `results/max_loop_size_sweep.json`. Backs the operational deployment recommendation on chunk sizing. |
 | `plot_max_loop_size.py` | Renders the sweep JSON to `figures/max_loop_size_sweep.png`. |
-| `data/`, `golden/` | Input GeoPackages and reference output netCDFs (gitignored; build locally). |
-| `results/` | Per-run JSON metric files (`{label}.json`, `{label}.kernel.json`, `{label}.conus.json`, `max_loop_size_sweep.json`). |
-| `figures/` | PNG bar charts embedded in `RESULTS.md`. Regenerate via `python benchmark/generate_figures.py`. |
 | `generate_figures.py` | Builds the bar charts in `figures/` from the measured numbers (constants at the top). |
+| `paths.py` | Resolves run-output directory names to absolute paths under `data/results/`, so a harness writes to the same place from any cwd. |
 
 ## High-level summary
 
@@ -47,7 +101,7 @@ cooldown-gated three-way matrix. See `RESULTS.md` for the baseline
 The work is grouped into four tracks:
 
 1. **Toolchain and build environment** (`docker/Dockerfile.dev`,
-   `pyproject.toml`): **Python 3.9 -> 3.11** (the production target),
+   `pyproject.toml`): **Python 3.9 -> 3.12** (the production target),
    picking up CPython's interpreter speedups (~6% on CONUS, in the
    Python-heavy graph-construction phase); `fiona` dropped for
    `pyogrio` (no system GDAL or C++ toolchain); system packages in one
@@ -180,10 +234,10 @@ docker run --rm \
   -v "$(pwd)/benchmark:/t-route/benchmark" \
   troute-dev:bench \
   bash -c "cd /t-route && \
-    python benchmark/prep_ohio_data.py  --src /hydrofabric/nhf_1.1.4.gpkg && \
-    python benchmark/prep_conus.py --src /hydrofabric/nhf_1.1.4.gpkg && \
-    python benchmark/bench_e2e.py --save-golden && \
-    python benchmark/harvest_kernel_inputs.py"
+    python benchmark/scripts/prep_ohio_data.py  --src /hydrofabric/nhf_1.1.4.gpkg && \
+    python benchmark/scripts/prep_conus.py --src /hydrofabric/nhf_1.1.4.gpkg && \
+    python benchmark/scripts/bench_e2e.py --save-golden && \
+    python benchmark/scripts/harvest_kernel_inputs.py"
 ```
 
 What each step does:
@@ -224,9 +278,9 @@ docker run --rm \
   -v "$(pwd)/benchmark:/t-route/benchmark" \
   troute-dev:bench \
   bash -c "cd /t-route && \
-    python benchmark/bench_e2e.py    --runs 5  --warmup 2 --label tierA --json && \
-    python benchmark/bench_kernel.py --runs 15 --warmup 3 --label tierB --json && \
-    python benchmark/bench_conus.py  --profile none      --label tierC --json"
+    python benchmark/scripts/bench_e2e.py    --runs 5  --warmup 2 --label tierA --json && \
+    python benchmark/scripts/bench_kernel.py --runs 15 --warmup 3 --label tierB --json && \
+    python benchmark/scripts/bench_conus.py  --profile none      --label tierC --json"
 ```
 
 Per-tier notes:
@@ -249,7 +303,7 @@ Per-tier notes:
 docker run --rm \
   -v "$(pwd)/benchmark:/t-route/benchmark" \
   troute-dev:bench \
-  python /t-route/benchmark/generate_figures.py
+  python /t-route/benchmark/scripts/generate_figures.py
 ```
 
 The script reads its numbers from constants at the top of the file
@@ -294,7 +348,7 @@ whether a new NextGen Hydrofabric release still routes through t-route with
 waterbodies enabled, run:
 
 ```bash
-python benchmark/run_conus_lakes.py --src /path/to/nhf_conus.gpkg
+python benchmark/scripts/run_conus_lakes.py --src /path/to/nhf_conus.gpkg
 ```
 
 The script reads the geopackage read-only (no copy, no data repair), builds
@@ -314,14 +368,14 @@ accuracy regressions. One script does the whole thing:
 
 ```bash
 # one-time: build the data the harness replays (see "Set up the input data" above)
-python benchmark/prep_ohio_data.py --src /path/to/nhf_1.2.1.gpkg
-python benchmark/harvest_kernel_inputs.py
+python benchmark/scripts/prep_ohio_data.py --src /path/to/nhf_1.2.1.gpkg
+python benchmark/scripts/harvest_kernel_inputs.py
 
 # compare your working tree vs development (Tier A + Tier B)
-benchmark/regression_check.sh
+benchmark/scripts/regression_check.sh
 
 # also include the CONUS tier (needs the CONUS dataset + ~32 GB RAM)
-benchmark/regression_check.sh --conus
+benchmark/scripts/regression_check.sh --conus
 ```
 
 `regression_check.sh` builds a Docker image for each side, runs the
@@ -385,7 +439,7 @@ deterministic.
 result tags already in `benchmark/results/`:
 
 ```bash
-python benchmark/compare_runs.py \
+python benchmark/scripts/compare_runs.py \
   --baseline regress-base --candidate regress-cand --conus
 ```
 
@@ -394,8 +448,8 @@ python benchmark/compare_runs.py \
 - All measurements were taken inside the DevContainer on linux/arm64.
   Relative speedups generalize; absolute seconds will shift with the
   host CPU and the container runtime's I/O overhead.
-- `cpu_pool=1` in `nhf_subset_ohio.yaml` and `cpu_pool=8` in
-  `conus.yaml` is deliberate. Tier A measures kernel-dominated
+- `cpu_pool=1` in `configs/nhf_subset_ohio.yaml` and `cpu_pool=8` in
+  `configs/conus.yaml` is deliberate. Tier A measures kernel-dominated
   single-thread cost; Tier C measures whether the workers are
   well-fed.
 - cProfile inflates Python-loop self-time by 2-5x. Use clean runs
