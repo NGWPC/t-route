@@ -85,6 +85,17 @@ def _validate_flowpaths_channel_params(flowpaths):
         f"Affected fp_ids{more}: {preview}"
     )
 
+# Layers a geopackage may legitimately omit (read_geo_file loads them as empty
+# frames); validation must not reject a valid lake-free / non-reservoir domain.
+OPTIONAL_LAYERS: frozenset[str] = frozenset({"lakes", "reservoir_da"})
+
+# Columns a PRESENT layer may omit: NHF >= 1.1.4 only, consumed only by the
+# scaling DA (which raises its own clear error when enabled without them).
+OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
+    "flowpaths": frozenset({"total_da_sqkm", "vpu_id"}),
+}
+
+
 def _missing_requested_columns(
     available_by_layer: dict[str, set],
 ) -> dict[str, list]:
@@ -100,11 +111,15 @@ def _missing_requested_columns(
     for name, columns, _ in LAYERS_TO_READ:
         if columns is None:
             continue
+        optional_cols = OPTIONAL_COLUMNS.get(name, frozenset())
+        required = [c for c in columns if c not in optional_cols]
         available = available_by_layer.get(name)
         if available is None:
-            missing_by_layer[name] = list(columns)
+            # An absent optional layer is fine; an absent core topology layer is not.
+            if name not in OPTIONAL_LAYERS:
+                missing_by_layer[name] = required
             continue
-        absent = [c for c in columns if c not in available]
+        absent = [c for c in required if c not in available]
         if absent:
             missing_by_layer[name] = absent
     return missing_by_layer
@@ -159,7 +174,11 @@ LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
     (
         "flowpaths",
         ["fp_id", "length_km", "n", "mainstem_lp", "topwdth", "slope",
-         "ncc", "btmwdth", "musx", "chslp", "topwdthcc", "musk"],
+         "ncc", "btmwdth", "musx", "chslp", "topwdthcc", "musk",
+         # scaling-DA-only fields (NHF >= 1.1.4, optional): drainage area for the
+         # area scaling, and the VPU the per-tree theta is regionalized from.
+         "total_da_sqkm",
+         "vpu_id"],
         True,
     ),
     (
@@ -209,8 +228,21 @@ def read_ngen_waterbody_df(parm_file, lake_index_field="wb-id", lake_id_mask=Non
     if Path(parm_file).suffix == ".gpkg":
         df = gpd.read_file(parm_file, layer="lakes")
 
-        df = df.drop(["id", "toid", "hl_id", "hl_reference", "hl_uri", "geometry"], axis=1).rename(
-            columns={"hl_link": "lake_id"}
+        # The lake key differs by vintage (v2.01: hl_link, no lake_id; v2.2:
+        # lake_id, no hl_link); key off what is present, drop with errors="ignore".
+        if "lake_id" not in df.columns:
+            if "hl_link" not in df.columns:
+                msg = (
+                    f"{parm_file}: the 'lakes' layer has neither a 'lake_id' nor an "
+                    f"'hl_link' column, so the lake id cannot be resolved; columns are "
+                    f"{sorted(df.columns)}"
+                )
+                raise KeyError(msg)
+            df = df.rename(columns={"hl_link": "lake_id"})
+        df = df.drop(
+            ["id", "toid", "hl_id", "hl_reference", "hl_uri", "geometry"],
+            axis=1,
+            errors="ignore",
         )
         df["lake_id"] = df.lake_id.astype(float).astype(int)
         df = df.set_index("lake_id").drop_duplicates().sort_index()
@@ -267,11 +299,18 @@ def read_geo_file(supernetwork_parameters, cpu_pool):
             ignore_geometry=ignore_geometry,
         )
 
-    # Read present layers in parallel; layers absent from the geopackage become
-    # empty DataFrames (they are used conditionally downstream). to_read keeps
-    # the full (name, columns, ignore_geometry) tuples so starmap can unpack
-    # them into read_layer's arguments.
-    to_read = [layer for layer in LAYERS_TO_READ if layer[0] in gpkg_layers]
+    # Read present layers in parallel (absent ones become empty frames), pruning
+    # OPTIONAL columns to what the layer carries -- gpd.read_file raises on a
+    # requested column the layer lacks. Required columns were validated above.
+    to_read = []
+    for name, columns, ignore_geometry in LAYERS_TO_READ:
+        if name not in gpkg_layers:
+            continue
+        optional = OPTIONAL_COLUMNS.get(name)
+        if columns is not None and optional:
+            fields = set(pyogrio.read_info(geo_file_path, layer=name)["fields"])
+            columns = [c for c in columns if c not in optional or c in fields]
+        to_read.append((name, columns, ignore_geometry))
     if not to_read:
         raise ValueError(
             f"None of the expected layers to read were present in the geopackage: "
@@ -431,7 +470,7 @@ def _clean_waterbodies(
         )
         waterbody_df = waterbody_df[lake_ids.notna()].copy()
         lake_ids = lake_ids[lake_ids.notna()]
-    waterbody_df[lake_id_field] = lake_ids.astype(int)
+    waterbody_df.loc[:, lake_id_field] = lake_ids.astype(int)
 
     # 2. index + dedup
     waterbody_df = waterbody_df.set_index(lake_id_field)
@@ -502,7 +541,7 @@ def _clean_waterbodies(
         )
 
     waterbody_df = waterbody_df.copy()
-    waterbody_df["virtual_fp_id"] = waterbody_df["virtual_fp_id"].astype(int)
+    waterbody_df.loc[:, "virtual_fp_id"] = waterbody_df["virtual_fp_id"].astype(int)
     summary = (
         "waterbodies: %d of %d lakes retained for reservoir routing",
         len(waterbody_df), n_raw,
@@ -608,7 +647,18 @@ class NHFPreprocessMixin:
                 )
             else:
                 gage_ids = pd.DataFrame(columns=["hy_id", "ref_fp_id"])
-            hy_id_to_ref_id = pd.concat([waterbody_ids[["hy_id", "ref_fp_id"]].copy(), gage_ids[["hy_id", "ref_fp_id"]]])
+            # Skip empty placeholders: concatenating them is deprecated and in
+            # pandas 3 their object dtypes would win.
+            _ref_id_parts = [
+                df[["hy_id", "ref_fp_id"]]
+                for df in (waterbody_ids, gage_ids)
+                if not df.empty
+            ]
+            hy_id_to_ref_id = (
+                pd.concat(_ref_id_parts, copy=True)
+                if _ref_id_parts
+                else pd.DataFrame(columns=["hy_id", "ref_fp_id"])
+            )
             _ref_ids = reference_flowpaths.merge(
                 hy_id_to_ref_id,
                 left_on='ref_fp_id',
@@ -1240,6 +1290,39 @@ class NHFPreprocessMixin:
                 len(outlet), label, outlet["up_node_id"].nunique(),
             )
         return outlet
+
+    def build_gage_vpu_map(self, gages: pd.DataFrame, flowpaths: pd.DataFrame) -> None:
+        """Record ``site_no -> vpu_id`` for the scaling DA's per-tree theta.
+
+        Kept as a small dict rather than joined onto the routing table (~1.1M
+        redundant strings at CONUS). Empty on hydrofabrics without vpu_id;
+        callers fall back to the default theta.
+        """
+        self.gage_vpu: dict[str, str] = {}
+        if gages.empty or flowpaths.empty:
+            return
+        if "vpu_id" not in flowpaths.columns or "fp_id" not in gages.columns:
+            LOG.debug(
+                "gage->vpu map: hydrofabric has no vpu_id on flowpaths; every gage "
+                "tree will use the default theta."
+            )
+            return
+        fp_to_vpu = (
+            flowpaths[["fp_id", "vpu_id"]].dropna().drop_duplicates("fp_id")
+            .set_index("fp_id")["vpu_id"]
+        )
+        joined = gages[["site_no", "fp_id"]].dropna()
+        joined = joined.assign(vpu_id=joined["fp_id"].map(fp_to_vpu)).dropna(subset=["vpu_id"])
+        self.gage_vpu = {
+            str(s).strip(): str(v).strip()
+            for s, v in zip(joined["site_no"], joined["vpu_id"], strict=True)
+        }
+        n_unmapped = gages["site_no"].nunique() - len(self.gage_vpu)
+        if n_unmapped > 0:
+            LOG.debug(
+                "gage->vpu map: %d of %d gage(s) have no vpu_id and will use the "
+                "default theta", n_unmapped, gages["site_no"].nunique(),
+            )
 
     def _preprocess_streamflow_and_diversion_da(self, gages: pd.DataFrame) -> None:
         """Resolve the gage crosswalk and the diversion map.

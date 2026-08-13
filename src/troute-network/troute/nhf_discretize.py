@@ -119,7 +119,7 @@ def discretize_flowpaths(
     aggregate_short_reaches: bool = True,
     export_links_nodes_gpkg_path: Union[None, str] = None,
     protected_fp_ids: set[int] | None = None,
-) -> tuple[pd.DataFrame, dict[int, int], dict[int, int]]:
+) -> tuple[pd.DataFrame, dict[int, int]]:
     """Discretize flowpaths into uniform-length links and resolve short reaches.
 
     Parameters
@@ -147,11 +147,10 @@ def discretize_flowpaths(
 
     Returns
     -------
-    tuple
-        (
-            pd.DataFrame,  # formatted link table that matches _dataframe format from AbstractNetwork
-            dict[int, int] # mapping of virtual_nexus_id to a new node when the original node was merged
-        )
+    link_table : pd.DataFrame
+        formatted link table that matches _dataframe format from AbstractNetwork
+    merged_node_crosswalk : dict[int, int]
+        mapping of virtual_nexus_id to a new node when the original node was merged
 
     """
     cur_node_id = int(np.nanmax(virtual_flowpaths[[FIELD_DN_VIRTUAL_NEX_ID, FIELD_UP_VIRTUAL_NEX_ID]].values) + 1)
@@ -164,8 +163,11 @@ def discretize_flowpaths(
     cur_node_id += n + 1
 
     ### TEMP PATCH 2 ###  see 1162231
-    dup_up_node = virtual_flowpaths.groupby(FIELD_UP_VIRTUAL_NEX_ID).cumcount()
-    mask = dup_up_node > 0
+    # Reassign duplicate up-node ids so each is unique. `duplicated(keep="first")`
+    # flags every 2nd+ occurrence; `& notna()` excludes NaN up-nodes, which must
+    # NOT be reassigned -- doing so (dropna=False) breaks the routing output.
+    up_col = virtual_flowpaths[FIELD_UP_VIRTUAL_NEX_ID]
+    mask = up_col.duplicated(keep="first") & up_col.notna()
     n = mask.sum()
     virtual_flowpaths.loc[mask, FIELD_UP_VIRTUAL_NEX_ID] = np.arange(cur_node_id, cur_node_id + n)
     cur_node_id += n + 1
@@ -178,7 +180,7 @@ def discretize_flowpaths(
         )
     else:
         merged_node_crosswalk = {}
-    links = _discretize_links(links, discretization_len_m, cur_node_id)  
+    links = _discretize_links(links, discretization_len_m, cur_node_id)
 
     if export_links_nodes_gpkg_path is not None:
         export_links_and_nodes(links, virtual_flowpaths, export_links_nodes_gpkg_path)
@@ -474,14 +476,56 @@ def _discretize_links(
 
     return LinkArrays(link_fp_id, link_vfp_id, dn_node_id, up_node_id, length, segment_order)
 
+def _interpolate_segment_area(df: pd.DataFrame) -> pd.Series:
+    """Drainage area along a flowpath, not just at its outlet.
+
+    A constant per-flowpath total makes the DA's area-scaling step exactly 1
+    between junctions and credits the upstream end with area it does not drain.
+    Area instead rises linearly from what enters at the upstream node to the
+    flowpath total (uniform lateral inflow, the first-order choice); undivided
+    flowpaths keep their outlet value.
+    """
+    fp, so = FIELD_FP_ID, FIELD_VFP_ORDER
+    order = df.sort_values([fp, so], kind="stable")
+    grp = order.groupby(fp, sort=False)
+    cum = grp["length"].cumsum().to_numpy(dtype=float)
+    tot = grp["length"].transform("sum").to_numpy(dtype=float)
+    frac = np.where(tot > 0.0, cum / tot, 1.0)
+
+    head, tail = grp.head(1), grp.tail(1)
+    a_out = tail.set_index(fp)["total_da_sqkm"].astype(float)
+    out_node = tail.set_index(fp)["dn_node_id"]
+    up_node = head.set_index(fp)["up_node_id"]
+    # Area arriving at a node is the summed area of every flowpath that ends there, so a
+    # confluence hands its branches' combined area to the flowpath below it.
+    node_area = a_out.groupby(out_node).sum()
+    a_up = up_node.map(node_area).fillna(0.0).astype(float)
+
+    a_out_seg = order[fp].map(a_out).to_numpy(dtype=float)
+    a_up_seg = order[fp].map(a_up).to_numpy(dtype=float)
+    # A flowpath cannot drain less than what enters it nor more than its own total; bad
+    # inputs would otherwise produce a non-monotone profile and amplify the correction.
+    a_up_seg = np.clip(a_up_seg, 0.0, a_out_seg)
+    vals = a_up_seg + (a_out_seg - a_up_seg) * frac
+    return pd.Series(np.clip(vals, 0.0, a_out_seg), index=order.index).reindex(df.index)
+
+
 def _format_link_df(links: LinkArrays, flowpaths: pd.DataFrame) -> pd.DataFrame:
     """Conform to AbstractNetwork format and build mapping from link id to fp_id."""
+    # Carry total_da_sqkm (per flowpath) onto every routed segment when present,
+    # so the simple-scaling DA can read per-reach drainage area off the routed
+    # dataframe. Each split segment inherits its parent flowpath's cumulative
+    # total; the outlet (max segment_order) segment holds the gage's A_o.
+    extra_cols = ["total_da_sqkm"] if "total_da_sqkm" in flowpaths.columns else []
     _dataframe = pd.merge(
         links.to_df(),
-        flowpaths[CHANNEL_PARAMS + [FIELD_FP_ID]],
+        flowpaths[CHANNEL_PARAMS + [FIELD_FP_ID] + extra_cols],
         on=FIELD_FP_ID,
         how="left",
     )
+
+    if extra_cols:
+        _dataframe["total_da_sqkm"] = _interpolate_segment_area(_dataframe)
 
     # Conform to abstractnetwork _dataframe
     _dataframe["alt"] = 0
