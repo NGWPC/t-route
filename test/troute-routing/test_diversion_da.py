@@ -18,6 +18,7 @@ from timeslices, or the climatological fill in forecast mode.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from functools import partial
 
 import numpy as np
@@ -274,15 +275,25 @@ class TestMassBalanceMonitor:
     def test_clamped_donor_reports_the_unmatched_volume(self, caplog):
         from troute.routing.compute import _warn_diverted_mass_imbalance
 
-        # two timesteps clamped to zero while 100 and 200 m3/s were being diverted
+        # Two timesteps clamped to zero while 100 and 200 m3/s were being diverted.
+        # The observation frame carries the LEADING INITIAL-CONDITION COLUMN, which is the
+        # convention the kernel reads: usgs_values[:, 0] seeds the state at t0
+        # (mc_reach.pyx:461) and the diversion subtraction indexes usgs_values[:, timestep]
+        # with timestep running from 1 (mc_reach.pyx:890). The routed flow has that slot
+        # removed, so flow[k] pairs with column k+1. This test previously passed a
+        # three-wide frame for three routed timesteps, which encoded the off-by-one it was
+        # meant to guard and left the final timestep with no observation at all.
         with caplog.at_level(logging.WARNING):
             _warn_diverted_mass_imbalance(
                 self._results([0.0, 50.0, 0.0]),
                 {DONOR_FP_ID: GAGE_LINK},
-                self._obs([-1.0, 100.0, 10.0, 200.0]),
+                self._obs([0.0, 100.0, 10.0, 200.0]),
                 dt=300,
             )
         assert "Mass is not conserved" in caplog.text
+        # Both clamped timesteps, and the volume from THEIR columns: (100 + 200) * dt.
+        assert "at 2 of 3 timestep(s)" in caplog.text
+        assert f"{(100.0 + 200.0) * 300:.3g}" in caplog.text
         assert "2 of 3" in caplog.text
         # upper bound on created water: (100 + 200) m3/s over one 300 s step each
         assert "9e+04" in caplog.text or "90000" in caplog.text
@@ -308,11 +319,13 @@ class TestMassBalanceMonitor:
         assert "1 of 2" in caplog.text
         assert "3e+04" in caplog.text or "30000" in caplog.text
 
-    def test_observations_shorter_than_the_run_compare_over_the_overlap(self, caplog):
-        """Fewer observation columns than routed steps must not raise.
+    def test_observations_shorter_than_the_run_are_skipped_not_truncated(self, caplog):
+        """Too few columns to align: report it and skip, rather than compare a subset.
 
-        usgs_df spans the DA window, which can end before the routing does, so the
-        two arrays are not the same length and only the overlap is comparable.
+        A frame one column short could be an nts-wide series starting at t0 + dt as
+        easily as a truncated nts+1 one, and the two need opposite offsets. Comparing
+        over whatever overlaps would silently pick one and report a mass balance that
+        may be attributed to the wrong timesteps.
         """
         from troute.routing.compute import _warn_diverted_mass_imbalance
 
@@ -323,7 +336,8 @@ class TestMassBalanceMonitor:
                 self._obs([np.nan, 100.0]),
                 dt=300,
             )
-        assert "1 of 1" in caplog.text
+        assert "cannot be aligned" in caplog.text
+        assert "Mass is not conserved" not in caplog.text
 
     def test_dry_reach_with_nothing_to_divert_is_not_reported(self, caplog):
         """Zero flow is only a mass-balance problem if a transfer was requested.
@@ -457,10 +471,23 @@ class TestObservationGridAlignment:
         assert out.shape[1] == self.NTS + 1
         assert out.iloc[0, 2:].isna().all()
 
-    def test_non_datetime_columns_pass_through(self):
+    def test_non_datetime_columns_of_the_right_width_pass_through(self):
         """The BMI array path can hand over positional columns already on the grid."""
-        df = pd.DataFrame([[1.0, 2.0]], index=pd.Index([GAGE_LINK], dtype="int64"))
+        df = pd.DataFrame(
+            [[1.0] * (self.NTS + 1)], index=pd.Index([GAGE_LINK], dtype="int64")
+        )
         assert self._align(df) is df
+
+    def test_positional_frame_of_the_wrong_width_is_refused(self):
+        """Width is the only grid property checkable without timestamps.
+
+        A positional frame used to pass through at ANY width, so the kernel read
+        column j as t0 + j*dt regardless and assimilated observations at the wrong
+        timesteps while still producing plausible discharge.
+        """
+        df = pd.DataFrame([[1.0, 2.0]], index=pd.Index([GAGE_LINK], dtype="int64"))
+        with pytest.raises(ValueError, match="width is 2 where the kernel requires"):
+            self._align(df)
 
     def test_empty_frame_passes_through(self):
         empty = pd.DataFrame()
@@ -473,3 +500,92 @@ class TestObservationGridAlignment:
             out = self._align(stale)
         assert out.notna().to_numpy().sum() == 0
         assert "no observation column lines up" in caplog.text
+
+class TestMassImbalanceReportAlignment:
+    """The clamp report must compare each routed flow against the RIGHT observation.
+
+    ``usgs_df`` columns are the positional routing grid the kernel indexes as
+    ``usgs_values[gage_i, timestep]``, and the kernel's timestep runs from 1 -- column 0 is
+    the initial condition at ``t0``. The returned flow has that initial-condition slot
+    removed, so ``flow[k]`` is routing timestep ``k+1`` and pairs with column ``k+1``.
+
+    Slicing the observations from column 0 lines the two series up one timestep early. It
+    does not change any routed result, but it mislabels which timesteps clamped and
+    mis-sums the reported volume, which defeats the only purpose of the report.
+    """
+
+    DONOR, GAGE, DT = 101, 900, 300
+
+    def _run(self, caplog, flow, obs):
+        from troute.routing.compute import RoutingResults, _warn_diverted_mass_imbalance
+
+        n = len(flow)
+        arr = np.zeros((1, n * 4), dtype="float32")
+        arr[0, 0::4] = flow
+        results = [RoutingResults([np.array([self.DONOR]), arr])]
+        usgs_df = pd.DataFrame([obs], index=pd.Index([self.GAGE], name="link"))
+        with caplog.at_level(logging.WARNING):
+            _warn_diverted_mass_imbalance(results, {self.DONOR: self.GAGE}, usgs_df, self.DT)
+        return caplog.text
+
+    def test_clamp_is_attributed_to_the_correct_timestep(self, caplog):
+        """Only the timestep whose OWN observation asked for water may be reported.
+
+        flow = [0, 5, 5]; the request sits in column 3, which is flow[2] and did NOT clamp.
+        Reading from column 0 would pair flow[0]=0 with column 0's request and report a
+        clamp that never happened.
+        """
+        text = self._run(caplog, flow=[0.0, 5.0, 5.0], obs=[7.0, 0.0, 0.0, 3.0])
+        assert "clamped" not in text, "reported a clamp using the initial-condition column"
+
+    def test_genuine_clamp_is_still_reported_with_the_right_volume(self, caplog):
+        """flow[0]=0 pairs with column 1 (=4.0), so one clamp of 4.0 * dt must be reported."""
+        text = self._run(caplog, flow=[0.0, 5.0, 5.0], obs=[99.0, 4.0, 0.0, 0.0])
+        assert "clamped to zero flow at 1 of 3" in text
+        assert f"{4.0 * self.DT:.3g}" in text
+
+    def test_unalignable_observation_frame_is_skipped_not_guessed(self, caplog):
+        """Too few columns to align: warn and skip rather than report something wrong."""
+        text = self._run(caplog, flow=[0.0, 5.0, 5.0], obs=[4.0, 0.0])
+        assert "cannot be aligned" in text
+        assert "clamped to zero flow" not in text
+
+
+class TestDiffusiveNudgingGate:
+    """The diffusive DA switch must read the VALUE, not merely the key's presence.
+
+    These are structural guard-rails, not behavioural tests: exercising
+    compute_diffusive_routing end to end needs a full diffusive domain. They pin the
+    two lines that made the bug, so a revert fails loudly.
+
+    Paths are resolved from this file, never from the cwd -- the NHF integration cases
+    chdir, so a relative path here passes alone and fails in the full suite.
+    """
+
+    REPO = Path(__file__).resolve().parents[2]
+
+    def test_both_da_parameter_builders_always_set_the_key(self):
+        """Which is why `in da_parameter_dict` was unconditionally true.
+
+        nhd_network_utilities_v02 and DataAssimilation both do
+        `da_parameter_dict["diffusive_streamflow_nudging"] = ...get(..., False)`, so
+        the key exists even when the feature is off. Gating on presence therefore
+        enabled diffusive DA on every diffusive run, and the frame it received had
+        never been put on the kernel's timestep grid.
+        """
+        from troute.nhd_network_utilities_v02 import build_da_sets  # noqa: F401
+
+        src = (self.REPO / "src/troute-network/troute/nhd_network_utilities_v02.py").read_text()
+        assert 'da_parameter_dict["diffusive_streamflow_nudging"] = ' in src
+
+        compute_src = (self.REPO / "src/troute-routing/troute/routing/compute.py").read_text()
+        assert "if 'diffusive_streamflow_nudging' in da_parameter_dict:" not in compute_src
+        assert "da_parameter_dict.get('diffusive_streamflow_nudging', False)" in compute_src
+
+    def test_diffusive_frame_is_aligned_not_raw(self):
+        """The diffusive branch must route its frame through the grid alignment."""
+        compute_src = (self.REPO / "src/troute-routing/troute/routing/compute.py").read_text()
+        assert (
+            "diffusive_usgs_df = _align_obs_to_model_steps(usgs_df, t0, dt, nts)"
+            in compute_src
+        )

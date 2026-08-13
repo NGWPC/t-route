@@ -34,7 +34,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from itertools import chain
 from functools import cached_property, partial
-from typing import Any, Callable, Literal, Self, Sequence, TYPE_CHECKING, Iterable, TypedDict, Union, cast, get_args
+from typing import Any, Callable, Literal, Self, Sequence, TYPE_CHECKING, Iterable, TypedDict, Union, cast, get_args, overload
 from joblib import delayed, Parallel
 from datetime import datetime
 import pandas as pd
@@ -111,6 +111,9 @@ _compute_func_map = {
 # to_numpy(dtype=...) views taken of them downstream have nothing to mutate,
 # and the kernel treats its array inputs as read-only.
 _EMPTY_F64 = np.empty(0, dtype=np.float64)
+# Per-timestep values the kernel writes, in order: q, v, d, ql (matches
+# `qvd_ts_w` in mc_reach.pyx). Flattened flowveldepth rows stride by this.
+QVD_WIDTH = 4
 _EMPTY_DF = pd.DataFrame()
 _EMPTY_GL_DF = pd.DataFrame(columns=["lake_id", "time", "Discharge"])
 _EMPTY_LIST: list = []
@@ -790,6 +793,9 @@ class ExecutionPlan:
                     )
 
                 elif not waterbody_data.dataframe.empty and not has_gages:
+                    # Waterbodies without gages still need reach breaks at their
+                    # inlets/outlets: a junction-only split merges a reservoir
+                    # with its channel and crashes the kernel's binary_find.
                     path_func = partial(
                         nhd_network.split_at_waterbodies_and_junctions,
                         set(waterbody_data.dataframe.index.to_numpy()),
@@ -989,10 +995,14 @@ def _prep_da_dataframes(
 
     """
     
+    # The DA branches use pandas Index methods; job.river_reaches arrives as a
+    # bare ndarray.
+    param_df_sub_idx = pd.Index(param_df_sub_idx)
     subnet_segs = param_df_sub_idx
     # segments in the subnetwork ONLY, no offnetwork upstreams included
     if exclude_segments:
-        subnet_segs = param_df_sub_idx.difference(set(exclude_segments))
+        # Index.difference wants a list or Index, not a set.
+        subnet_segs = param_df_sub_idx.difference(list(exclude_segments))
     
     # NOTE: Uncomment to easily test no observations...
     # usgs_df = pd.DataFrame()
@@ -1517,16 +1527,21 @@ def _warn_diverted_mass_imbalance(
             gage_link = diversion_da[sid]
             if gage_link not in usgs_df.index:
                 continue
-            # Observation column 0 sits at t0 and only ever seeds the initial condition:
-            # the kernel loops timestep 1..nts subtracting usgs_values[gage_i, timestep]
-            # and then returns flowveldepth[:, 1:], so returned flow[j] was reduced by
-            # observation column j + 1. Comparing flow against column j instead reports
-            # clamp events one timestep away from where they happened.
+            # Column 0 is the initial condition; returned flow[k] is routing step
+            # k+1 and must compare against column k+1. Slicing from 0 shifts every
+            # comparison one step early.
             obs = pd.to_numeric(usgs_df.loc[gage_link], errors="coerce").to_numpy(dtype=float)
-            requested = obs[1 : 1 + flow.shape[0]]
-            # The observations can run out before the routed flow does, so compare only
-            # over the overlap rather than letting the two shapes broadcast-error.
-            flow = flow[: requested.shape[0]]
+            requested = obs[1 : flow.shape[0] + 1]
+            if requested.shape[0] < flow.shape[0]:
+                # An nts-wide frame cannot be aligned without guessing its
+                # convention; skip the check loudly rather than misreport.
+                LOG.warning(
+                    "diversion DA: donor reach %s has %d observation column(s) for %d routed "
+                    "timestep(s), so the observation series cannot be aligned to the routed "
+                    "flow; skipping the mass-balance check for this reach.",
+                    sid, obs.shape[0], flow.shape[0],
+                )
+                continue
             # A clamp event is a timestep where a transfer was actually requested and
             # the donor still came out at zero. A dry reach with nothing to divert is
             # not a mass-balance problem and must not be reported as one.
@@ -1566,7 +1581,22 @@ def _align_obs_to_model_steps(
     still start or step in the wrong place. Absent steps become NaN, which the
     kernel already skips.
     """
-    if usgs_df.empty or not isinstance(usgs_df.columns, pd.DatetimeIndex):
+    if usgs_df.empty:
+        return usgs_df
+    if not isinstance(usgs_df.columns, pd.DatetimeIndex):
+        # Positional columns (the BMI array path) are legal, but the kernel reads
+        # column j as t0 + j*dt with no validation, so enforce the one checkable
+        # property: exactly nts+1 columns (column 0 seeds the IC).
+        if usgs_df.shape[1] != nts + 1:
+            msg = (
+                "streamflow DA: the observation frame has non-datetime columns, so it "
+                "is read positionally, but its width is "
+                f"{usgs_df.shape[1]} where the kernel requires exactly nts+1 = "
+                f"{nts + 1} (column 0 seeds the initial condition at t0={t0}, columns "
+                f"1..{nts} are the model steps at dt={dt}s). A positional frame of any "
+                "other width silently assimilates observations at the wrong timesteps."
+            )
+            raise ValueError(msg)
         return usgs_df
     grid = pd.date_range(pd.Timestamp(t0), periods=nts + 1, freq=pd.Timedelta(seconds=dt))
     if usgs_df.columns.equals(grid):
@@ -1616,6 +1646,29 @@ def _resolve_diversion_da(
     return kernel_map
 
 
+def _align_eloss_columns(eloss_sub: pd.DataFrame, qlat_columns: pd.Index) -> pd.DataFrame:
+    """Put the channel-loss frame on qlat's exact column grid, aligned by LABEL.
+
+    The kernel reads eloss and qlat positionally, but the ET frame's columns come
+    from the ET dataset's own (not window-sliced) time axis -- read positionally,
+    every window would get the run's FIRST hours of loss. An absent timestamp is
+    genuinely zero loss; incomparable label styles (which would silently zero ALL
+    configured loss) are refused.
+    """
+    if eloss_sub.columns.equals(qlat_columns):
+        return eloss_sub
+    aligned = eloss_sub.reindex(columns=qlat_columns, fill_value=0.0)
+    had_loss = bool((eloss_sub.to_numpy() != 0).any()) if eloss_sub.size else False
+    if had_loss and len(eloss_sub.columns.intersection(qlat_columns)) == 0:
+        raise ValueError(
+            "channel-loss (eloss) columns share no label with this window's qlat "
+            f"columns (eloss e.g. {list(eloss_sub.columns[:3])!r}, qlat e.g. "
+            f"{list(qlat_columns[:3])!r}). The two must be on the same timestamp "
+            "labeling, or every configured ET loss would silently become zero."
+        )
+    return aligned
+
+
 def build_compute_package(
     job: ComputationJob,
     forcing: ForcingData,
@@ -1663,6 +1716,9 @@ def build_compute_package(
         index=job.river_index,
         columns=forcing.eloss_cols,
     )
+    # The kernel reads eloss on qlat's positional grid and validates only qlat's
+    # width; a misaligned eloss is a wrong (or out-of-bounds) read, not an error.
+    eloss_sub = _align_eloss_columns(eloss_sub, qlat_sub.columns)
 
     # Update h0. This in-place update of the job's waterbody frame is the
     # run-set state-transfer mechanism: the execution plan (and its per-job
@@ -1670,9 +1726,11 @@ def build_compute_package(
     # network's current waterbody elevations here before packaging.
     job.waterbodies_df.update(forcing.wbody_init)
 
-    # Build streamflow DA dataframes
+    # Exclude off-network upstreams: they are in river_reaches but not in
+    # routing_paths, so a gage there would over-index reach_has_gage in the kernel.
     usgs_df_sub, lastobs_df_sub, da_positions_list_byseg = _prep_da_dataframes(
-        assimilation_data.usgs_df, assimilation_data.lastobs_df, job.river_reaches
+        assimilation_data.usgs_df, assimilation_data.lastobs_df, job.river_reaches,
+        exclude_segments=job.offnetwork_upstreams,
     )
     da_positions_list_byreach, da_positions_list_bygage = _prep_da_positions_byreach(
         job.routing_paths, lastobs_df_sub.index
@@ -2069,20 +2127,21 @@ def compute_diffusive_routing(
         trib_flow = None
         # extract junction inflows from results array
         for j, i in enumerate(results):
-            x = np.in1d(i[0], diffusive_network_data[tw]['tributary_segments'])
+            x = np.isin(i[0], diffusive_network_data[tw]['tributary_segments'])
             if sum(x) > 0:
+                # Stride QVD_WIDTH, not 3: q is one of (q, v, d, ql) per timestep.
                 if j == 0:
                     trib_segs = i[0][x]
-                    trib_flow = i[1][x, ::3]
+                    trib_flow = i[1][x, ::QVD_WIDTH]
                 else:
                     # trib_segs and trib_flow are always set together; the
                     # second check gives the type checker that invariant.
                     if trib_segs is None or trib_flow is None:
                         trib_segs = i[0][x]
-                        trib_flow = i[1][x, ::3]
+                        trib_flow = i[1][x, ::QVD_WIDTH]
                     else:
                         trib_segs = np.append(trib_segs, i[0][x])
-                        trib_flow = np.append(trib_flow, i[1][x, ::3], axis = 0)  
+                        trib_flow = np.append(trib_flow, i[1][x, ::QVD_WIDTH], axis = 0)  
 
         # create DataFrame of junction inflow data            
         junction_inflows = pd.DataFrame(data = trib_flow, index = trib_segs)
@@ -2102,10 +2161,11 @@ def compute_diffusive_routing(
             topobathy_bytw = pd.DataFrame()
             unrefactored_topobathy_bytw = pd.DataFrame()
 
-        # diffusive streamflow DA activation switch
-        #if da_parameter_dict['diffusive_streamflow_nudging']==True:
-        if 'diffusive_streamflow_nudging' in da_parameter_dict:
-            diffusive_usgs_df = usgs_df
+        # Test the VALUE, not the key (the key is always set, defaulting False).
+        # Align the frame: the lookback pad's leading columns would otherwise be
+        # read positionally, applying observations up to a day off.
+        if da_parameter_dict.get('diffusive_streamflow_nudging', False):
+            diffusive_usgs_df = _align_obs_to_model_steps(usgs_df, t0, dt, nts)
         else:
             diffusive_usgs_df = pd.DataFrame()
 
@@ -2167,14 +2227,27 @@ def compute_diffusive_routing(
         )
         
         # mask segments for which we already have MC solution
-        x = np.in1d(rch_list, diffusive_network_data[tw]['tributary_segments'])
-        
+        x = np.isin(rch_list, diffusive_network_data[tw]['tributary_segments'])
+
+        # Widen the diffusive leg's (q, v, d) to the MC leg's (q, v, d, ql) so the
+        # two concatenate; ql is report-only, so zero-filling loses nothing.
+        diff_fvd = dat_all[~x, 3:]
+        diff_fvd = np.concatenate(
+            [
+                diff_fvd.reshape(diff_fvd.shape[0], -1, 3),
+                np.zeros((diff_fvd.shape[0], diff_fvd.shape[1] // 3, 1), dtype=diff_fvd.dtype),
+            ],
+            axis=2,
+        ).reshape(diff_fvd.shape[0], -1)
+
         results_diffusive.append(
             (
-                rch_list[~x], dat_all[~x,3:], 0,
+                rch_list[~x], diff_fvd, 0,
                 # place-holder for streamflow DA parameters
                 (np.asarray([]), np.asarray([]), np.asarray([])),
-                # place-holder for reservoir DA parameters
+                # reservoir DA placeholders: usgs, usace AND usbr -- with only two,
+                # every later slot sat one index low.
+                (np.asarray([]), np.asarray([]), np.asarray([]), np.asarray([]), np.asarray([])),
                 (np.asarray([]), np.asarray([]), np.asarray([]), np.asarray([]), np.asarray([])),
                 (np.asarray([]), np.asarray([]), np.asarray([]), np.asarray([]), np.asarray([])),
                 # place holder for reservoir inflows
@@ -2243,13 +2316,19 @@ class _RoutingResultsParser:
         self._raw[index] = value
 
 
-class RoutingResultsCollection:
+class RoutingResultsCollection(Sequence[Any]):
     def __init__(self, results: Iterable[Any]):
         # Each element is a raw kernel result tuple, or an existing
         # RoutingResults (itself indexable), e.g. from append_timesteps.
         self.results = [RoutingResults(r) for r in results]
 
-    def __getitem__(self, index: int):
+    @overload
+    def __getitem__(self, index: int) -> RoutingResults: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[RoutingResults]: ...
+
+    def __getitem__(self, index: int | slice) -> RoutingResults | list[RoutingResults]:
         return self.results[index]
 
     def __iter__(self):
@@ -2257,6 +2336,11 @@ class RoutingResultsCollection:
 
     def __len__(self):
         return len(self.results)
+
+    def extend(self, results: Iterable[Any]) -> None:
+        """Append further kernel results (the diffusive leg of a hybrid run),
+        wrapping them the same way ``__init__`` does."""
+        self.results.extend(RoutingResults(r) for r in results)
 
     def flow_velocity_depth(self, nts: int, drop_ql: bool = False):
         columns = pd.MultiIndex.from_product(
