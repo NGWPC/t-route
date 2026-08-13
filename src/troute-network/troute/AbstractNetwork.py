@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from functools import partial
 import pandas as pd
 import numpy as np
+import math
 import multiprocessing
 from datetime import datetime, timedelta
 
@@ -968,8 +969,36 @@ class AbstractNetwork(ABC):
             nfiles = int(np.ceil(nts / qts_subdivisions))
             if stream_output:
                 stream_output_time = stream_output.get('stream_output_time', None)
-                if stream_output_time and stream_output_time > max_loop_size:
-                    max_loop_size = stream_output_time
+                # stream_output_time is HOURS; max_loop_size counts forcing
+                # FILES. Comparing them raw was only right for hourly forcing
+                # (-1 = whole run in one file, exempt).
+                if stream_output_time and stream_output_time > 0:
+                    sot_files = math.ceil(stream_output_time * 3600.0 / dt_qlat)
+                    if sot_files > max_loop_size:
+                        max_loop_size = sot_files
+            # The scaling DA's travel-time lag needs every non-final window to
+            # cover max_travel_time_h: its deferred-window halo is one window deep.
+            # max_loop_size counts forcing FILES, so convert via the file cadence
+            # and ENLARGE it here -- the same precedent as stream_output_time
+            # above; the driver's validate_window_envelope backstops this.
+            # Fallback values mirror StreamflowScalingParams' defaults.
+            sda = (self.data_assimilation_parameters or {}).get("streamflow_da") or {}
+            if sda.get("streamflow_scaling"):
+                p = sda.get("streamflow_scaling_parameters") or {}
+                file_h = dt_qlat / 3600.0
+                horizon_files = math.ceil(
+                    float(p.get("max_travel_time_h", 48.0)) / file_h
+                )
+                need = max(int(max_loop_size), horizon_files)
+                if need > max_loop_size:
+                    LOG.info(
+                        "scaling DA: max_loop_size enlarged %s -> %d forcing files "
+                        "(%.3g h -> %.3g h) so every window covers "
+                        "max_travel_time_h, which the deferred-window halo needs.",
+                        max_loop_size, need,
+                        int(max_loop_size) * file_h, need * file_h,
+                    )
+                    max_loop_size = need
             # list of forcing file datetimes
             #datetime_list = [t0 + dt_qlat_timedelta * (n + 1) for n in
             #                 range(nfiles)]
@@ -1047,6 +1076,26 @@ class AbstractNetwork(ABC):
                     run_sets[i]["et_forcing_ds"] = et_ds
             elif et_glob_filter is not None:
                 raise NotImplementedError("ET reads are only implemented for catchment files at this time with a `cat-*` filter")
+
+        # REALIZED window, written back so downstream consumers describe the run
+        # that actually happened. max_loop_size is enlarged above to cover the
+        # scaling DA's travel-time horizon (and by stream_output_time), so a
+        # report reading the CONFIGURED value describes a partitioning that never
+        # ran. Taken from run_sets rather than the local, so it is correct in
+        # every branch of this function, including an explicit qlat_forcing_sets.
+        # The configured value is preserved alongside rather than overwritten;
+        # this function already writes qts_subdivisions back the same way.
+        if run_sets:
+            _dt = float(forcing_parameters.get("dt") or 0.0)
+            _nts = [int(r["nts"]) for r in run_sets if r.get("nts")]
+            if _dt and _nts:
+                forcing_parameters.setdefault(
+                    "max_loop_size_configured", forcing_parameters.get("max_loop_size")
+                )
+                # Non-final windows are uniform; the last one is the remainder.
+                forcing_parameters["max_loop_size_realized_h"] = (
+                    max(_nts) * _dt / 3600.0
+                )
 
         return run_sets
     

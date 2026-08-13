@@ -3,11 +3,19 @@ import argparse
 import time
 
 import numpy as np
+import pandas as pd
 
 from .flow_scaling_utils import append_nonrouting_to_run_results
 from .input import _input_handler_v04
 from .nwm_route import nwm_route
 from .output import nwm_output_generator
+from .scaling_da_apply import (
+    build_scaling_da,
+    merge_injected_obs,
+    network_gage_segments,
+    should_seed_state,
+    validate_window_envelope,
+)
 
 from troute.NHF import NHF
 from troute.DataAssimilation import DataAssimilation
@@ -17,6 +25,7 @@ import troute.hyfeature_network_utilities as hnu
 
 import logging
 LOG = logging.getLogger("TROUTE")
+
 
 def nhf_routing(argv):
 
@@ -167,8 +176,42 @@ def nhf_routing(argv):
     if (not kernelTalks):
         firstRun = False
 
+    # Build the simple-scaling DA once (trees + gage crosswalk) if enabled.
+    scaling_da = build_scaling_da(
+        network, supernetwork_parameters, data_assimilation_parameters,
+        cpu_pool=compute_parameters.get("cpu_pool"),
+    )
+    if scaling_da is not None:
+        # On the REALIZED windows, not the config: max_loop_size counts forcing
+        # files, and stream_output_time can silently enlarge it, so window hours
+        # are only known here.
+        validate_window_envelope(
+            run_sets, scaling_da, default_dt=forcing_parameters.get("dt")
+        )
+    # Every execution plan breaks reaches at the network's gages, the treewise plan
+    # used by serial/by-network/bmi included, so the in-kernel override lands at a
+    # gaged nexus and propagates downstream under any compute method. The split set is
+    # network.gages, which is static, so it does not depend on which observations
+    # happened to arrive in the window the plan was built for.
+
+    # A window whose spread is deferred for its halo is held here until the next
+    # window's innovation arrives; see the flush at the top of the loop body.
+    _pending = None
+
+    def _flush_output(_run, _res, _iter):
+        nwm_output_generator(
+            _run, _res, supernetwork_parameters, output_parameters, parity_parameters,
+            restart_parameters, parity_sets[_iter] if parity_parameters else {},
+            qts_subdivisions, compute_parameters.get("return_courant", False), cpu_pool,
+            network.waterbody_dataframe, network.waterbody_types_dataframe,
+            duplicate_ids_df, data_assimilation_parameters,
+            data_assimilation.lastobs_df, network.link_gage_df,
+            network.link_lake_crosswalk, network.nexus_dict, poi_crosswalk, logFileName,
+            fp_outlet_crosswalk=network.fp_outlet_crosswalk,
+        )
+
     for run_set_iterator, run in enumerate(run_sets):
-        
+
         t0 = run.get("t0")
         dt = run.get("dt")
         nts = run.get("nts")
@@ -177,7 +220,21 @@ def nhf_routing(argv):
             parity_sets[run_set_iterator]["dt"] = dt
             parity_sets[run_set_iterator]["nts"] = nts
 
-        
+        # In-kernel downstream propagation: inject the accepted gage obs into the MC
+        # nudging override BEFORE routing, so the gage correction propagates downstream
+        # through Muskingum-Cunge to the inter-gage reach. Re-injected every loop, since
+        # DataAssimilation rebuilds the frame each time.
+        if scaling_da is not None:
+            # da_sets[i] is the SAME per-window TimeSlice file list the nudging
+            # path consumes, so both read the identical files with the identical
+            # lookback padding.
+            data_assimilation._usgs_df = merge_injected_obs(
+                scaling_da.build_usgs_df(
+                    t0, dt, nts, da_sets[run_set_iterator] if da_sets else None
+                ),
+                data_assimilation.usgs_df,
+            )
+
         route_start_time = time.time()
 
         run_results, subnetwork_list = nwm_route(
@@ -233,11 +290,35 @@ def nhf_routing(argv):
             diversion_da=network.diversion_da,
             # Static split points for the cached execution plan: every gage the
             # network carries, not just those with observations this window.
-            gage_segments=set(network.gages.get("gages", network.gages) or ())
+            gage_segments=network_gage_segments(network)
         )
         
         route_end_time = time.time()
         task_times['route_time'] += route_end_time - route_start_time
+
+        # The upstream spread runs exactly ONCE per window under both arms; only its
+        # POSITION differs. The prognostic arm places it BEFORE the warmstate snapshot
+        # so the corrected discharge lands in q0, but only on the FINAL window -- see
+        # should_seed_state() for why re-seeding every window degrades the correction.
+        # NOTE: this driver keeps no restart of its own (write_lite_restart below is
+        # commented out); forecast restarts go through the BMI driver, which persists q0.
+        seed_state = should_seed_state(scaling_da, run_set_iterator, len(run_sets))
+        # HALO: this window's innovation is what the PREVIOUS window's backward shift
+        # needs to read past its own end. Flush the pending window now that we have it,
+        # so its tail uses real observations instead of persistence -- that fallback is
+        # what made the lagged result depend on max_loop_size, a memory knob.
+        if _pending is not None:
+            _p_run, _p_res, _p_nts, _p_t0, _p_it = _pending
+            # The halo is THIS window's innovation, so the deferred window's
+            # tail reads real observations instead of persistence.
+            scaling_da.apply_in_kernel(
+                _p_res, _p_nts, dt, _p_t0,
+                halo=scaling_da.gather_innovation(run_results),
+            )
+            _flush_output(_p_run, _p_res, _p_it)
+            _pending = None
+        if seed_state:
+            scaling_da.apply_in_kernel(run_results, nts, dt, t0)
 
         # create initial conditions for next loop itteration
         network.new_q0(run_results)
@@ -278,7 +359,29 @@ def nhf_routing(argv):
         else:
             poi_crosswalk = dict()
 
-        output_start_time = time.time() 
+        # Output pass. The gage segment and the inter-gage reach below it were already
+        # corrected in-kernel (downstream propagation via routing, injected above).
+        # new_q0 has already copied the warmstate, so this pass spreads the recorded
+        # innovation UPSTREAM into run_results for the output writer only.
+        #
+        # This is the diagnostic arm's ONLY placement, and it is also where the
+        # prognostic arm lands on every window EXCEPT the last (see seed_state above),
+        # so the written output carries the upstream correction in every window under
+        # both arms. The `not seed_state` guard is what keeps apply_in_kernel to exactly
+        # one call per window: it reconstructs the gage background as
+        # (Q_analyzed - nudge) at the tree root and reads interior segments as-is, so a
+        # second call in the same window would spread on top of already-corrected
+        # interior flow.
+        # Non-final windows WAIT for the next window's halo (flushed above); the
+        # spread here is output-only, so deferring it cannot disturb the routing
+        # chain -- new_q0 has already taken the uncorrected warmstate. The costs
+        # (two windows of run_results resident; a crash in window k+1 loses
+        # window k's unwritten output) are the halo's price.
+        if scaling_da is not None and not seed_state:
+            _pending = (run, run_results, nts, t0, run_set_iterator)
+            continue
+
+        output_start_time = time.time()
                 
         nwm_output_generator(
             run,
