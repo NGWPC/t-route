@@ -1,10 +1,11 @@
 import logging
+import math
 
 from pydantic import BaseModel, DirectoryPath, FilePath, Field, field_validator, model_validator, ConfigDict
 from datetime import datetime
 
-from typing import Any, Dict, Optional, List, Union
-from typing_extensions import Literal
+from typing import Annotated, Any, Dict, Optional, List, Union
+from typing_extensions import Literal, Self
 
 from ._validators import coerce_datetime
 
@@ -220,7 +221,144 @@ class StreamflowDA(BaseModel):
     If True, enable streamflow data assimilation in diffusive module. 
     NOTE: Not yet implemented, leave as False. (June 25, 2024)
     """
+    streamflow_scaling: bool = False
+    """Enable the simple-scaling streamflow DA (NHF networks only): gage
+    observations are injected into the MC kernel before routing (downstream
+    propagation) and the recorded innovation is spread upstream post-routing,
+    area-scaled over each gage's contributing tree. The correction enters the
+    model state on the run's FINAL window only; only discharge is corrected, and
+    the injected volume is an analysis increment, not mass-balanced. Mutually
+    exclusive with ``streamflow_nudging``."""
 
+    streamflow_scaling_parameters: "StreamflowScalingParams" = Field(
+        default_factory=lambda: StreamflowScalingParams()
+    )
+    """Options for the simple-scaling DA; the defaults are a complete
+    configuration, so the block is only needed to override them."""
+
+    @model_validator(mode='after')
+    def check_one_streamflow_da_method(self) -> Self:
+        if self.streamflow_nudging and self.streamflow_scaling:
+            raise ValueError(
+                "streamflow_da.streamflow_nudging and "
+                "streamflow_da.streamflow_scaling are mutually exclusive: both "
+                "drive the same Muskingum-Cunge nudging override, and nudging's "
+                "lastobs state would give the scaling arm cross-window decay "
+                "continuity it is documented not to have."
+            )
+        return self
+
+
+class ThetaRegionalization(BaseModel):
+    """Region theta for the upstream area-scaling step (Ogden-Dawdy 2003).
+
+    Theta must be UNIFORM within a gage tree: the linear step telescopes to the
+    closed form dQ_o*(A_s/A_o)^theta only for a constant exponent, so one value per
+    gage is the finest resolution the method admits. It is therefore resolved once
+    per tree at build time from the gage's VPU, not carried per segment.
+    """
+    model_config = ConfigDict(extra='forbid')
+
+    default: Annotated[float, Field(gt=0)] = 0.77
+    """Theta for any gage whose VPU has no entry in ``by_vpu``. 0.77 is the
+    Ogden-Dawdy basin-wide value; it is a regional calibration constant, not a
+    segment-local constitutive law."""
+
+    by_vpu: dict[str, float] = {}
+    """Per-VPU theta, keyed by the hydrofabric's ``vpu_id`` EXACTLY as it appears
+    there (zero-padded, e.g. "01" not "1"). Unmatched keys are rejected rather than
+    silently ignored, because a mistyped key would otherwise fall back to the
+    default and look like it had been applied."""
+
+    @field_validator("by_vpu")
+    @classmethod
+    def check_vpu_thetas(cls, v: dict[str, float]) -> dict[str, float]:
+        """Reject unusable theta values up front rather than mid-run.
+
+        A bare ``> 0`` test lets NaN through (every comparison with NaN is False, so
+        ``not (x > 0)`` is True but ``x <= 0`` is False), and a NaN theta silently
+        turns the whole tree's correction into NaN.
+        """
+        for vpu, theta in v.items():
+            if not vpu.strip():
+                msg = f"streamflow_scaling_parameters.theta.by_vpu has an empty key: {vpu!r}"
+                raise ValueError(msg)
+            if not math.isfinite(theta) or theta <= 0:
+                msg = (
+                    f"streamflow_scaling_parameters.theta.by_vpu[{vpu!r}] must be a finite positive "
+                    f"number, got {theta!r}"
+                )
+                raise ValueError(msg)
+        return v
+
+
+class StreamflowScalingParams(BaseModel):
+    """
+    Parameters controlling the simple-scaling streamflow DA: insert obs-minus-model
+    at each gage and distribute the correction upstream (area-scaling along reaches,
+    flow-ratio split at confluences). Applied per loop on NHF (-V5) runs.
+
+    Both rules are always in play; which one applies at a given step is a property of
+    the topology (a confluence splits by flow, a linear step scales by area), not a
+    user choice.
+    """
+    # extra='forbid': a misspelled key here fails silently otherwise (e.g. a bad
+    # holdout_sites_file assimilates the gages the run is scored against).
+    model_config = ConfigDict(extra='forbid')
+
+    theta: ThetaRegionalization = ThetaRegionalization()
+    """Region theta, resolved per gage tree from the gage's VPU."""
+
+    synthetic_obs_factor: float | None = None
+    """If set, assimilate synthetic obs = factor * modeled at each gage (mechanics
+    testing / end-to-end demo). Takes precedence over the TimeSlice observations."""
+
+    synthetic_obs_baseline: str | None = None
+    """In-kernel synthetic obs must be a FROZEN open-loop series (a no-DA run's
+    output dir, feature_id=fp_id), not factor*live_model (which compounds under
+    feedback). Required when synthetic_obs_factor is set."""
+
+    holdout_sites_file: str | None = None
+    """Text file (one site_no per line) of gages to EXCLUDE from injection, for
+    held-out skill evaluation. Unknown ids are a hard error -- a typo that removes
+    nothing would let the run assimilate the gages it claims to withhold."""
+
+    min_flow_cms: float = Field(1e-6, gt=0)
+    """Floor (m^3/s) on the confluence flow-ratio split's denominator. A junction at
+    or below this flow contributes no correction at that timestep, guarding the
+    Q_branch/Q_parent division at near-dry junctions."""
+
+    max_travel_time_h: float = Field(48.0, gt=0, allow_inf_nan=False)
+    """Travel-time window (hours) of the upstream correction. The lag and its
+    propagation limit are part of the method, not a switch: a segment tau hours
+    upstream receives the correction shifted by tau (a dominant-delay
+    approximation, not an exact Muskingum-Cunge inverse), and a segment beyond
+    the window receives nothing -- localization rather than physics. This value
+    is the one knob for both. Forcing windows are enlarged automatically so
+    every non-final window covers the horizon and tiles the screen interval
+    (the deferred-window halo is one window deep); that holds two consecutive
+    windows' results resident. Under BMI the deferral runs within one
+    update()/update_until() call, and each update's final window closes with
+    decayed persistence, exactly like the run's final window on the CLI."""
+
+    celerity_mps: float = Field(0.8, gt=0, allow_inf_nan=False)
+    """Constant wave celerity (m/s) for the travel-time lag. A run constant BY
+    DESIGN: deriving celerity from the routed velocity made tau depend on the
+    forcing-window length, and max_loop_size must stay a memory-only knob.
+    Together with max_travel_time_h it sets the propagation reach (0.8 m/s covers
+    ~138 km in 48 h; 2.0 m/s ~346 km), so it is a modeling decision. The default
+    matches GEOGLOWS' global routing constant, but the role differs: there it
+    drives forward routing, here an inverse correction lag."""
+
+    spread_chunk_timesteps: Optional[int] = Field(None, ge=0)
+    """Time-chunking of the upstream spread's memory transients. Unset = auto
+    (chunk only above ~0.5 GB per transient), 0 = never, N = fixed chunks.
+    Bit-identical to unchunked."""
+
+
+    # Real observations come from the shared usgs_timeslices_folder under the
+    # shared qc_threshold / interpolation_limit_min; there is deliberately no
+    # scaling-DA-specific observation source.
 
 class ReservoirPersistenceDA(BaseModel):
     """
@@ -408,6 +546,11 @@ class DataAssimilationParameters(BaseModel):
     used for assimilation, even those markesd as very poor quality.
     """
 
+    da_decay_coefficient: float = Field(120, gt=0)
+    """Minutes over which an assimilated observation decays back toward the model
+    once observations stop; governs the in-kernel decay for both nudging and the
+    simple-scaling DA."""
+
     @model_validator(mode='before')
     @classmethod
     def coerce_none_to_default(cls, values: Dict[str, Any]) -> Dict[str, Any]:
@@ -444,6 +587,43 @@ class DataAssimilationParameters(BaseModel):
                 "is available at the diversion gage and no flow will be diverted."
             )
         return self
+
+    @model_validator(mode='after')
+    def check_scaling_da_is_usable(self) -> Self:
+        """Reject configurations that would run but silently assimilate nothing."""
+        sda = self.streamflow_da
+        if sda is None or not sda.streamflow_scaling:
+            return self
+        scaling = sda.streamflow_scaling_parameters
+
+        if scaling.synthetic_obs_factor is None and not self.usgs_timeslices_folder:
+            raise ValueError(
+                "streamflow_da.streamflow_scaling is true but neither "
+                "synthetic_obs_factor nor usgs_timeslices_folder is set, so there "
+                "are no observations to assimilate and the run would be identical "
+                "to a no-DA run. Point usgs_timeslices_folder at a TimeSlice "
+                "directory."
+            )
+
+        if scaling.synthetic_obs_factor is not None and not scaling.synthetic_obs_baseline:
+            raise ValueError(
+                "streamflow_scaling_parameters.synthetic_obs_factor requires "
+                "synthetic_obs_baseline, a frozen no-DA output directory. Scaling the "
+                "live model instead is endogenous and compounds under feedback."
+            )
+        return self
+
+    @model_validator(mode='before')
+    @classmethod
+    def reject_legacy_scaling_da_block(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        """The pre-release spelling must fail loudly, not be silently ignored."""
+        if isinstance(values, dict) and "scaling_da" in values:
+            raise ValueError(
+                "data_assimilation_parameters.scaling_da has moved: use "
+                "streamflow_da.streamflow_scaling: true with options under "
+                "streamflow_da.streamflow_scaling_parameters."
+            )
+        return values
 
 
 class ForcingParameters(BaseModel):
