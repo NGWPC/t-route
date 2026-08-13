@@ -5,6 +5,7 @@ from tempfile import NamedTemporaryFile
 import psutil
 import time
 import typing
+from typing import Iterator, TypedDict
 import yaml
 import pandas as pd
 import xarray as xr
@@ -21,6 +22,11 @@ import troute.hyfeature_network_utilities as hnu
 
 import nwm_routing.nwm_route as nwm_routing
 from nwm_routing.output import nwm_output_generator
+from nwm_routing.scaling_da_apply import (
+    build_scaling_da,
+    validate_window_envelope,
+    network_gage_segments,
+)
 
 import logging
 LOG = logging.getLogger("TROUTE")
@@ -47,18 +53,9 @@ def _write_merged_netcdf(files: list[Path], dest: Path) -> None:
 def _merge_into_first(files: list[Path], write: typing.Callable[[Path], None]) -> None:
     """Replace ``files[0]`` with the merge of every file in *files*.
 
-    Two properties this has to hold, both of which the earlier in-place version and
-    its first fix got wrong:
-
-    The temporary file is created in the DESTINATION directory. Created anywhere
-    else, the final rename can cross a filesystem boundary and fail with EXDEV; the
-    lakeout branch used to borrow the stream output directory, which is a different
-    directory in every shipped config and possibly a different mount.
-
-    The rename happens BEFORE the other parts are deleted. ``Path.replace`` is
-    atomic, so up to that point every input is still on disk and a failure is
-    retryable; deleting first turned any rename error into total output loss,
-    because the exception handler then removed the merged copy as well.
+    The temp file is created in the DESTINATION directory (a cross-filesystem
+    rename fails with EXDEV), and parts are deleted only AFTER the atomic
+    replace -- deleting first turns any rename failure into total output loss.
     """
     out_path = files[0].resolve()
     with NamedTemporaryFile(
@@ -85,8 +82,21 @@ class BmiVars:
     UPSTREAM_ID = "upstream_id"
 
 
+class RunSet(TypedDict):
+    """One forcing window handed to ``nwm_route``."""
+
+    nts: int
+    qlats: pd.DataFrame
+    t0: datetime
+    final_timestamp: datetime
+
+
 class Model:
     dt: int
+
+    # Warmstate WITH the upstream DA correction, recorded per window for
+    # create_state(). Class-level so __new__-built instances have it.
+    _seeded_q0 = None
 
     def __init__(self, config_file: str, start_time: float):
         self._time = start_time
@@ -99,7 +109,7 @@ class Model:
 
         with open(config_file) as reader:
             data = yaml.load(reader, Loader=yaml.SafeLoader)
-        self._config: dict = Config.with_strict_mode(**data).dict()
+        self._config: dict = Config.with_strict_mode(**data).model_dump()
 
         self.dt = int(self.forcing_parameters["dt"])
 
@@ -187,6 +197,14 @@ class Model:
         )
         self._timings["forcing_time"] = time.time() - forcing_start_time
 
+        # Build the scaling DA if enabled (NHF only), mirroring the -V5 driver.
+        self._scaling_da = None
+        if self._is_nhf():
+            self._scaling_da = build_scaling_da(
+                self._network, self.supernetwork_parameters, self.data_assimilation_parameters,
+                cpu_pool=self.cpu_pool
+            )
+
         # Pass empty subnetwork list to nwm_route. These objects will be calculated/populated
         # on first iteration of for loop only. For additional loops this will be passed
         # to function from inital loop.
@@ -210,11 +228,48 @@ class Model:
             qlat_add_loc = "middle"
 
         # full_results = None
-        for run in self._build_run_sets(qlats):
+        # Materialized: the hand-off logic needs to know the window count.
+        run_sets = list(self._build_run_sets(qlats))
+        if self._scaling_da is not None:
+            # The same backstop the -V5 driver runs: _build_run_sets enlarges
+            # windows to the horizon/interval, but an interval that is not a
+            # whole number of qlat columns skips the rounding, and a straddled
+            # screen epoch would silently make results depend on the partition.
+            validate_window_envelope(run_sets, self._scaling_da, default_dt=self.dt)
+        # The travel-time lag's deferral, WITHIN this update call only: a
+        # non-final window's spread waits for the next window's innovation (its
+        # halo). Local by construction, so nothing is ever pending across
+        # create_state()/load_state() boundaries; each update's final window
+        # closes with decayed persistence, exactly like the run's final window
+        # on the -V5 driver. The halo's price: two windows of run_results stay
+        # resident, and an exception mid-update loses the pending window's
+        # unwritten output -- recovery is checkpoint-restart (load_state), the
+        # same contract a mid-update failure already had before the deferral.
+        pending = None
+        for run in run_sets:
             LOG.debug("Starting routing function")
             route_start_time = time.time()
+            # Inject gage obs into the MC nudging override BEFORE usgs_df is read
+            # below (nwm_route gets the local binding, so injecting later leaves the
+            # kernel on the previous window's frame). The injected gage set is fixed,
+            # keeping the cached execution plan valid across runs.
+            if self._scaling_da is not None:
+                from nwm_routing.scaling_da_apply import merge_injected_obs
+
+                # da_run is built per WINDOW: t0 advances every update_until call,
+                # and the initialize-time list pinned to the original t0 stopped
+                # covering later windows (silent no-obs assimilation).
+                self._data_assimilation._usgs_df = merge_injected_obs(  # pyright: ignore[reportPrivateUsage]
+                    self._scaling_da.build_usgs_df(
+                        run["t0"], self.dt, run["nts"], self._window_da_run(run)
+                    ),
+                    self._data_assimilation.usgs_df,
+                )
+
             usgs_df = self._data_assimilation.usgs_df
             if not usgs_df.empty:
+                # Trims run-spanning nudging/diversion frames; no-op for the
+                # injected frame, whose columns already start at t0.
                 usgs_df = usgs_df.loc[:,run["t0"]:]
 
             run_results, self._subnetwork = nwm_routing.nwm_route(
@@ -272,16 +327,15 @@ class Model:
                 # drives. NHF only: other network types do not resolve this map.
                 diversion_da=getattr(self._network, "diversion_da", {}) or {},
                 # Same static split points as the -V5 driver: the plan is cached
-                # across updates, so it must not depend on this window's data.
-                gage_segments=set(
-                    (getattr(self._network, "gages", None) or {}).get(
-                        "gages", getattr(self._network, "gages", None) or {}
-                    )
-                    or ()
-                ),
+                # across updates, so it must not depend on this window's data. Same
+                # helper as the -V5 driver so both plans split at an identical set.
+                gage_segments=network_gage_segments(self._network),
             )
 
-            # create initial conditions for next loop iteration
+            # The warmstate that CONTINUES the run is taken BEFORE the upstream
+            # spread: a seeded q0 would debit the next window's innovation by the
+            # amount injected (measured: -23.8% held-out bias with one seeding
+            # boundary vs -29.1% with eleven).
             self._network.new_q0(run_results)
             self._network.update_waterbody_water_elevation()
 
@@ -292,33 +346,92 @@ class Model:
 
             LOG.debug("Generating output")
             output_start_time = time.time()
-            nwm_output_generator(
-                run={"t0": self.t0, "dt": self.dt, "nts": run["nts"]},
-                results=run_results,
-                supernetwork_parameters=self.supernetwork_parameters,
-                output_parameters=self.output_parameters,
-                parity_parameters=self.parity_parameters,
-                restart_parameters=self.restart_parameters,
-                parity_set={},
-                qts_subdivisions=qts_subdivisions,
-                return_courant=self.compute_parameters.get("return_courant", False),
-                cpu_pool=self.cpu_pool,
-                waterbodies_df=self._network.waterbody_dataframe,
-                waterbody_types_df=self._network.waterbody_types_dataframe,
-                duplicate_ids_df=getattr(self._network, "_duplicate_ids_df", pd.DataFrame()),
-                data_assimilation_parameters=self.data_assimilation_parameters,
-                lastobs_df=self._data_assimilation.lastobs_df,
-                link_gage_df=self._network.link_gage_df,
-                link_lake_crosswalk=self._network.link_lake_crosswalk,
-                nexus_dict=self._network.nexus_dict,
-                poi_crosswalk=self._network.poi_nex_dict or {},
-                fp_outlet_crosswalk=self._network.fp_outlet_crosswalk if is_nhf else None,
-            )
+
+            def _write_output(_res, _t0, _nts):
+                nwm_output_generator(
+                    run={"t0": _t0, "dt": self.dt, "nts": _nts},
+                    results=_res,
+                    supernetwork_parameters=self.supernetwork_parameters,
+                    output_parameters=self.output_parameters,
+                    parity_parameters=self.parity_parameters,
+                    restart_parameters=self.restart_parameters,
+                    parity_set={},
+                    qts_subdivisions=qts_subdivisions,
+                    return_courant=self.compute_parameters.get("return_courant", False),
+                    cpu_pool=self.cpu_pool,
+                    waterbodies_df=self._network.waterbody_dataframe,
+                    waterbody_types_df=self._network.waterbody_types_dataframe,
+                    duplicate_ids_df=getattr(self._network, "_duplicate_ids_df", pd.DataFrame()),
+                    data_assimilation_parameters=self.data_assimilation_parameters,
+                    lastobs_df=self._data_assimilation.lastobs_df,
+                    link_gage_df=self._network.link_gage_df,
+                    link_lake_crosswalk=self._network.link_lake_crosswalk,
+                    nexus_dict=self._network.nexus_dict,
+                    poi_crosswalk=self._network.poi_nex_dict or {},
+                    fp_outlet_crosswalk=self._network.fp_outlet_crosswalk if is_nhf else None,
+                )
+
+            if self._scaling_da is None:
+                _write_output(run_results, self.t0, run["nts"])
+            else:
+                if pending is not None:
+                    # Flush the previous window now that its halo exists. Its
+                    # spread is output-only: the routing chain above already
+                    # continued from the uncorrected warmstate.
+                    p_res, p_nts, p_run_t0, p_out_t0 = pending
+                    self._scaling_da.apply_in_kernel(
+                        p_res, p_nts, self.dt, p_run_t0,
+                        halo=self._scaling_da.gather_innovation(run_results),
+                    )
+                    _write_output(p_res, p_out_t0, p_nts)
+                    pending = None
+                if run is run_sets[-1]:
+                    # The update's final window: no future innovation exists, so
+                    # the spread closes with decayed persistence -- the same
+                    # semantics as the run's final window on the -V5 driver.
+                    self._scaling_da.apply_in_kernel(
+                        run_results, run["nts"], self.dt, run["t0"]
+                    )
+                    # Record (without installing) the seeded hand-off q0 for
+                    # create_state(). Under ngen every window is the last of its
+                    # own update() call, so this runs on precisely the windows a
+                    # checkpoint can observe -- an index-based final-window test
+                    # across updates would seed every update (the -29.1% case).
+                    cycling_q0 = self._network._q0  # pyright: ignore[reportPrivateUsage]
+                    seeded = self._network.new_q0(run_results).copy()
+                    self._network._q0 = cycling_q0  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+
+                    # Depth is deliberately NOT corrected: MC uses h0 only as a
+                    # solver seed, and there is no defensible dQ -> dh mapping at
+                    # this layer. Log the injected volume so the increment is
+                    # auditable.
+                    if cycling_q0 is not None and "qd0" in seeded.columns:
+                        shared = seeded.index.intersection(cycling_q0.index)
+                        dq = (
+                            seeded.loc[shared, "qd0"].to_numpy(dtype="float64")
+                            - cycling_q0.loc[shared, "qd0"].to_numpy(dtype="float64")
+                        )
+                        n_changed = int((dq != 0.0).sum())
+                        if n_changed:
+                            LOG.info(
+                                "scaling DA: analysis hand-off state seeded -- %d of %d "
+                                "segments corrected, net dQ %+.4f cms (volume %+.1f m3 over "
+                                "one dt); h0 is the uncorrected routed depth (MC uses it as "
+                                "a solver seed only).",
+                                n_changed, len(shared), float(dq.sum()),
+                                float(dq.sum()) * float(self.dt),
+                            )
+                    self._seeded_q0 = seeded
+                    _write_output(run_results, self.t0, run["nts"])
+                else:
+                    # Held for the next window's halo; run["t0"] feeds the
+                    # model-time arithmetic and self.t0 the output writer.
+                    pending = (run_results, run["nts"], run["t0"], self.t0)
 
             self._network.new_t0(self.dt, run["nts"])
 
             self._timings["output_time"] += time.time() - output_start_time
-            del run_results  # free space for the next run
+            del run_results  # free space for the next run (pending keeps its ref)
 
         # update time as (ngen dt in seconds) * (number of steps processed)
         self._time += self.ngen_dt(bmi_values) * qlats.shape[1]
@@ -344,8 +457,11 @@ class Model:
         """Create a dictionary of data that can be serialized using `pickle.dumps`."""
         return {
             "time": self._time,
-            # updated data stored on AbstractNetwork
-            "q0": self._network._q0,
+            # BOTH warmstates: "q0" is the cycling background (a resumed analysis
+            # must start from it, or its next innovation is debited), "seeded_q0"
+            # the corrected hand-off a forecast must inherit. load_state chooses.
+            "q0": self._network._q0,  # pyright: ignore[reportPrivateUsage]
+            "seeded_q0": self._seeded_q0,
             "t0": self._network._t0,
             # updated data stored on DataAssimilation
             "last_obs": self._data_assimilation._last_obs_df,
@@ -361,7 +477,18 @@ class Model:
 
     def load_state(self, data: dict):
         self._time = data["time"]
-        self._network._q0 = data["q0"]
+        # Install the warmstate this model will need: cycling background when it
+        # will keep assimilating (seeded would debit the next innovation), seeded
+        # hand-off for a forecast. Pre-split state files carry only "q0".
+        seeded = data.get("seeded_q0")
+        if seeded is not None and getattr(self, "_scaling_da", None) is None:
+            self._network._q0 = seeded
+        else:
+            self._network._q0 = data["q0"]
+        # RETAIN the loaded hand-off so load -> create round-trips reproduce the
+        # state (a re-serialized checkpoint must not drop the forecast hand-off);
+        # Model.run overwrites it every routed window, so it cannot go stale.
+        self._seeded_q0 = seeded
         self._network._t0 = data["t0"]
         self._data_assimilation._last_obs_df = data["last_obs"]
         self._data_assimilation._reservoir_usgs_param_df = data["usgs"]
@@ -471,28 +598,114 @@ class Model:
         # backup if NGEN's delta time was not explicitly set
         return int(self.dt * self.qts_subdivisions)
 
-    def _build_run_sets(self, qlats: pd.DataFrame):
+    def _window_da_run(self, run: RunSet) -> dict | None:
+        """The TimeSlice file list covering one routing window.
+
+        Same builder, same lookback padding and same filename convention the -V5
+        driver and the nudging path use; only the window differs.
+        """
+        if not self.data_assimilation_parameters:
+            return None
+        da_sets = hnu.build_da_sets(
+            self.data_assimilation_parameters,
+            [{"final_timestamp": run["final_timestamp"]}],
+            run["t0"],
+        )
+        return da_sets[0] if da_sets else None
+
+    def _build_run_sets(self, qlats: pd.DataFrame) -> Iterator[RunSet]:
         nts = len(qlats.columns)
-        # estimate required memory
+        # Memory is a SAFETY CAP only, never the primary window control.
         required_bytes = qlats.shape[0] \
             * qlats.shape[1] \
             * self.qts_subdivisions \
             * 200  # 200 based size of large arrays made during compute plus some padding
-        # determing loop size based on system available memory
         system_memory = psutil.virtual_memory()
         available_memory = system_memory.available * 0.9  # only account for 90% of the currently available memory
-        divisions = math.ceil(required_bytes / available_memory)
-        if divisions <= 1:
+        mem_divisions = math.ceil(required_bytes / available_memory)
+        mem_loop_size = math.ceil(nts / mem_divisions)
+
+        # max_loop_size is the PRIMARY control (as in the -V5 driver): every
+        # per-window DA operation lands on this partition, so a RAM-derived split
+        # made results depend on machine load. Under active scaling DA the
+        # partition is part of the RESULT (decay resets at window boundaries), so
+        # a RAM cap below the configured window is a hard error there; without
+        # the DA it stays a warning.
+        scaling_active = getattr(self, "_scaling_da", None) is not None
+        cfg_loop = self.forcing_parameters.get("max_loop_size") or 0
+        if scaling_active and cfg_loop > 0:
+            # The travel-time lag needs every non-final window to cover
+            # max_travel_time_h (its halo is one window deep) and to tile
+            # screen_interval_h. max_loop_size counts qlat COLUMNS here, so
+            # convert via the column cadence and enlarge -- mirroring the -V5
+            # side (AbstractNetwork.build_forcing_sets does this to the file
+            # count). The final window of each update is exempt (edge closure).
+            # getattr with the ScalingDA class defaults: tests stub _scaling_da.
+            col_s = float(self.qts_subdivisions) * float(self.dt)
+            horizon_h = float(getattr(self._scaling_da, "max_travel_time_h", 48.0))
+            interval_h = float(getattr(self._scaling_da, "screen_interval_h", 24.0))
+            horizon_cols = math.ceil(horizon_h * 3600.0 / col_s)
+            need = max(int(cfg_loop), horizon_cols)
+            iv = round(interval_h * 3600.0 / col_s)
+            if iv > 0 and abs(iv - interval_h * 3600.0 / col_s) < 1e-9:
+                need = math.ceil(need / iv) * iv
+            if need > cfg_loop:
+                LOG.info(
+                    "scaling DA: max_loop_size enlarged %d -> %d forcing columns "
+                    "so every non-final window covers max_travel_time_h and "
+                    "tiles screen_interval_h.",
+                    int(cfg_loop), need,
+                )
+                cfg_loop = need
+        if cfg_loop > 0:
+            loop_size = min(int(cfg_loop), mem_loop_size)
+            if loop_size < int(cfg_loop):
+                if scaling_active:
+                    raise MemoryError(
+                        f"available memory caps the run window at {loop_size} forcing "
+                        f"timesteps, below the configured max_loop_size of "
+                        f"{int(cfg_loop)}. The scaling DA's window boundaries are part "
+                        "of the result, so continuing would produce discharge that "
+                        "depends on current machine load. Free memory, or lower "
+                        "max_loop_size to a value that fits."
+                    )
+                LOG.warning(
+                    "available memory caps the run window at %d forcing timesteps, "
+                    "below the configured max_loop_size of %d; results with "
+                    "assimilation active depend on the window partition",
+                    loop_size, int(cfg_loop),
+                )
+        else:
+            loop_size = mem_loop_size
+            if mem_divisions > 1:
+                if scaling_active:
+                    raise MemoryError(
+                        f"no forcing_parameters.max_loop_size is configured and the "
+                        f"run does not fit in available memory (would be split into "
+                        f"{mem_divisions} RAM-sized windows). The scaling DA's window "
+                        "boundaries are part of the result, so a RAM-derived "
+                        "partition is not reproducible. Set max_loop_size."
+                    )
+                LOG.warning(
+                    "no forcing_parameters.max_loop_size configured; splitting the "
+                    "run into %d windows sized by available memory. With "
+                    "assimilation active the results depend on this partition, so "
+                    "set max_loop_size for reproducible windows.", mem_divisions,
+                )
+
+        if loop_size >= nts:
             yield {
                 "nts": nts * self.qts_subdivisions,
                 "qlats": qlats,
                 "t0": self.t0,
-                "final_timestamp": self.t0 + timedelta(seconds=self.nts * self.dt)
+                # From THIS update's forcing columns (like the multi-window branch),
+                # never self.nts: that is the whole configured horizon, and with t0
+                # advancing per update it enumerated TimeSlices far beyond the
+                # window (O(horizon) I/O, no CLI parity, possible future leakage).
+                "final_timestamp": datetime.strptime(str(qlats.columns[-1]), "%Y%m%d%H%M")
             }
         else:
-            LOG.info(f"T-Route detected a high probability of exceeding system memory. The processing will be broken into {divisions} chunks.")
-            loop_size = math.ceil(nts / divisions)
-            # construct run sets based on the loop size determined by available rmemory
+            # construct run sets on the resolved window size
             step = 0
             while step < nts:
                 next_step = step + loop_size
@@ -500,8 +713,10 @@ class Model:
                 yield {
                     "nts": len(times) * self.qts_subdivisions,
                     "qlats": qlats[times],
-                    "t0": datetime.strptime(times[0], "%Y%m%d%H%M%S"),
-                    "final_timestamp": datetime.strptime(times[-1], "%Y%m%d%H%M%S")
+                    # Columns are "%Y%m%d%H%M"; parsing with a trailing %S silently
+                    # backtracks to the wrong time ("...1445" -> 14:04:05).
+                    "t0": datetime.strptime(times[0], "%Y%m%d%H%M"),
+                    "final_timestamp": datetime.strptime(times[-1], "%Y%m%d%H%M")
                 }
                 step = next_step
 
