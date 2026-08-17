@@ -4,9 +4,11 @@ The simple-scaling DA *kernel*: it lives in ``troute.routing.fast_reach`` beside
 the nudging kernel (:mod:`simple_da`) and the routing kernels, mirroring t-route's
 split of data assimilation -- the per-gage *tree* setup is built in
 ``troute.scaling_da`` (troute-network), and the *correction kernel* is here
-(troute-routing). This pure-NumPy implementation is the reference for the eventual
-in-place Cython port (``scaling_da.pyx``); its hot loop
-(:func:`_tree_dq_nodes`) ports line-for-line.
+(troute-routing). This module assembles the per-tree buffers and hands them to
+the compiled spread kernel (``scaling_da_kernel``). The pure-NumPy reference the
+kernel was ported from, and the 2000-case fuzz that proved bit-level parity,
+were retired once the port was proven; both are in git history
+(``scaling_da_numpy_reference.py``, ``test_scaling_da_cython_equiv.py``).
 
 Trees are precomputed once by
 :func:`troute.scaling_da.gage_tree.build_one_gage_tree`; this module's
@@ -37,22 +39,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
-_kernel_import_error: ImportError | None
-
-try:
-    from troute.routing.fast_reach.scaling_da_kernel import spread_trees
-
-    _kernel_import_error = None
-except ImportError as _e:
-    # Compiled kernel absent or unloadable: fall back to the NumPy reference
-    # loop, remembering why so the flow_ratio path can warn once (not a silent
-    # performance cliff). `spread_trees is None` IS the availability test.
-    spread_trees = None
-    _kernel_import_error = _e
-
-# Warn at most once per process when the slow fallback is taken for flow_ratio, so a
-# broken or missing extension surfaces in the logs instead of only as a slowdown.
-_warned_kernel_fallback = False
+# t-route is always installed compiled, so a missing extension is a broken
+# install and the ImportError should propagate here, not degrade to a slow
+# NumPy fallback at runtime.
+from troute.routing.fast_reach.scaling_da_kernel import spread_trees
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -154,7 +144,7 @@ def _stack_dq(
     constant, and the batch composition changed the result. Padding with
     ``last * edge_decay**k`` instead makes every padded read -- and, composed
     with the kernel's decay past the batch end -- every read beyond it, equal
-    what the NumPy path computes from that row's true end.
+    what decaying from that row's true end gives.
     """
     n = max(r.shape[0] for r in rows)
     if all(r.shape[0] == n for r in rows):
@@ -169,176 +159,6 @@ def _stack_dq(
             out.append(np.concatenate([r, pad]))
     return np.stack(out)
 
-
-
-def _lagged_dq(
-    dq_o: NDArray[np.float64],
-    mult: NDArray[np.float64],
-    in_window: NDArray[np.float64] | None,
-    tshift: NDArray[np.int64] | None,
-    edge_decay: float = 1.0,
-) -> NDArray[np.float64]:
-    """``dQ(s,t) = dQ_o(t + tau_s) * M(s,t) * w(tau_s)``, the travel-time form.
-
-    Mirrors the compiled kernel's application step exactly, including the
-    multiply order ``(dQ_o * M) * w`` -- the equivalence gate is bit-level, so
-    the order is load-bearing, not cosmetic. ``tshift`` past the window end
-    past the window end it falls back to the latest observed increment: the LAST
-    timestep is what seeds q0 for the forecast, and applying nothing there would
-    hand off a state with no upstream correction on any lagged segment.
-    With ``in_window=None`` and ``tshift=None`` this is the un-lagged product.
-    """
-    if tshift is None:
-        dq_eff = dq_o[:, None]
-    else:
-        # dq_o may be LONGER than the output window: a chunked call passes the
-        # overlap its shifts need to read into.
-        nt_out, nt_dq = mult.shape[0], dq_o.shape[0]
-        raw = np.arange(nt_out)[:, None] + tshift[None, :]
-        # Clip BOTH ends: a negative shift would index backwards through the buffer
-        # (numpy wraps), silently reading the window's end as if it were its start.
-        idx = np.clip(raw, 0, nt_dq - 1)
-        dq_eff = dq_o[idx]
-        if edge_decay < 1.0:
-            # Past the last observation this is innovation PERSISTENCE, so decay it
-            # on the same clock the kernel decays every other stale observation.
-            over = np.maximum(raw - (nt_dq - 1), 0)
-            dq_eff = dq_eff * (edge_decay ** over)
-    out = dq_eff * mult
-    if in_window is not None:
-        out = out * in_window[None, :]
-    return out
-
-
-def _pruned_branch_flow(tree_p: GageTree, q_model_arr: NDArray[np.float64]
-                        ) -> NDArray[np.float64] | None:
-    """Summed modeled flow of the branches Edge Case 1 cut off, per tree node.
-
-    Returns ``None`` when the tree has no pruned branch, so the common case allocates
-    nothing and the arithmetic is untouched.
-    """
-    ptr = getattr(tree_p, "pruned_pos_ptr", None)
-    pos = getattr(tree_p, "pruned_positions", None)
-    if ptr is None or pos is None or pos.size == 0:
-        return None
-    n_seg = tree_p.n_segments
-    if ptr.size != n_seg + 1:
-        return None
-    out = np.zeros((q_model_arr.shape[0], n_seg), dtype=np.float64)
-    for i in range(n_seg):
-        a, b = int(ptr[i]), int(ptr[i + 1])
-        if b > a:
-            out[:, i] = q_model_arr[:, pos[a:b]].sum(axis=1)
-    return out
-
-
-def _tree_dq_nodes(
-    tree_p: GageTree,
-    q_nodes: NDArray[np.float64],
-    dq_o: NDArray[np.float64],
-    min_flow_cms: float,
-    method: str,
-    site: str,
-    in_window: NDArray[np.float64] | None = None,
-    tshift: NDArray[np.int64] | None = None,
-    edge_decay: float = 1.0,
-    pruned_q: NDArray[np.float64] | None = None,
-) -> NDArray[np.float64]:
-    """Per-node, per-timestep ΔQ for one tree: ``dQ(s,t) = dQ_o(t)·M(s,t)``.
-
-    Parameters
-    ----------
-    tree_p : GageTree
-        The gage tree with positions filled (see
-        :meth:`~troute.scaling_da.gage_tree.GageTree.with_positions`); supplies
-        ``seg_areas_sqkm``, ``theta``, ``seg_parent_idx`` and
-        ``step_is_junction`` in BFS order (gage at index 0).
-    q_nodes : numpy.ndarray
-        Modeled discharge for the tree's segments, shape ``(n_timesteps,
-        n_segments)``, columns ordered to match ``tree_p``.
-    dq_o : numpy.ndarray
-        Per-timestep gage correction ``dQ_o(t)`` (length ``n_timesteps``).
-    min_flow_cms : float
-        Floor (m^3/s) on the confluence split denominator; a confluence whose
-        flow is at or below this contributes no correction at that timestep.
-    method : str
-        ``"flow_ratio"`` (white paper: area-scaling on linear steps, flow-ratio
-        split at confluences) or ``"area_scaling"`` (Eq. 2 at every node).
-    site : str
-        ``site_no`` of the gage, used only in the error message.
-
-    Returns
-    -------
-    numpy.ndarray
-        ``dQ(s, t)`` for every tree segment, shape ``(n_timesteps, n_segments)``.
-
-    Raises
-    ------
-    ValueError
-        If ``method="area_scaling"`` receives a malformed tree (the
-        linear-step accumulation telescopes to Eq. 2 only for a uniform theta).
-
-    Notes
-    -----
-    The hot loop -- the pure-NumPy reference for this module's eventual Cython port:
-    a forward pass over the BFS-ordered segments accumulating the per-node
-    multiplier ``M``. Kept deliberately as a plain per-segment loop so the Cython
-    translation is line-for-line. The confluence split divides each
-    branch flow by ``max(Q_parent, Σ Q_branch)`` so it is non-expansive even when
-    routing lag drives the routed parent flow below its branch sum.
-    """
-    areas = tree_p.seg_areas_sqkm
-    theta = tree_p.theta
-    if method == "area_scaling":
-        # Ablation: Eq. 2 at every node, dQ(s)=dQ_o*(A_s/A_o)^theta_s, constant in
-        # time. ratios[0]=(A_o/A_o)^theta=1, so the gage keeps dQ_o.
-        ratios = (areas / tree_p.gage_area_sqkm) ** theta
-        return _lagged_dq(dq_o, ratios[None, :], in_window, tshift, edge_decay)
-
-    # White paper (flow_ratio): area-scaling (Eq. 2) along linear steps, flow-ratio
-    # split (Edge Case 2) at confluences. BFS order guarantees each node's parent
-    # precedes it, so one forward pass suffices. The linear step telescopes to the
-    # Eq. 2 form dQ_o*(A_s/A_o)^theta only for a constant exponent, which GageTree
-    # now guarantees by holding theta as a scalar; this used to be a runtime check.
-
-    n_seg = q_nodes.shape[1]
-    mult = np.ones_like(q_nodes)
-    parent_idx = tree_p.seg_parent_idx
-    is_junction = tree_p.step_is_junction
-
-    # Pass 1: per-confluence sum of its *surviving* branch flows (Edge Case 1 prunes
-    # stopped branches), accumulated at the parent index. This is the flow the split
-    # at that confluence must distribute the parent correction among.
-    branch_sum = np.zeros_like(q_nodes)
-    for j in range(1, n_seg):
-        if bool(is_junction[j]):
-            branch_sum[:, parent_idx[j]] += q_nodes[:, j]
-    # Stopped (Edge Case 1) branches receive nothing but still belong in the
-    # split denominator, or the clamp hands their share to a surviving sibling.
-    if pruned_q is not None:
-        branch_sum += pruned_q
-
-    # Pass 2: accumulate the per-node multiplier.
-    for j in range(1, n_seg):
-        p = int(parent_idx[j])
-        if bool(is_junction[j]):
-            # Edge Case 2 split, denominator clamped up to the branch sum: routing
-            # lag can drive the routed parent flow below its branch sum, and an
-            # unclamped ratio would exceed 1 and manufacture water. With the clamp
-            # the split is non-expansive by construction.
-            denom = np.maximum(q_nodes[:, p], branch_sum[:, p])
-            ok = denom > min_flow_cms
-            # ``where=ok`` skips the division at dry junctions (no warning); 0 else.
-            factor = np.divide(q_nodes[:, j], denom, out=np.zeros_like(denom), where=ok)
-            np.clip(factor, 0.0, 1.0, out=factor)
-        else:
-            a_p = float(areas[p])
-            factor = float((areas[j] / a_p) ** theta) if a_p > 0.0 else 0.0
-            if np.isnan(factor):            # a NaN area anywhere kills the whole subtree
-                factor = 0.0
-            factor = min(max(factor, 0.0), 1.0)
-        mult[:, j] = mult[:, p] * factor
-    return _lagged_dq(dq_o, mult, in_window, tshift, edge_decay)
 
 
 def _resolve_site_dq_o(
@@ -462,7 +282,6 @@ def apply_scaling_da(
     *,
     obs_decay_tau_min: float | None = None,
     min_flow_cms: float = 1e-6,
-    method: str = "flow_ratio",
     decay_state: dict[str, tuple[float, float]] | None = None,
     time_ref: pd.Timestamp | None = None,
     dq_o_by_site: Mapping[str, NDArray[np.float64]] | None = None,
@@ -506,17 +325,6 @@ def apply_scaling_da(
         the branch receives no correction at that timestep, guarding the
         ``Q_branch/Q_parent`` division at near-dry junctions. Default
         ``1e-6``.
-    method : str, optional
-        Distribution rule. ``"flow_ratio"`` (default) is the white paper's
-        scheme: area-scaling along linear steps and the Edge Case 2 flow-ratio
-        split at confluences. It requires a *uniform* theta per tree (the white
-        paper's region theta), held as a scalar on the tree, because the
-        linear-step accumulation telescopes to the Eq. 2 form
-        ``dQ_o*(A_s/A_o)^theta`` only for uniform theta. ``"area_scaling"`` is
-        the ablation that applies Eq. 2 at *every* node,
-        ``dQ(s) = dQ_o*(A_s/A_o)^theta_s``, ignoring Edge Case 2; it accepts
-        per-segment theta (applied to the global area ratio) and is strongly
-        theta-dependent, over-correcting small headwaters. Other values raise.
     dq_o_by_site : Mapping[str, numpy.ndarray], optional
         Stage A (in-kernel) override. When given, the per-gage correction
         ``dQ_o(t)`` is taken directly from this mapping (``site -> length-nt
@@ -553,20 +361,18 @@ def apply_scaling_da(
     Raises
     ------
     ValueError
-        If ``method`` is not ``"flow_ratio"`` or ``"area_scaling"``, if
-        ``obs_decay_tau_min`` is non-positive, or (for ``"flow_ratio"``) if any
-        tree is malformed.
+        If ``obs_decay_tau_min`` is non-positive, if any tree is malformed, or
+        if ``lag_by_site`` carries a shift shape the compiled kernel's contract
+        cannot express (2-D or negative).
 
     Notes
     -----
     Per-tree corrections are summed into the output; the trees are mutually
     disjoint by construction, and an overlap (two trees sharing a segment) is
-    logged as a warning. The confluence split is non-expansive (see
-    :func:`_tree_dq_nodes`), so a correction never amplifies across a junction.
+    logged as a warning. The confluence split divides each branch flow by
+    ``max(Q_parent, sum of branch flows)``, so it is non-expansive and a
+    correction never amplifies across a junction.
     """
-    if method not in ("flow_ratio", "area_scaling"):
-        msg = f"method must be 'flow_ratio' or 'area_scaling', got {method!r}"
-        raise ValueError(msg)
     if obs_decay_tau_min is not None and not obs_decay_tau_min > 0:
         msg = f"obs_decay_tau_min must be a positive number of minutes, got {obs_decay_tau_min!r}"
         raise ValueError(msg)
@@ -593,11 +399,9 @@ def apply_scaling_da(
     def _accept_site(site: str, tree: GageTree) -> tuple[GageTree, NDArray[np.float64]] | None:
         """Validate a site and resolve its ``dq_o``; warn on tree overlap.
 
-        Shared by both the batched (``flow_ratio``) and the per-tree
-        (``area_scaling``) paths. Returns ``(tree_p, dq_o)`` for a site that
-        contributes a correction, else ``None`` (skipped or all-zero ``dq_o``).
-        Marks ``corrected_mask`` and emits the tree-disjoint warning, exactly as
-        the original per-tree loop did (order-preserving over ``trees``).
+        Returns ``(tree_p, dq_o)`` for a site that contributes a correction,
+        else ``None`` (skipped or all-zero ``dq_o``). Marks ``corrected_mask``
+        and emits the tree-disjoint warning, order-preserving over ``trees``.
         """
         tree_p = _prepare_site_tree(site, tree, gage_to_fp, fp_to_pos, q_obs, dq_o_by_site)
         if tree_p is None:
@@ -627,168 +431,156 @@ def apply_scaling_da(
         corrected_mask[seg_pos] = True
         return tree_p, dq_o
 
-    if method == "flow_ratio" and spread_trees is not None:
-        # Batched compiled path: flatten every surviving tree into CSR-style
-        # buffers and spread them in one nogil pass (replaces ~22k per-tree calls).
-        parents: list[NDArray[np.int64]] = []
-        is_juncs: list[NDArray[np.uint8]] = []
-        areas_f: list[NDArray[np.float64]] = []
-        thetas_f: list[NDArray[np.float64]] = []
-        qcols: list[NDArray[np.int64]] = []
-        dq_o_rows: list[NDArray[np.float64]] = []
-        windows: list[NDArray[np.float64]] = []
-        tshifts: list[NDArray[np.int64]] = []
-        pruned_counts: list[NDArray[np.int64]] = []
-        pruned_cols: list[NDArray[np.int64]] = []
-        offsets: list[int] = [0]
-        nt = q_model_arr.shape[0]
-        for site, tree in trees.items():
-            accepted = _accept_site(site, tree)
-            if accepted is None:
-                continue
-            tree_p, dq_o = accepted
-            # The compiled kernel takes one theta per SEGMENT; the tree carries one
-            # scalar. Broadcast here rather than changing the kernel signature: the
-            # uniformity the kernel assumes is now guaranteed by construction, so the
-            # buffer is a repeat of a single value by definition.
-            thetas = np.full(tree_p.n_segments, tree_p.theta, dtype=np.float64)
-            parents.append(np.ascontiguousarray(tree_p.seg_parent_idx, dtype=np.int64))
-            is_juncs.append(np.ascontiguousarray(tree_p.step_is_junction, dtype=np.uint8))
-            areas_f.append(np.ascontiguousarray(tree_p.seg_areas_sqkm, dtype=np.float64))
-            thetas_f.append(np.ascontiguousarray(thetas, dtype=np.float64))
-            qcols.append(np.ascontiguousarray(tree_p.seg_positions, dtype=np.int64))
-            # Per-node count of Edge-Case-1 branches; the flat CSR offsets are built once
-            # below by cumulative sum, so a tree with none contributes zeros and no columns.
-            pp = getattr(tree_p, "pruned_pos_ptr", None)
-            pc = getattr(tree_p, "pruned_positions", None)
-            if pp is not None and pp.size == tree_p.n_segments + 1 and pc is not None:
-                pruned_counts.append(np.diff(np.asarray(pp, dtype=np.int64)))
-                pruned_cols.append(np.asarray(pc, dtype=np.int64))
-            else:
-                pruned_counts.append(np.zeros(tree_p.n_segments, dtype=np.int64))
-            # Travel-time lag, per flat segment. Same length contract as dq_o: the
-            # kernel indexes these with bounds checking off, so a short array is a
-            # silent out-of-bounds read. Absent site -> inert (w=1, shift=0).
-            n_s = tree_p.n_segments
-            lag = lag_by_site.get(site) if lag_by_site else None
-            if lag is None:
-                windows.append(np.ones(n_s, dtype=np.float64))
-                tshifts.append(np.zeros(n_s, dtype=np.int64))
-            else:
-                tp, ts_ = lag
-                tp = np.ascontiguousarray(tp, dtype=np.float64).ravel()
-                ts_ = np.ascontiguousarray(ts_, dtype=np.int64).ravel()
-                if tp.shape[0] != n_s or ts_.shape[0] != n_s:
-                    msg = (
-                        f"site {site}: lag_by_site arrays have {tp.shape[0]}/"
-                        f"{ts_.shape[0]} entries but the tree has {n_s} segments; "
-                        "the compiled spread kernel requires one in_window and one "
-                        "shift per segment."
-                    )
-                    raise ValueError(msg)
-                # The kernel runs with boundscheck=False AND wraparound=False, and it
-                # only guards the upper end (`ts >= nt`). A negative shift would index
-                # dq_o backwards past the start of the buffer -- an out-of-bounds READ,
-                # not an IndexError. A non-finite in_window would write NaN into discharge.
-                # Neither is reachable from _build_lag, but this is the trust boundary
-                # for any caller supplying lag_by_site, so enforce it here.
-                if (ts_ < 0).any():
-                    msg = (
-                        f"site {site}: lag_by_site shift must be non-negative (got min "
-                        f"{int(ts_.min())}); the compiled kernel indexes dQ_o forward "
-                        "only and does not bounds-check."
-                    )
-                    raise ValueError(msg)
-                if not np.isfinite(tp).all():
-                    msg = (
-                        f"site {site}: lag_by_site in_window must be finite; a NaN or inf "
-                        "weight would be written straight into the corrected discharge."
-                    )
-                    raise ValueError(msg)
-                windows.append(tp)
-                tshifts.append(ts_)
-            # Shape contract for the bounds-check-free kernel: spread_trees reads
-            # dq_o[it, t] for t in range(nt) with boundscheck off, so a row shorter
-            # than nt would read out of bounds and silently corrupt the correction
-            # (the NumPy reference broadcast a length-1 dq_o over all timesteps; the
-            # compiled path cannot, so enforce the length here). Broadcast a scalar
-            # dq_o to preserve that reference behavior; reject any other length.
-            dq_o = np.ascontiguousarray(dq_o, dtype=np.float64).ravel()
-            if dq_o.shape[0] == 1 and nt > 1:
-                dq_o = np.broadcast_to(dq_o, (nt,))
-            # LONGER than nt is legitimate: a chunked call passes the overlap its
-            # forward shifts read into, and the kernel takes the innovation length
-            # from the array. SHORTER is still an out-of-bounds read.
-            elif dq_o.shape[0] < nt:
+    # The compiled kernel takes ONE non-negative shift per segment and indexes
+    # dQ_o forward only; a 2-D (per-timestep) or negative (backward) shift is
+    # not expressible in its contract.
+    _numpy_only_lag = bool(lag_by_site) and any(
+        np.asarray(v[1]).ndim == 2 or np.asarray(v[1]).min(initial=0) < 0
+        for v in lag_by_site.values()
+    )
+    if _numpy_only_lag:
+        # _build_lag never produces these shapes; a caller contract violation,
+        # not a mode -- there is no fallback path.
+        msg = (
+            "apply_scaling_da: lag_by_site must carry one non-negative shift "
+            "per segment (1-D); a per-timestep or backward shift is not "
+            "expressible by the compiled spread kernel."
+        )
+        raise ValueError(msg)
+
+    # Batched compiled path: flatten every surviving tree into CSR-style
+    # buffers and spread them in one nogil pass (replaces ~22k per-tree calls).
+    parents: list[NDArray[np.int64]] = []
+    is_juncs: list[NDArray[np.uint8]] = []
+    areas_f: list[NDArray[np.float64]] = []
+    thetas_f: list[NDArray[np.float64]] = []
+    qcols: list[NDArray[np.int64]] = []
+    dq_o_rows: list[NDArray[np.float64]] = []
+    windows: list[NDArray[np.float64]] = []
+    tshifts: list[NDArray[np.int64]] = []
+    pruned_counts: list[NDArray[np.int64]] = []
+    pruned_cols: list[NDArray[np.int64]] = []
+    offsets: list[int] = [0]
+    nt = q_model_arr.shape[0]
+    for site, tree in trees.items():
+        accepted = _accept_site(site, tree)
+        if accepted is None:
+            continue
+        tree_p, dq_o = accepted
+        # The compiled kernel takes one theta per SEGMENT; the tree carries one
+        # scalar. Broadcast here rather than changing the kernel signature: the
+        # uniformity the kernel assumes is now guaranteed by construction, so the
+        # buffer is a repeat of a single value by definition.
+        thetas = np.full(tree_p.n_segments, tree_p.theta, dtype=np.float64)
+        parents.append(np.ascontiguousarray(tree_p.seg_parent_idx, dtype=np.int64))
+        is_juncs.append(np.ascontiguousarray(tree_p.step_is_junction, dtype=np.uint8))
+        areas_f.append(np.ascontiguousarray(tree_p.seg_areas_sqkm, dtype=np.float64))
+        thetas_f.append(np.ascontiguousarray(thetas, dtype=np.float64))
+        qcols.append(np.ascontiguousarray(tree_p.seg_positions, dtype=np.int64))
+        # Per-node count of Edge-Case-1 branches; the flat CSR offsets are built once
+        # below by cumulative sum, so a tree with none contributes zeros and no columns.
+        pp = getattr(tree_p, "pruned_pos_ptr", None)
+        pc = getattr(tree_p, "pruned_positions", None)
+        if pp is not None and pp.size == tree_p.n_segments + 1 and pc is not None:
+            pruned_counts.append(np.diff(np.asarray(pp, dtype=np.int64)))
+            pruned_cols.append(np.asarray(pc, dtype=np.int64))
+        else:
+            pruned_counts.append(np.zeros(tree_p.n_segments, dtype=np.int64))
+        # Travel-time lag, per flat segment. Same length contract as dq_o: the
+        # kernel indexes these with bounds checking off, so a short array is a
+        # silent out-of-bounds read. Absent site -> inert (w=1, shift=0).
+        n_s = tree_p.n_segments
+        lag = lag_by_site.get(site) if lag_by_site else None
+        if lag is None:
+            windows.append(np.ones(n_s, dtype=np.float64))
+            tshifts.append(np.zeros(n_s, dtype=np.int64))
+        else:
+            tp, ts_ = lag
+            tp = np.ascontiguousarray(tp, dtype=np.float64).ravel()
+            ts_ = np.ascontiguousarray(ts_, dtype=np.int64).ravel()
+            if tp.shape[0] != n_s or ts_.shape[0] != n_s:
                 msg = (
-                    f"site {site}: dq_o has {dq_o.shape[0]} timesteps but q_model has "
-                    f"{nt}; the compiled spread kernel needs at least nts values per "
-                    "tree (or a broadcastable scalar)."
+                    f"site {site}: lag_by_site arrays have {tp.shape[0]}/"
+                    f"{ts_.shape[0]} entries but the tree has {n_s} segments; "
+                    "the compiled spread kernel requires one in_window and one "
+                    "shift per segment."
                 )
                 raise ValueError(msg)
-            dq_o_rows.append(dq_o)
-            offsets.append(offsets[-1] + tree_p.n_segments)
-
-        if dq_o_rows:
-            tree_off = np.asarray(offsets, dtype=np.int64)
-            max_seg = int(np.max(np.diff(tree_off)))
-            qbuf = np.empty((max_seg, nt), dtype=np.float64)
-            mult = np.empty((max_seg, nt), dtype=np.float64)
-            bsum = np.empty((max_seg, nt), dtype=np.float64)
-            pruned_off = np.zeros(int(tree_off[-1]) + 1, dtype=np.int64)
-            np.cumsum(np.concatenate(pruned_counts), out=pruned_off[1:])
-            pruned_col = (np.concatenate(pruned_cols) if pruned_cols
-                          else np.empty(0, dtype=np.int64))
-            spread_trees(
-                q_model_arr,
-                tree_off,
-                np.concatenate(parents),
-                np.concatenate(is_juncs),
-                np.concatenate(areas_f),
-                np.concatenate(thetas_f),
-                np.concatenate(qcols),
-                np.ascontiguousarray(_stack_dq(dq_o_rows, edge_decay), dtype=np.float64),
-                float(min_flow_cms),
-                float(edge_decay),
-                np.ascontiguousarray(np.concatenate(windows, axis=0)),
-                np.ascontiguousarray(np.concatenate(tshifts, axis=0)),
-                np.ascontiguousarray(pruned_off),
-                np.ascontiguousarray(pruned_col),
-                q_corrected,
-                dq_diagnostic,
-                qbuf,
-                mult,
-                bsum,
-            )
-    else:
-        # Per-tree NumPy reference path: the area_scaling ablation (out of scope for
-        # the port), and the flow_ratio fallback when the compiled kernel is absent.
-        if method == "flow_ratio" and spread_trees is None:
-            global _warned_kernel_fallback
-            if not _warned_kernel_fallback:
-                LOG.warning(
-                    "scaling_da_kernel unavailable (%s); routing flow_ratio DA through "
-                    "the slower per-tree NumPy path (~one Python call per gage tree). "
-                    "Build the troute-routing extension to restore the compiled kernel.",
-                    _kernel_import_error,
+            # The kernel runs with boundscheck=False AND wraparound=False, and it
+            # only guards the upper end (`ts >= nt`). A negative shift would index
+            # dq_o backwards past the start of the buffer -- an out-of-bounds READ,
+            # not an IndexError. A non-finite in_window would write NaN into discharge.
+            # Neither is reachable from _build_lag, but this is the trust boundary
+            # for any caller supplying lag_by_site, so enforce it here.
+            if (ts_ < 0).any():
+                msg = (
+                    f"site {site}: lag_by_site shift must be non-negative (got min "
+                    f"{int(ts_.min())}); the compiled kernel indexes dQ_o forward "
+                    "only and does not bounds-check."
                 )
-                _warned_kernel_fallback = True
-        for site, tree in trees.items():
-            accepted = _accept_site(site, tree)
-            if accepted is None:
-                continue
-            tree_p, dq_o = accepted
-            seg_pos = tree_p.seg_positions
-            lag = lag_by_site.get(site) if lag_by_site else None
-            dq_nodes = _tree_dq_nodes(
-                tree_p, q_model_arr[:, seg_pos], dq_o, min_flow_cms, method, site,
-                in_window=None if lag is None else np.asarray(lag[0], dtype=np.float64),
-                tshift=None if lag is None else np.asarray(lag[1], dtype=np.int64),
-                edge_decay=edge_decay,
-                pruned_q=_pruned_branch_flow(tree_p, q_model_arr),
+                raise ValueError(msg)
+            if not np.isfinite(tp).all():
+                msg = (
+                    f"site {site}: lag_by_site in_window must be finite; a NaN or inf "
+                    "weight would be written straight into the corrected discharge."
+                )
+                raise ValueError(msg)
+            windows.append(tp)
+            tshifts.append(ts_)
+        # Shape contract for the bounds-check-free kernel: spread_trees reads
+        # dq_o[it, t] for t in range(nt) with boundscheck off, so a row shorter
+        # than nt would read out of bounds and silently corrupt the correction
+        # (the retired NumPy reference broadcast a length-1 dq_o over all
+        # timesteps; the compiled kernel cannot, so enforce the length here).
+        # Broadcast a scalar dq_o to preserve that behavior; reject any other
+        # short length.
+        dq_o = np.ascontiguousarray(dq_o, dtype=np.float64).ravel()
+        if dq_o.shape[0] == 1 and nt > 1:
+            dq_o = np.broadcast_to(dq_o, (nt,))
+        # LONGER than nt is legitimate: a chunked call passes the overlap its
+        # forward shifts read into, and the kernel takes the innovation length
+        # from the array. SHORTER is still an out-of-bounds read.
+        elif dq_o.shape[0] < nt:
+            msg = (
+                f"site {site}: dq_o has {dq_o.shape[0]} timesteps but q_model has "
+                f"{nt}; the compiled spread kernel needs at least nts values per "
+                "tree (or a broadcastable scalar)."
             )
-            q_corrected[:, seg_pos] += dq_nodes
-            dq_diagnostic[:, seg_pos] += dq_nodes
+            raise ValueError(msg)
+        dq_o_rows.append(dq_o)
+        offsets.append(offsets[-1] + tree_p.n_segments)
+
+    if dq_o_rows:
+        tree_off = np.asarray(offsets, dtype=np.int64)
+        max_seg = int(np.max(np.diff(tree_off)))
+        qbuf = np.empty((max_seg, nt), dtype=np.float64)
+        mult = np.empty((max_seg, nt), dtype=np.float64)
+        bsum = np.empty((max_seg, nt), dtype=np.float64)
+        pruned_off = np.zeros(int(tree_off[-1]) + 1, dtype=np.int64)
+        np.cumsum(np.concatenate(pruned_counts), out=pruned_off[1:])
+        pruned_col = (np.concatenate(pruned_cols) if pruned_cols
+                      else np.empty(0, dtype=np.int64))
+        spread_trees(
+            q_model_arr,
+            tree_off,
+            np.concatenate(parents),
+            np.concatenate(is_juncs),
+            np.concatenate(areas_f),
+            np.concatenate(thetas_f),
+            np.concatenate(qcols),
+            np.ascontiguousarray(_stack_dq(dq_o_rows, edge_decay), dtype=np.float64),
+            float(min_flow_cms),
+            float(edge_decay),
+            np.ascontiguousarray(np.concatenate(windows, axis=0)),
+            np.ascontiguousarray(np.concatenate(tshifts, axis=0)),
+            np.ascontiguousarray(pruned_off),
+            np.ascontiguousarray(pruned_col),
+            q_corrected,
+            dq_diagnostic,
+            qbuf,
+            mult,
+            bsum,
+        )
 
     if skipped:
         LOG.warning("apply_scaling_da: skipped %d sites: %s", len(skipped), skipped[:5])

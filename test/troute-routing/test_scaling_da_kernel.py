@@ -41,7 +41,7 @@ def test_recovery_at_gage() -> None:
     np.testing.assert_array_almost_equal(dq[1].to_numpy(), [5.0, 4.0])
 
 
-def test_area_scaling_on_chain() -> None:
+def test_eq2_area_scaling_telescopes_on_a_chain() -> None:
     """Each upstream segment gets dQ_o * (A_s/A_o)^theta (Eq. 2), independent of Q."""
     idx = _series_index(2)
     # Chain: 4 -> 3 -> 2 -> 1 (gage)
@@ -197,38 +197,6 @@ def test_flow_ratio_conserves_on_lagged_confluence() -> None:
     np.testing.assert_allclose(dq[4].iloc[0], dq2 * 0.5, rtol=1e-9)
     # CONSERVED: dq3 + dq4 == dq2 (the old cap gave 2*dq2 -- a manufactured dq2).
     np.testing.assert_allclose(dq[3].iloc[0] + dq[4].iloc[0], dq2, rtol=1e-9)
-
-
-def test_area_scaling_method_applies_eq2_at_every_node() -> None:
-    """The area_scaling ablation uses dQ_o*(A_s/A_o)^theta at every node, junctions included."""
-    idx = _series_index(1)
-    q_model = pd.DataFrame({1: [20.0], 2: [16.0], 3: [6.0], 4: [10.0]}, index=idx)
-    q_obs = pd.DataFrame({"A": [30.0]}, index=idx)  # dQ_o = 10
-    tree = build_one_gage_tree(
-        gage_fp=1,
-        rconn={1: [2], 2: [3, 4]},
-        area_sqkm={1: 100.0, 2: 80.0, 3: 30.0, 4: 50.0},
-        stop_segs=frozenset(),
-        theta=0.5,
-    )
-    _, dq = apply_scaling_da(q_model, q_obs, {"A": 1}, {"A": tree}, method="area_scaling")
-    # Each node from its OWN area relative to the gage, independent of the flow field.
-    np.testing.assert_allclose(dq[2].iloc[0], 10.0 * (80.0 / 100.0) ** 0.5, rtol=1e-9)
-    np.testing.assert_allclose(dq[3].iloc[0], 10.0 * (30.0 / 100.0) ** 0.5, rtol=1e-9)
-    np.testing.assert_allclose(dq[4].iloc[0], 10.0 * (50.0 / 100.0) ** 0.5, rtol=1e-9)
-    # Area-scaling super-adds across the junction for theta < 1 (unlike the flow-ratio split).
-    assert dq[3].iloc[0] + dq[4].iloc[0] > dq[2].iloc[0]
-
-
-def test_invalid_method_raises() -> None:
-    idx = _series_index(1)
-    q_model = pd.DataFrame({1: [5.0]}, index=idx)
-    q_obs = pd.DataFrame({"A": [10.0]}, index=idx)
-    tree = build_one_gage_tree(
-        gage_fp=1, rconn={}, area_sqkm={1: 100.0}, stop_segs=frozenset(), theta=0.77
-    )
-    with pytest.raises(ValueError, match="method must be"):
-        apply_scaling_da(q_model, q_obs, {"A": 1}, {"A": tree}, method="bogus")
 
 
 def test_theta_is_one_scalar_per_tree() -> None:
