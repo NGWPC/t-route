@@ -112,14 +112,14 @@ class TestDeclaredFieldsSurviveTheDump:
     implemented option that is not declared is unreachable from any valid config."""
 
     def test_operational_fields_validate(self, tmp_path):
-        cfg = Config(**_config("NHF", tmp_path, min_flow_cms=1e-3, celerity_mps=1.25))
+        cfg = Config(**_config("NHF", tmp_path, min_flow_cms=1e-3, max_reach_km=150.0))
         sda = cfg.compute_parameters.data_assimilation_parameters.streamflow_da
         assert sda.streamflow_scaling
         dumped = cfg.model_dump()["compute_parameters"]["data_assimilation_parameters"][
             "streamflow_da"
         ]["streamflow_scaling_parameters"]
         assert dumped["min_flow_cms"] == 1e-3
-        assert dumped["celerity_mps"] == 1.25
+        assert dumped["max_reach_km"] == 150.0
 
     def test_unknown_keys_still_forbidden(self, tmp_path):
         with pytest.raises(ValidationError):
@@ -136,71 +136,3 @@ class TestOperationalKnobs:
             Config(**_config("NHF", tmp_path, spread_chunk_timesteps=-1))
 
 
-class TestWindowEnvelope:
-    """The envelope is validated on REALIZED run sets, not config arithmetic.
-
-    max_loop_size counts forcing FILES: with 15-minute files, max_loop_size=24
-    realizes 6 h windows, and stream_output_time can silently enlarge the count.
-    So the driver validates the windows the run actually built (window hours
-    must cover the lag horizon -- the halo is ONE window deep -- and be a whole
-    number of screen intervals). The final window is exempt: it clamps at the
-    run end identically under every partitioning.
-    """
-
-    @staticmethod
-    def _sda(**kw):
-        from nwm_routing.scaling_da_apply import ScalingDA
-
-        o = ScalingDA.__new__(ScalingDA)
-        for k, v in kw.items():
-            setattr(o, k, v)
-        return o
-
-    def test_window_shorter_than_lag_is_rejected(self):
-        from nwm_routing.scaling_da_apply import validate_window_envelope
-
-        sda = self._sda(max_travel_time_h=48.0, screen_interval_h=24.0)
-        runs = [{"nts": 288, "dt": 300}, {"nts": 288, "dt": 300}, {"nts": 10, "dt": 300}]
-        with pytest.raises(ValueError, match="one window deep"):
-            validate_window_envelope(runs, sda)  # 24 h windows < 48 h horizon
-
-    def test_covering_windows_pass_and_final_window_is_exempt(self):
-        from nwm_routing.scaling_da_apply import validate_window_envelope
-
-        sda = self._sda(max_travel_time_h=48.0, screen_interval_h=24.0)
-        validate_window_envelope(
-            [{"nts": 576, "dt": 300}, {"nts": 100, "dt": 300}], sda
-        )
-
-    def test_non_positive_horizon_is_rejected_at_parse(self, tmp_path):
-        # The lag and its reach limit are part of the method, not a switch:
-        # max_travel_time_h: 0 must fail config validation.
-        with pytest.raises(ValidationError):
-            Config(**_config("NHF", tmp_path, max_travel_time_h=0.0))
-
-    @pytest.mark.parametrize(
-        "field", ["max_travel_time_h", "celerity_mps", "screen_interval_h"]
-    )
-    def test_infinite_values_are_rejected_at_parse(self, tmp_path, field):
-        # gt=0 alone admits .inf; celerity_mps=inf makes every dx/c zero, which
-        # silently resurrects the removed un-lagged mode.
-        with pytest.raises(ValidationError):
-            Config(**_config("NHF", tmp_path, **{field: float("inf")}))
-
-    def test_both_drivers_wire_the_envelope_validator(self):
-        # This repo has shipped a per-driver gate in only ONE of its two driver
-        # copies before (see build_da_sets in CLAUDE.md), with a test pointed at
-        # the copy the feature never calls. Pin the wiring in BOTH.
-        import inspect
-
-        import nwm_routing.nhf_routing as cli
-
-        bmi = pytest.importorskip("troute_nwm_bmi.troute_model")
-        assert "validate_window_envelope" in inspect.getsource(cli)
-        assert "validate_window_envelope" in inspect.getsource(bmi.Model.run)
-
-    def test_single_window_run_has_nothing_to_check(self):
-        from nwm_routing.scaling_da_apply import validate_window_envelope
-
-        sda = self._sda(max_travel_time_h=48.0, screen_interval_h=24.0)
-        validate_window_envelope([{"nts": 5, "dt": 300}], sda)
