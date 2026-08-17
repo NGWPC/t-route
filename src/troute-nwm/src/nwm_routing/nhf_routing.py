@@ -14,7 +14,6 @@ from .scaling_da_apply import (
     merge_injected_obs,
     network_gage_segments,
     should_seed_state,
-    validate_window_envelope,
 )
 
 from troute.NHF import NHF
@@ -181,18 +180,23 @@ def nhf_routing(argv):
         network, supernetwork_parameters, data_assimilation_parameters,
         cpu_pool=compute_parameters.get("cpu_pool"),
     )
-    if scaling_da is not None:
-        # On the REALIZED windows, not the config: max_loop_size counts forcing
-        # files, and stream_output_time can silently enlarge it, so window hours
-        # are only known here.
-        validate_window_envelope(
-            run_sets, scaling_da, default_dt=forcing_parameters.get("dt")
-        )
     # Every execution plan breaks reaches at the network's gages, the treewise plan
     # used by serial/by-network/bmi included, so the in-kernel override lands at a
     # gaged nexus and propagates downstream under any compute method. The split set is
     # network.gages, which is static, so it does not depend on which observations
     # happened to arrive in the window the plan was built for.
+
+    # A traced travel-time shift reads the kernel's Courant number (r[2]) for
+    # each reach's transit, 1/cn timesteps. Forced on for ROUTING only:
+    # nwm_output_generator keeps reading the config value below, so this does not
+    # start writing Courant output files.
+    #
+    # Kept as TWO flags, not one. The user's request is permanent and feeds the
+    # output writer; the trace's is dropped as soon as its cache is full. Folding
+    # them together meant a run that explicitly asked for Courant output stopped
+    # getting it after the first window, with the writer still expecting it.
+    _courant_for_user = return_courant
+    _courant_for_trace = scaling_da is not None and scaling_da.travel_time_lag
 
     # A window whose spread is deferred for its halo is held here until the next
     # window's innovation arrives; see the flush at the top of the loop body.
@@ -271,7 +275,16 @@ def nhf_routing(argv):
             network.great_lakes_climatology_df,
             data_assimilation.assimilation_parameters,
             assume_short_ts,
-            return_courant,
+            # The trace reads the Courant field ONCE, to fill its cache. After
+            # that the kernel would allocate and fill an [n_seg, nts*3] block per
+            # window that nothing reads, which is the whole of the trace's
+            # measured overhead. Re-evaluated per window rather than hoisted:
+            # the cache is filled during the first window's DA, so the flag has
+            # to be able to change after it. The user's own request never drops.
+            (_courant_for_user or (
+                _courant_for_trace
+                and not scaling_da._trace_cached(scaling_da.trees)
+            )),
             network.waterbody_dataframe,
             data_assimilation_parameters,
             network.waterbody_types_dataframe,
@@ -318,7 +331,7 @@ def nhf_routing(argv):
             _flush_output(_p_run, _p_res, _p_it)
             _pending = None
         if seed_state:
-            scaling_da.apply_in_kernel(run_results, nts, dt, t0)
+            scaling_da.apply_in_kernel(run_results, nts, dt, t0, seed_untimed=True)
 
         # create initial conditions for next loop itteration
         network.new_q0(run_results)

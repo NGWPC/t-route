@@ -13,10 +13,9 @@ Covers the two pieces that differ from the output-only path:
 
 from __future__ import annotations
 
-import logging
-
 import numpy as np
 import pandas as pd
+import pytest
 from nwm_routing.scaling_da_apply import ScalingDA
 
 from troute.routing.fast_reach.scaling_da import apply_scaling_da
@@ -25,6 +24,10 @@ from troute.scaling_da import build_gage_trees_from_mappings
 
 def _bare(**attrs) -> ScalingDA:
     o = ScalingDA.__new__(ScalingDA)
+    # These tests exercise the spread mechanics with run_results that carry no
+    # Courant block; with the class-default lag ON that is now a hard error
+    # (fail closed), so the lag is off unless a test asks for it.
+    o.travel_time_lag = False
     for k, v in attrs.items():
         setattr(o, k, v)
     return o
@@ -37,6 +40,61 @@ def _linear_tree():
     return build_gage_trees_from_mappings(rconn, {"G": 100}, area, theta_default=0.77)
 
 
+def test_seed_untimed_rewrites_only_the_handoff_instant():
+    """With the lag on, the hand-off window's FINAL timestep must carry the
+    UNTIMED correction (that instant is all a forecast inherits, and the lagged
+    read there decays past the analysis edge), while earlier timesteps keep the
+    traced timing. A ramp innovation discriminates the two: untimed reads
+    dq_o(t), lagged reads dq_o(t + tau)."""
+    trees = _linear_tree()
+    nts = 6
+    arr = np.zeros((3, 4 * nts), dtype=np.float32)
+    arr[:, 0::4] = 5.0
+    cour = np.zeros((3, nts * 3), dtype=np.float32)
+    cour[:, 0::3] = 0.5                      # tau: 101 -> 2 steps, 102 -> 4
+    cour[:, 1::3] = 1.0
+    nudge = np.zeros((1, nts + 1), dtype=np.float32)
+    nudge[0, 1:] = np.arange(1.0, nts + 1)   # ramp 1..6
+    rr = [[np.array([100, 101, 102]), arr, cour, (np.array([100]), np.zeros(1),
+           np.zeros(1)), 0, 0, 0, 0, np.zeros((3, nts), dtype=np.float32),
+           nudge]]
+    o = _bare(trees=trees, gage_seg={"G": 100}, min_flow=1e-6,
+              max_reach_km=1e9, innovation_spread_h=0.0, _dx=None,
+              travel_time_lag=True, lag_window_h=6.0, da_decay_min=120.0)
+    o.apply_in_kernel(rr, nts=nts, dt=3600, t0="2000-01-01", seed_untimed=True)
+    f101 = (20.0 / 30.0) ** 0.77
+    q101 = arr[1, 0::4]
+    # Earlier step keeps the traced timing: at t=1 the lag (shift 2) reads
+    # dq_o[3] = 4, not the untimed dq_o[1] = 2.
+    assert q101[1] == pytest.approx(5.0 + 4.0 * f101, rel=1e-5)
+    # The hand-off instant is untimed: dq_o[5] = 6 exactly, not the
+    # edge-decayed lagged read.
+    assert q101[-1] == pytest.approx(5.0 + 6.0 * f101, rel=1e-5)
+
+
+def test_lag_with_no_courant_field_fails_closed():
+    """travel_time_lag on + a kernel that exported no Courant block is a config
+    the run cannot honor (e.g. an all-diffusive domain). Silently applying the
+    correction at observation time would be a different estimator than
+    configured, so it raises instead."""
+    import pytest
+
+    trees = _linear_tree()
+    nts = 2
+    arr = np.zeros((3, 4 * nts), dtype=np.float32)
+    arr[:, 0::4] = 5.0
+    nudge = np.zeros((1, nts + 1), dtype=np.float32)
+    nudge[0, 1:] = 2.0
+    rr = [[np.array([100, 101, 102]), arr, 0, (np.array([100]), np.zeros(1),
+           np.zeros(1)), 0, 0, 0, 0, np.zeros((3, nts), dtype=np.float32),
+           nudge]]
+    o = _bare(trees=trees, gage_seg={"G": 100}, min_flow=1e-6,
+              max_reach_km=200.0, innovation_spread_h=0.0, _dx=None,
+              travel_time_lag=True, lag_window_h=48.0)
+    with pytest.raises(RuntimeError, match="no Courant"):
+        o.apply_in_kernel(rr, nts=nts, dt=3600, t0="2000-01-01")
+
+
 def test_kernel_dq_o_override_matches_obs_path():
     """dq_o_by_site reproduces the obs-driven spread when delta == obs - Q_gage."""
     trees = _linear_tree()
@@ -46,7 +104,7 @@ def test_kernel_dq_o_override_matches_obs_path():
 
     # obs-driven: obs=12 -> dq_o = 12-10 = 2 at the gage.
     q_obs = pd.DataFrame({"G": [12.0, 12.0]}, index=idx)
-    q_a, _ = apply_scaling_da(q_model, q_obs, gmap, trees, method="flow_ratio")
+    q_a, _ = apply_scaling_da(q_model, q_obs, gmap, trees)
 
     # override-driven: supply dq_o = 2 directly, with background at the gage.
     q_bg = q_model.copy()
@@ -77,6 +135,8 @@ def _run_results(nudge_vals):
     q = np.array([12.0, 6.0, 4.0])  # analyzed: gage already = obs
     arr = np.zeros((3, 4 * nts), dtype=np.float32)
     arr[:, 0::4] = np.tile(q[:, None], (1, nts))  # q at every timestep
+    # depth, so the discharge-to-depth transform has a state to carry into
+    arr[:, 2::4] = np.tile(np.array([2.0, 1.5, 1.0])[:, None], (1, nts))
     nudge = np.zeros((1, nts + 1), dtype=np.float32)
     nudge[0, 1:] = nudge_vals
     r = [
@@ -139,22 +199,20 @@ def _two_tree():
 
 
 def test_zero_own_innovation_still_spreads_the_halo():
-    """A site with no innovation in its OWN window must still spread a nonzero halo.
+    """A window with no innovation of its own still spreads, via the halo.
 
-    The lag reads the halo at timesteps inside this window, so inclusion has to be
-    decided from the concatenated spread array. Gating on the window's own values
-    (the np.any(nud) candidate gate, or the "trusted somewhere in this window"
-    survivor set) dropped such sites, and what a backward shift applied then
-    depended on max_loop_size: the 544-segment, 38.6 cms residual left after the
-    static-celerity fix on the 48 h vs 96 h comparison.
+    The temporal spread averages across the window boundary, so the next
+    window's innovation reaches timesteps inside this one. Inclusion is
+    therefore decided from the smoothed, halo-extended series rather than from
+    this window's raw values, which are all zero here.
     """
     o = _bare(
         trees=_linear_tree(),
         gage_seg={"G": 100},
         min_flow=1e-6,
         max_source_pbias=None,
-        max_travel_time_h=48.0,
-        celerity_mps=1.0,  # dx=3600 m at dt=3600 s -> tau(101) = exactly 1 step
+        max_reach_km=200.0,
+        innovation_spread_h=12.0,
         _loop_obs=None,
         _dx=pd.Series({100: 3600.0, 101: 3600.0, 102: 3600.0}, dtype=float),
     )
@@ -163,12 +221,12 @@ def test_zero_own_innovation_still_spreads_the_halo():
     o.apply_in_kernel(rr, nts=2, dt=3600, t0="2000-01-01",
                       halo={100: np.array([5.0, 5.0])})
     after = rr[0][1][:, 0::4]
-    # Gage itself: shift 0 reads only the (zero) own innovation -- unchanged.
-    np.testing.assert_allclose(after[0], before[0])
-    # 101 at t=0 reads dq[0+1] = own zero; at t=1 reads dq[2] = the halo.
-    np.testing.assert_allclose(after[1][0], before[1][0])
-    expected_101_t1 = 6.0 + 5.0 * (20.0 / 30.0) ** 0.77
-    np.testing.assert_allclose(after[1][1], expected_101_t1, rtol=1e-5)
+    # The upstream segments are corrected even though this window's own
+    # innovation is zero throughout.
+    assert (after[1] > before[1]).all()
+    assert (after[2] > before[2]).all()
+    # The gage keeps the value the in-kernel override gave it.
+    np.testing.assert_allclose(after[0], before[0], rtol=1e-6)
 
 
 def test_spread_reaches_the_warmstate_columns():
@@ -177,8 +235,10 @@ def test_spread_reaches_the_warmstate_columns():
 
     Column ``-4`` of an ``(n_seg, 4*nts)`` array is ``4*(nts-1)``, which is in the
     ``0::4`` discharge stride, so the last timestep's corrected q is what carries
-    over. This asserts that indexing claim rather than trusting it; depth (``-2``)
-    is deliberately NOT corrected, which is the accepted transient.
+    over. This asserts that indexing claim rather than trusting it. Depth
+    (``-2``) is now carried with it: it is state, and MC derives celerity and X
+    from it, so seeding a corrected discharge against the uncorrected depth
+    hands the next chunk the right flow on the wrong geometry.
     """
     o = _bare(
         trees=_linear_tree(),
@@ -197,9 +257,13 @@ def test_spread_reaches_the_warmstate_columns():
     # load-bearing assertion: it fails if -4 ever stops landing in the 0::4 stride.
     np.testing.assert_allclose(warmstate[1, 0], expected_101, rtol=1e-5)
     np.testing.assert_allclose(warmstate[1, 1], expected_101, rtol=1e-5)
-    # depth (-2) is deliberately left uncorrected -- pin it so the accepted Q/h
-    # inconsistency stays a known, deliberate gap rather than drifting silently.
-    np.testing.assert_array_equal(warmstate[:, 2], 0.0)
+    # depth (-2) is carried WITH the discharge, so the seeded state is internally
+    # consistent: MC derives celerity and X from depth, and the previous
+    # behaviour handed the next chunk a corrected flow on the uncorrected
+    # geometry. The gage row is untouched by the spread, so its depth holds.
+    np.testing.assert_allclose(warmstate[0, 2], 2.0, rtol=1e-6)
+    expected_h101 = 1.5 * (expected_101 / 6.0) ** 0.6
+    np.testing.assert_allclose(warmstate[1, 2], expected_h101, rtol=1e-5)
 
 
 def test_seed_state_only_on_the_final_window():
@@ -256,12 +320,11 @@ def test_chunked_spread_matches_unchunked_through_apply_in_kernel():
     for a per-segment lag and raised only once a window was long enough to
     chunk. Ohio at 48 h never chunks, so this has to be forced.
     """
-    o_kwargs = dict(
+    o_kwargs = dict(  # noqa: C408  (kwargs are threaded into _bare(**...) below)
         trees=_linear_tree(),
         gage_seg={"G": 100},
         min_flow=1e-6,
-        max_travel_time_h=48.0,
-        celerity_mps=1.0,
+        max_reach_km=200.0,
         _dx=pd.Series({100: 3600.0, 101: 3600.0, 102: 3600.0}, dtype=float),
     )
     n = 8
@@ -275,11 +338,14 @@ def test_chunked_spread_matches_unchunked_through_apply_in_kernel():
     _bare(spread_chunk_timesteps=3, **o_kwargs).apply_in_kernel(
         rr_chunked, nts=n, dt=3600, t0="2000-01-01"
     )
-    np.testing.assert_array_equal(
-        rr_chunked[0][1][:, 0::4], rr_full[0][1][:, 0::4]
-    )
+    # The WHOLE result array, not just discharge. Comparing 0::4 alone hid that
+    # the chunk loop wrote discharge only: depth is STATE (h0 seeds the next
+    # window and MC derives celerity from it), so a chunked run handed the
+    # forecast a different geometry while reporting identical flow.
+    np.testing.assert_array_equal(rr_chunked[0][1], rr_full[0][1])
     # and the spread actually did something, or the comparison is vacuous
     assert (rr_full[0][1][1:, 0::4] != _run_results(nudge)[0][1][1:, 0::4]).any()
+    assert (rr_full[0][1][1:, 2::4] != _run_results(nudge)[0][1][1:, 2::4]).any()
 
 
 class TestResolveSpreadChunk:
@@ -305,3 +371,112 @@ class TestResolveSpreadChunk:
         assert 0 < chunk < 288
         assert chunk * 1_100_000 <= o._SPREAD_CHUNK_BUDGET_ELEMS
 
+
+
+def test_smoothing_keeps_the_gage_observation_and_the_true_background():
+    """With a nonzero spread the raw and smoothed innovations differ, and both
+    the gage's own output and the upstream split have to stay correct.
+
+    The gage keeps the observation the in-kernel override placed there, which is
+    background + RAW nudge. The upstream share is computed against the true
+    background, so it is the same fraction of the smoothed innovation that a
+    zero-spread run would apply to an equal innovation -- not a smaller one
+    scaled down by an inflated denominator.
+    """
+    o = _bare(
+        trees=_linear_tree(),
+        gage_seg={"G": 100},
+        min_flow=1e-6,
+        max_source_pbias=None,
+        _loop_obs=None,
+        innovation_spread_h=2.0,
+    )
+    nudge = [2.0, 2.0, 8.0, 2.0]
+    rr = _run_results(nudge)
+    o.apply_in_kernel(rr, nts=len(nudge), dt=3600, t0="2000-01-01")
+    after = rr[0][1][:, 0::4]
+
+    # The gage row is the analyzed flow the kernel wrote: unchanged.
+    np.testing.assert_allclose(after[0], 12.0, rtol=1e-5)
+
+    # Upstream: background 6.0 plus the SMOOTHED innovation times the area
+    # factor. Reproduce the smoothing exactly rather than hardcoding it.
+    smoothed = o._smooth_innovation(np.asarray(nudge, dtype=float), dt=3600.0)
+    expected = 6.0 + smoothed * (20.0 / 30.0) ** 0.77
+    np.testing.assert_allclose(after[1], expected, rtol=1e-5)
+
+
+def test_spread_volume_holds_inside_the_series_but_not_at_its_edges():
+    """The forward mean conserves the increment only in the interior.
+
+    An innovation within the window of the series START has no earlier output
+    steps to carry its mass and loses most of it; one at the very END is
+    amplified by the persistence padding that keeps the final step equal to its
+    own raw value (which is what the forecast hand-off snapshots). Pinned
+    because both are load-bearing and neither is obvious.
+    """
+    o = _bare(innovation_spread_h=4.0)
+    n, win = 21, 5
+    # trailing factor is (win+1)/2, not win: the padded copies past the last
+    # output step have nowhere to land.
+    for pos, expected in ((0, 12.0 / win), (10, 12.0), (n - 1, 12.0 * (win + 1) / 2)):
+        dq = np.zeros(n)
+        dq[pos] = 12.0
+        out = o._smooth_innovation(dq, dt=3600.0)
+        assert out.sum() == pytest.approx(expected)
+    # the property the hand-off depends on, for every width
+    dq = np.array([1.0, 5.0, 2.0, 9.0, 4.0, 7.0])
+    for width in (0.0, 6.0, 12.0, 24.0):
+        o.innovation_spread_h = width
+        assert o._smooth_innovation(dq, dt=3600.0)[-1] == pytest.approx(dq[-1])
+
+
+def test_the_correction_is_carried_into_depth_not_just_discharge():
+    """Depth is STATE: new_q0 snapshots h0 to seed the next chunk, and MC derives
+    its celerity and X weighting from depth. A corrected discharge paired with
+    the uncorrected depth seeds the forecast with the right flow on the wrong
+    geometry.
+    """
+    o = _bare(
+        trees=_linear_tree(),
+        gage_seg={"G": 100},
+        min_flow=1e-6,
+        max_source_pbias=None,
+        _loop_obs=None,
+        innovation_spread_h=0.0,
+        travel_time_lag=False,
+    )
+    rr = _run_results([2.0, 2.0])
+    depth_before = rr[0][1][:, 2::4].copy()
+    q_before = rr[0][1][:, 0::4].copy()
+    o.apply_in_kernel(rr, nts=2, dt=3600, t0="2000-01-01")
+    q_after = rr[0][1][:, 0::4]
+    depth_after = rr[0][1][:, 2::4]
+
+    # upstream rows gained discharge, so their depth must rise with it
+    assert (q_after[1] > q_before[1]).all()
+    assert (depth_after[1] > depth_before[1]).all()
+    # and by the wide-channel exponent: h scales as the discharge ratio ^ 3/5
+    expected = depth_before[1] * (q_after[1] / q_before[1]) ** 0.6
+    np.testing.assert_allclose(depth_after[1], expected, rtol=1e-5)
+    # the gage row is untouched by the spread, so its depth is too
+    np.testing.assert_allclose(depth_after[0], depth_before[0])
+
+
+def test_depth_is_left_alone_where_the_discharge_ratio_is_not_a_depth_signal():
+    """A ratio taken against a dry or near-zero background is noise, and a huge
+    ratio would let the wide-channel approximation dominate the correction it is
+    meant to transport."""
+    o = _bare(
+        trees=_linear_tree(),
+        gage_seg={"G": 100},
+        min_flow=1e-6,
+        max_source_pbias=None,
+        _loop_obs=None,
+        innovation_spread_h=0.0,
+        travel_time_lag=False,
+    )
+    rr = _run_results([2.0, 2.0])
+    rr[0][1][:, 2::4] = 0.0    # no usable depth anywhere
+    o.apply_in_kernel(rr, nts=2, dt=3600, t0="2000-01-01")
+    np.testing.assert_allclose(rr[0][1][:, 2::4], 0.0)

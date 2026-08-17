@@ -34,7 +34,7 @@ def test_assemble_q_model_deinterleaves_q_columns():
     np.testing.assert_array_equal(qm[20].to_numpy(), [5, 7])
 
 
-def test_scatter_back_writes_only_q_columns():
+def test_scatter_back_writes_q_and_carries_it_into_depth():
     o = _bare()
     ids = np.array([10, 20])
     arr = np.zeros((2, 8), dtype=np.float32)
@@ -43,10 +43,13 @@ def test_scatter_back_writes_only_q_columns():
     o._scatter_back([(ids, arr)], q_corr)
     # q columns (0::4) updated, per [seg, nts]
     np.testing.assert_array_almost_equal(arr[:, 0::4], [[1.5, 3.5], [5.5, 7.5]])
-    # v/d/ql columns untouched
+    # velocity and lateral inflow are never written
     assert (arr[:, 1::4] == 0).all()
-    assert (arr[:, 2::4] == 0).all()
     assert (arr[:, 3::4] == 0).all()
+    # depth is CARRIED with the discharge, but only where there is a depth to
+    # scale and a background to scale it against. Here the background q and the
+    # depth are both zero, so there is no ratio to take and depth holds.
+    assert (arr[:, 2::4] == 0).all()
 
 
 def test_scatter_back_respects_per_subnetwork_id_order():
@@ -112,6 +115,37 @@ def test_holdout_known_ids_are_withheld(tmp_path):
     da = _holdout_init(tmp_path, ["01000000"])
     assert "01000000" not in da._da_sites
     assert "02000000" in da._da_sites
+
+
+class _LakeGageNetwork(_HoldoutNetwork):
+    """Gage 200's own segment is a lake id (reservoir-routed)."""
+
+    def __init__(self):
+        super().__init__()
+        self.waterbody_dataframe = pd.DataFrame(index=pd.Index([200]))
+
+
+def test_gage_on_a_reservoir_segment_is_excluded_loudly(tmp_path, caplog):
+    """A gage whose crosswalked segment the kernel routes as a reservoir cannot
+    be scale-corrected (reservoir DA owns that segment). The exclusion is the
+    production contract -- build_trees alone would happily keep it -- and it
+    must be LOUD, because the run otherwise completes normally while silently
+    assimilating nothing there."""
+    import logging
+
+    base = tmp_path / "baseline"
+    base.mkdir(exist_ok=True)
+    with caplog.at_level(logging.WARNING):
+        da = ScalingDA(
+            _LakeGageNetwork(),
+            {"synthetic_obs_factor": 1.5, "synthetic_obs_baseline": str(base)},
+        )
+    assert "02000000" not in da._da_sites
+    assert "01000000" in da._da_sites
+    assert any(
+        "reservoir-routed" in r.message and "02000000" in r.message
+        for r in caplog.records
+    )
 
 
 class _NanAreaNetwork(_HoldoutNetwork):
