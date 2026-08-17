@@ -15,17 +15,24 @@ from troute.nhf_preprocess import (
     LAYERS_TO_READ,
     OPTIONAL_COLUMNS,
     OPTIONAL_LAYERS,
+    REQUIRED_COLUMNS,
     _missing_requested_columns,
 )
 
 
 def _full_fields() -> dict[str, set[str]]:
-    """Every validated layer present, carrying exactly its requested columns."""
-    return {
+    """Every validated layer present, carrying exactly its requested columns.
+
+    Full-load layers name no column list, so REQUIRED_COLUMNS is all they pin.
+    """
+    fields = {
         name: set(columns)
         for name, columns, _ in LAYERS_TO_READ
         if columns is not None
     }
+    for name, required in REQUIRED_COLUMNS.items():
+        fields.setdefault(name, set()).update(required)
+    return fields
 
 
 def test_complete_geopackage_validates_clean():
@@ -72,3 +79,19 @@ def test_present_optional_layer_is_column_checked():
     fields["reservoir_da"].discard("site_no")
     missing = _missing_requested_columns(fields)
     assert missing == {"reservoir_da": ["site_no"]}
+
+
+def test_gages_missing_hy_id_is_rejected():
+    """hy_id is the only key tying a gage to its hydrolocation. nhf 1.2.3 dropped
+    it; unchecked that becomes a KeyError deep inside a pandas merge."""
+    fields = _full_fields()
+    fields["gages"].discard("hy_id")
+    assert _missing_requested_columns(fields) == {"gages": ["hy_id"]}
+
+
+def test_absent_gages_layer_is_still_tolerated():
+    """Pinning a column must not make the LAYER mandatory -- read_geo_file loads an
+    absent one as an empty frame and the build carries on."""
+    fields = _full_fields()
+    fields.pop("gages")
+    assert _missing_requested_columns(fields) == {}

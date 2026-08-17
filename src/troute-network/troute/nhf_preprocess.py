@@ -242,25 +242,41 @@ OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
     "flowpaths": frozenset({"total_da_sqkm", "vpu_id"}),
 }
 
+# Columns required from layers loaded in FULL (``columns=None``), which name no
+# column list for the check above to use. Enforced only when the layer is PRESENT,
+# so a gage-free domain stays valid. gages.hy_id is the only key tying a gage to its
+# hydrolocation (site_no and gid both repeat); nhf 1.2.3 dropped it, which without
+# this surfaces as a KeyError deep inside a pandas merge.
+REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
+    "gages": frozenset({"hy_id"}),
+}
+
 
 def _missing_requested_columns(
     available_by_layer: dict[str, set],
 ) -> dict[str, list]:
     """Pure check: which requested columns are absent from each layer.
 
-    ``available_by_layer`` maps a layer name to the set of column names the
-    geopackage actually carries for it; omit a layer to signal it is entirely
-    absent. Only layers that declare an explicit ``columns`` list are checked
-    (``columns=None`` layers are loaded in full and used conditionally).
-    Returns ``{layer_name: [missing columns]}`` (empty if nothing is missing).
+    ``available_by_layer`` maps a layer name to the columns it carries; omit a
+    layer to signal it is absent. Layers with an explicit ``columns`` list are
+    checked against it, ``columns=None`` layers only against ``REQUIRED_COLUMNS``
+    and only when present. Returns ``{layer_name: [missing columns]}``.
     """
     missing_by_layer: dict[str, list] = {}
     for name, columns, _ in LAYERS_TO_READ:
+        must_have = REQUIRED_COLUMNS.get(name, frozenset())
+        available = available_by_layer.get(name)
         if columns is None:
+            # Loaded in full: nothing to check unless the schema pins a column,
+            # and an absent layer of this kind is not itself an error.
+            if must_have and available is not None:
+                absent = sorted(c for c in must_have if c not in available)
+                if absent:
+                    missing_by_layer[name] = absent
             continue
         optional_cols = OPTIONAL_COLUMNS.get(name, frozenset())
         required = [c for c in columns if c not in optional_cols]
-        available = available_by_layer.get(name)
+        required += [c for c in sorted(must_have) if c not in required]
         if available is None:
             # An absent optional layer is fine; an absent core topology layer is not.
             if name not in OPTIONAL_LAYERS:
@@ -285,12 +301,15 @@ def _validate_required_columns(gpkg_path: Path, present_layers: set[str]) -> Non
     metadata lookup per present validated layer and catches a stale hydrofabric
     (e.g. ``reference_flowpaths`` lacking ``segment_order``) up front, replacing
     a cryptic ``KeyError`` raised deep inside discretization. Layers loaded with
-    ``columns=None`` (lakes, gages, hydrolocations, virtual_nexus) are used
-    conditionally and not validated.
+    ``columns=None`` (lakes, gages, hydrolocations, virtual_nexus) name no column
+    list, so they are checked only against ``REQUIRED_COLUMNS`` and only when
+    present -- their absence stays legal.
     """
     available_by_layer: dict[str, set[str]] = {}
     for name, columns, _ in LAYERS_TO_READ:
-        if columns is None or name not in present_layers:
+        if name not in present_layers:
+            continue
+        if columns is None and name not in REQUIRED_COLUMNS:
             continue
         available_by_layer[name] = set(
             pyogrio.read_info(gpkg_path, layer=name)["fields"]
@@ -302,10 +321,11 @@ def _validate_required_columns(gpkg_path: Path, present_layers: set[str]) -> Non
         )
         raise ValueError(
             "Input geopackage is missing required column(s) needed by the NHF "
-            f"network build -> {details}. This usually means the hydrofabric "
-            "predates the current schema (for example, older datasets lack the "
-            "'segment_order' column in 'reference_flowpaths'); regenerate or "
-            "update the dataset to a compatible hydrofabric version."
+            f"network build -> {details}. Usually the hydrofabric predates the "
+            "current schema (older datasets lack 'segment_order' in "
+            "'reference_flowpaths'); it can also be a newer build that dropped a "
+            "required column (nhf 1.2.3 dropped 'hy_id' from 'gages'). Regenerate "
+            "or switch to a compatible hydrofabric version."
         )
 
 
