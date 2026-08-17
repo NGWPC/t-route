@@ -119,6 +119,18 @@ def _input_handler_v03(args):
         data_assimilation_parameters,
     ) = nhd_io.read_config_file(custom_input_file)
 
+    # -V3 reads raw yaml, bypassing the Config-level guard; no -V3 driver
+    # constructs the scaling DA, so an enabled flag would silently run no-DA.
+    if ((data_assimilation_parameters or {}).get("streamflow_da") or {}).get(
+        "streamflow_scaling"
+    ):
+        raise ValueError(
+            "streamflow_da.streamflow_scaling is true, but the -V3 driver does not "
+            "implement the simple-scaling DA; the run would complete with NO "
+            "assimilation while looking successful. Use the -V5 (NHF) driver, or "
+            "disable streamflow_scaling."
+        )
+
     # if log level is at or below DEBUG, then check user inputs
     if LOG.isEnabledFor(logging.DEBUG):
         check_inputs(

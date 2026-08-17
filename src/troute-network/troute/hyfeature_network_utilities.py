@@ -78,8 +78,15 @@ def build_da_sets(da_params, run_sets, t0):
     streamflow_da = da_params.get('streamflow_da', False)
     if streamflow_da:
         nudging = streamflow_da.get('streamflow_nudging', False)
-        
-    if not usgs_da and not usace_da and not usbr_da and not GreatLakes_da and not nudging:
+
+    # The scaling DA is a third TimeSlice consumer and does not require nudging;
+    # without it here a scaling-only config got no per-window file list and fell
+    # back to globbing the whole directory. Same gate exists in
+    # nhd_network_utilities_v02.build_da_sets -- keep both.
+    scaling = bool(streamflow_da) and streamflow_da.get('streamflow_scaling', False)
+
+    if (not usgs_da and not usace_da and not usbr_da and not GreatLakes_da
+            and not nudging and not scaling):
         # if all DA capabilities are OFF, return empty dictionary
         da_sets = [{} for _ in run_sets]
     
@@ -128,7 +135,7 @@ def build_da_sets(da_params, run_sets, t0):
             )
 
             # identify available USGS TimeSlices in run set i
-            if (usgs_timeslices_folder and nudging) or (usgs_timeslices_folder and usgs_da):
+            if usgs_timeslices_folder and (nudging or usgs_da or scaling):
                 filenames_usgs = (timestamps.strftime('%Y-%m-%d_%H:%M:%S') 
                             + '.15min.usgsTimeSlice.ncdf').to_list()
                 

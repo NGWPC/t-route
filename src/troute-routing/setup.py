@@ -1,8 +1,8 @@
 from setuptools import setup, find_namespace_packages
-from distutils.extension import Extension
+from setuptools import Extension
 import sys
 import numpy as np
-from distutils.command.build_ext import build_ext
+from setuptools.command.build_ext import build_ext
 import os
 import subprocess
 
@@ -104,6 +104,22 @@ simple_da = Extension(
     extra_compile_args=["-O2", "-g"],
 )
 
+scaling_da_kernel = Extension(
+    "troute.routing.fast_reach.scaling_da_kernel",
+    sources=[
+        "troute/routing/fast_reach/scaling_da_kernel.{}".format(ext),
+    ],
+    include_dirs=[np.get_include()],
+    libraries=[],
+    library_dirs=[],
+    extra_objects=[],
+    # -ffp-contract=off: forbid FMA contraction of ``q_corrected += dq_o*m`` so
+    # the accumulation is multiply-then-add (two roundings), bit-identical to the
+    # NumPy reference. Without it clang fuses to one rounding and the port drifts
+    # by a few ULP -- fatal to the rtol=0, atol=1e-9 equivalence gate.
+    extra_compile_args=["-O2", "-g", "-ffp-contract=off"],
+)
+
 diffusive = Extension(
     "troute.routing.fast_reach.diffusive",
     sources=["troute/routing/fast_reach/diffusive.{}".format(ext)],
@@ -129,7 +145,7 @@ chxsec_lookuptable = Extension(
 )
 
 package_data = {"troute.fast_reach": ["reach.pxd", "fortran_wrappers.pxd", "utils.pxd"]}
-ext_modules = [reach, mc_reach, diffusive, simple_da, chxsec_lookuptable]
+ext_modules = [reach, mc_reach, diffusive, simple_da, scaling_da_kernel, chxsec_lookuptable]
 
 if USE_CYTHON:
     from Cython.Build import cythonize

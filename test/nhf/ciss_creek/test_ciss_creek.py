@@ -24,16 +24,16 @@ PEAK_QLAT = 2000
 PEAK_BOUNDS: dict[int, tuple[float, float]] = {
     OUTLET_FP_ID: (0.9 * 1504, 1.1 * 1504),
 }
-LAKEOUT_OUTFLOW_BOUNDS = {
-    i: (0.1, PEAK_QLAT)
-    for i in [
-        1288454931382737,
-        1288455043864385,
-        1288453685890499,
-        1288453736128344,
-        1288453793336386,
-    ]
-}
+# Every lake in the domain must route an outflow in this range. The bound is the same
+# for all of them, so listing ids bought nothing and cost portability: `nhf_lake_id` is
+# assigned per hydrofabric build, and 2 of the 5 hardcoded here moved between nhf 1.2.1
+# and 1.2.2, which failed as though routing had broken. Read them from the domain the
+# test actually runs on; a lake going missing still fails, on the count check below.
+def _lakeout_bounds() -> dict[int, tuple[float, float]]:
+    import geopandas as gpd
+
+    lakes = gpd.read_file(CFG.domain_path, layer="lakes", ignore_geometry=True)
+    return {int(i): (0.1, PEAK_QLAT) for i in lakes["nhf_lake_id"].dropna()}
 
 RUNOUT_PERIOD = int(
     (pd.Timestamp(END_TIME) - pd.Timestamp(START_TIME)).total_seconds() / 3600 / 2
@@ -72,8 +72,10 @@ def test_ciss_creek():
     delete_outputs(CFG.output_dir)
     run_troute(CFG.config_path)
     assert_peak_bounds(CFG.output_dir, PEAK_BOUNDS)
+    bounds = _lakeout_bounds()
+    assert bounds, "domain has no lakes; the lakeout assertion would be vacuous"
     assert_lakeout(
         CFG.lakeout_dir,
-        expected_feature_count=len(LAKEOUT_OUTFLOW_BOUNDS),
-        outflow_bounds=LAKEOUT_OUTFLOW_BOUNDS,
+        expected_feature_count=len(bounds),
+        outflow_bounds=bounds,
     )

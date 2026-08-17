@@ -60,8 +60,13 @@ def load_output(output_dir: Path) -> xr.Dataset:
     nc_files = sorted(output_dir.glob("*.nc"))
     if not nc_files:
         pytest.fail(f"no output .nc files found in {output_dir}")
+    # data_vars="all" is xarray's current default and the behavior these helpers
+    # rely on (every variable concatenated along time). Stating it explicitly pins
+    # that in place ahead of the announced switch to data_vars=None.
     return xr.concat(
-        [xr.open_dataset(p, engine="netcdf4") for p in nc_files], dim="time"
+        [xr.open_dataset(p, engine="netcdf4") for p in nc_files],
+        dim="time",
+        data_vars="all",
     )
 
 
@@ -73,7 +78,9 @@ def load_lakeout(lakeout_dir: Path) -> xr.Dataset:
     if len(nc_files) == 1:
         return xr.open_dataset(nc_files[0], engine="netcdf4")
     return xr.concat(
-        [xr.open_dataset(p, engine="netcdf4") for p in nc_files], dim="time"
+        [xr.open_dataset(p, engine="netcdf4") for p in nc_files],
+        dim="time",
+        data_vars="all",
     )
 
 

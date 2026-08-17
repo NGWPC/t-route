@@ -3,7 +3,7 @@
 All numbers were measured inside the project's DevContainer
 (`docker/Dockerfile.dev`, Rocky Linux 9, **Python 3.11**, linux/arm64)
 with `MALLOC_ARENA_MAX=2` set, via the cooldown-gated benchmark matrix
-(`benchmark/run_matrix.sh`) so every arm starts from a comparable
+(`benchmark/scripts/run_matrix.sh`) so every arm starts from a comparable
 thermal state. Memory is reported as **PSS** (proportional set size,
 the true resident footprint), not a per-process RSS (resident set
 size) sum; see
@@ -414,7 +414,7 @@ noise is expected on the order of solver tolerance. We measure that
 explicitly: baseline-built Tier A output vs after-built Tier A
 output, run with identical inputs inside the same DevContainer
 image, all 11,327 flowpaths across 144 timesteps
-(`benchmark/compare_baseline_after.py`):
+(`benchmark/scripts/compare_baseline_after.py`):
 
 ```text
 var            max_abs      max_rel      rel_p99   new_nan   new_inf
@@ -457,7 +457,7 @@ docker run --rm \
   -v "$(pwd)/benchmark:/t-route/benchmark" \
   -v "$BASELINE_OUT:/baseline:ro" -v "$AFTER_OUT:/after:ro" \
   troute-dev:after \
-  python /t-route/benchmark/compare_baseline_after.py \
+  python /t-route/benchmark/scripts/compare_baseline_after.py \
     --baseline /baseline --after /after
 ```
 
@@ -699,11 +699,11 @@ The sweep is reproducible with:
 docker run --rm -e MALLOC_ARENA_MAX=2 \
   -v "$(pwd)/benchmark:/t-route/benchmark" \
   troute-dev:bench \
-  python /t-route/benchmark/sweep_max_loop_size.py --runs 2 --warmup 1
+  python /t-route/benchmark/scripts/sweep_max_loop_size.py --runs 2 --warmup 1
 docker run --rm \
   -v "$(pwd)/benchmark:/t-route/benchmark" \
   troute-dev:bench \
-  python /t-route/benchmark/plot_max_loop_size.py
+  python /t-route/benchmark/scripts/plot_max_loop_size.py
 ```
 
 ### 6. `LD_PRELOAD=libjemalloc.so`

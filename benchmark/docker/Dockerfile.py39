@@ -7,12 +7,12 @@
 # benchmark numbers measured on 3.9 stay reproducible, and so the benchmark
 # matrix can isolate the Python-version effect:
 #
-#   * baseline    = ngwpc/development code on benchmark/Dockerfile.baseline-py39
+#   * baseline    = ngwpc/development code on benchmark/docker/Dockerfile.baseline-py39
 #   * after-py39  = optimized code on this image      (isolates the CODE win)
 #   * after-py311 = optimized code on docker/Dockerfile.dev (isolates PYTHON win)
 #
 # Build from the REPO ROOT:
-#   docker build --target dev -f benchmark/Dockerfile.py39 \
+#   docker build --target dev -f benchmark/docker/Dockerfile.py39 \
 #     --build-arg TROUTE_NATIVE=1 -t troute-dev:py39 .
 
 ### BASE IMAGE ###

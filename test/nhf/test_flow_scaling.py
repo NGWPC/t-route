@@ -1,22 +1,25 @@
-"""Tests for distribute_catchment_discharge — catchment discharge distribution to links."""
-import pytest
-import pandas as pd
-import numpy as np
+"""Tests for distribute_catchment_discharge — catchment discharge distribution to links.
 
-# This function was removed a while ago.
-# TODO: update these tests
-#
-# The import stayed commented out while the tests below kept calling the function,
-# so every one of them failed with NameError on every run: thirteen permanent reds
-# that said nothing about the code. Skipped at module level instead, which keeps the
-# cases around as the specification for whatever replaces the function.
+TODO(future PR): ``distribute_catchment_discharge`` was refactored out of a
+standalone function into ``NHF._build_qlateral_array_direct`` (commit e65dbd5f,
+"refactor nhf code to increase speed and decrease memory footprint"), so the
+import below no longer resolves and the 13 cases here exercise a removed API.
+The module is skipped to keep the suite collectable; it needs a rewrite against
+the new NHF method. Flagged as a required note for the simple-scaling DA PR.
+"""
+import pytest
+
 pytest.skip(
-    "distribute_catchment_discharge was removed; these cases still describe the "
-    "behavior its replacement needs and are kept for that rewrite.",
+    "distribute_catchment_discharge was refactored into "
+    "NHF._build_qlateral_array_direct; these tests need a rewrite against the "
+    "new API (tracked for a future PR)",
     allow_module_level=True,
 )
 
-# from troute.nhf_discretize import distribute_catchment_discharge
+import pandas as pd  # noqa: E402
+import numpy as np  # noqa: E402
+
+from troute.nhf_discretize import distribute_catchment_discharge  # noqa: E402
 
 
 def _make_links(records):

@@ -10,7 +10,7 @@ import pandas as pd
 from troute_nwm_bmi.troute_bmi import BmiTroute
 
 
-def run_bmi(config_path: str):
+def run_bmi(config_path: str, chunk_hours: int = 0):
     # Emulate running from config directory
     config_path: Path = Path(config_path).resolve()
     os.chdir(config_path.parent)
@@ -34,16 +34,34 @@ def run_bmi(config_path: str):
 
     # Read first file to get IDs (all files share the same feature_id index)
     first_df = pd.read_csv(forcing_files[0]).set_index("feature_id")
-    feature_ids = np.array(first_df.index, dtype=np.int64)
+    # int64, not intc: NHF flowpath ids are ~1.27e15 and silently truncate under int32
+    # (1274355126338228 -> -325090636, collapsing distinct ids into collisions).
+    # BmiTroute declares catchment_water_source__id as int64.
+    feature_ids = first_df.index.to_numpy(dtype=np.int64)
 
-    # Set the IDs (constant across all timesteps)
-    model.set_value("catchment_water_source__id", feature_ids)
+    if chunk_hours:
+        # Step the model the way ngen does: repeated set_value + update() calls. Feeding
+        # everything at once (the default below) drives a single update(), so q0 never
+        # carries between calls and any state-carrying DA setting is unobservable.
+        # Needed to exercise the simple-scaling DA state seeding end to end.
+        for k in range(0, len(forcing_files), chunk_hours):
+            batch = forcing_files[k : k + chunk_hours]
+            flows = pd.concat([pd.read_csv(f).set_index("feature_id") for f in batch], axis=1)
+            model.set_value("catchment_water_source__id", feature_ids)
+            model.set_value(
+                "catchment_water_source__volume_flow_rate", flows.values.flatten(order="F")
+            )
+            model.update()
+            print(f"chunk {k // chunk_hours + 1}: t={model._model.time:.0f}s")
+    else:
+        # Set the IDs (constant across all timesteps)
+        model.set_value("catchment_water_source__id", feature_ids)
 
-    # Build forcing data
-    flow_values = pd.concat([pd.read_csv(i).set_index("feature_id") for i in forcing_files], axis=1)
-    flow_values = flow_values.values.flatten(order="F")
-    model.set_value("catchment_water_source__volume_flow_rate", flow_values)
-    model.update_until(model._model.forcing_parameters["nts"])
+        # Build forcing data
+        flow_values = pd.concat([pd.read_csv(i).set_index("feature_id") for i in forcing_files], axis=1)
+        flow_values = flow_values.values.flatten(order="F")
+        model.set_value("catchment_water_source__volume_flow_rate", flow_values)
+        model.update_until(model._model.forcing_parameters["nts"])
 
 
     # Finalize triggers routing computation and output writing
@@ -61,9 +79,17 @@ def main():
         help="Path to the config yaml for the run of interest.",
     )
 
+    parser.add_argument(
+        "--chunk-hours",
+        type=int,
+        default=0,
+        help="Feed forcing in chunks of N hours, one update() per chunk (ngen-style "
+             "stepping). 0 (default) feeds everything in a single update().",
+    )
+
     args = parser.parse_args()
 
-    run_bmi(args.config_file)
+    run_bmi(args.config_file, args.chunk_hours)
 
 
 if __name__ == "__main__":
