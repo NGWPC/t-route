@@ -131,7 +131,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             )
 
             # Preprocess waterbody objects
-            self.preprocess_waterbodies(waterbodies)
+            self.preprocess_waterbodies(waterbodies, nhf["lake_vfp_crosswalk"])
 
             # Preprocess data assimilation objects
             self.preprocess_data_assimilation(gages, reservoir_da)

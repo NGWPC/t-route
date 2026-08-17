@@ -19,8 +19,13 @@ START_TIME = "2009-12-12 00:00"
 END_TIME = "2009-12-29 00:00"
 FORCING_MODE = "retro"
 
+# Widened from (1830, 1850), which was +/-0.54% -- 20x tighter than any other NHF
+# case. Collapsing a lake's flowpaths into its level pool moves this outlet peak
+# 1840.761 -> 1870.914 (+1.64%) at unchanged peak time and +0.09% volume: the wave
+# sharpens because 167 attenuating in-lake links became weir discharge. 1840 is the
+# pre-collapse peak, kept as the reference.
 PEAK_BOUNDS: dict[int, tuple[float, float]] = {
-    OUTLET_FP_ID: (1830, 1850),
+    OUTLET_FP_ID: (0.9*1840, 1.1*1840),
 }
 
 RUNOUT_PERIOD = int(

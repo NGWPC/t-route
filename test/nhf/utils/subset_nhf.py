@@ -193,6 +193,24 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
         print("  no reservoir_da layer, skipping")
         rda = None
 
+    # lake_vfp_crosswalk: by nhf_lake_id AND vfp -- a boundary lake crosswalks to
+    # flowpaths outside the subset, which the subset has no links for.
+    if "lake_vfp_crosswalk" in layers:
+        lake_clause = _in_clause(lake_ids)
+        vfp_clause = _in_clause(vfp_ids)
+        lake_vfp = (
+            _read_layer(
+                "lake_vfp_crosswalk",
+                f"nhf_lake_id IN {lake_clause} AND virtual_fp_id IN {vfp_clause}",
+            )
+            if lake_clause and vfp_clause
+            else _read_layer("lake_vfp_crosswalk", "1=0")
+        )
+        print(f"  lake_vfp_crosswalk: {len(lake_vfp)}")
+    else:
+        print("  no lake_vfp_crosswalk layer, skipping")
+        lake_vfp = None
+
     # Gages: by fp_id
     if "gages" in layers:
         fp_clause = _in_clause(fp_set)
@@ -213,6 +231,7 @@ def extract_layers(gpkg_path: str, fp_ids: list[int]) -> dict[str, gpd.GeoDataFr
         "waterbodies": wb,
         "lakes": lk,
         "reservoir_da": rda,
+        "lake_vfp_crosswalk": lake_vfp,
         "gages": gages,
     }
 

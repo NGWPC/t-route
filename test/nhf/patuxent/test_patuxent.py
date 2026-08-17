@@ -20,9 +20,19 @@ END_TIME = "2011-09-15 00:00"
 FORCING_MODE = "retro"
 
 PEAK_BOUNDS: dict[int, tuple[float, float]] = {
-    1284687521058505: (0.9*0.46, 1.1*0.46),  # T. Howard Duckett Dam
-    1284687464436834: (0.9*18.6, 1.1*18.6)  # T. Howard Duckett Dam Inflow
+    1284687521058505: (0.9*0.46, 1.1*0.46),    # T. Howard Duckett Dam
+    # Inflows to the Rocky Gorge lake, main stem and a tributary. Verified
+    # unchanged with and without the collapse, so they pin routing, not this
+    # feature: 100.656044 vs 100.656036 (float noise) and 8.699928 exactly.
+    1284666761425097: (0.9*100.6, 1.1*100.6),
+    1284666836882012: (0.9*8.7, 1.1*8.7),
 }
+
+# The old inflow bound, 1284687464436834 ("Duckett Dam Inflow", ~18.6), is gone: it
+# sits inside the dam's polygon, so it now reports the reservoir's release (~0.46)
+# like the other 8 absorbed flowpaths there. Duckett has no replacement -- no MC
+# reach within 8 hops upstream, it is fed by lateral runoff -- hence the check moved
+# to the other lake.
 
 RUNOUT_PERIOD = int(
     (pd.Timestamp(END_TIME) - pd.Timestamp(START_TIME)).total_seconds() / 3600 / 2

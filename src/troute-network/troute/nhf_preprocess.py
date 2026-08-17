@@ -5,6 +5,7 @@ from typing import Optional
 
 import geopandas as gpd
 import numpy as np
+from numpy.typing import NDArray
 import pandas as pd
 import pyarrow.parquet as pq
 import pyogrio
@@ -58,6 +59,150 @@ def _sql_in(field: str, values, quote: bool = False) -> str:
     return f"{field} IN ({items})"
 
 
+def _lake_vfp_clusters(
+    waterbody_df: pd.DataFrame,
+    crosswalk: "pd.DataFrame | None",
+) -> tuple["pd.Series[int]", dict[int, int]]:
+    """Cluster lakes that share a virtual flowpath; returns lake and vfp labels.
+
+    Lakes sharing a vfp must collapse together: a vfp belongs to one absorbed link
+    set, and two claims would pop the same link out of ``connections`` twice.
+    Without a crosswalk this degenerates to ``groupby("virtual_fp_id")``.
+    """
+    lakes = waterbody_df["virtual_fp_id"].dropna()
+    edges = list(
+        zip(
+            lakes.index.to_numpy().astype(int).tolist(),
+            lakes.to_numpy().astype(int).tolist(),
+        )
+    )
+    if crosswalk is not None and not crosswalk.empty:
+        # Crosswalk is keyed on the ORIGINAL nhf_lake_id; the waterbody table has
+        # synthetic ids by now. Great Lakes carry their native lake_id and so do
+        # not match -- they stay anchored on their declared vfp alone.
+        record_to_index = pd.Series(
+            waterbody_df.index, index=waterbody_df[RECORD_LAKE_ID_FIELD]
+        )
+        cw = crosswalk.dropna(subset=[LAKE_ID_FIELD, "virtual_fp_id"])
+        mapped = record_to_index.reindex(cw[LAKE_ID_FIELD].to_numpy())
+        keep = mapped.notna().to_numpy()
+        edges.extend(
+            zip(
+                mapped.to_numpy()[keep].astype(int).tolist(),
+                cw["virtual_fp_id"].to_numpy()[keep].astype(int).tolist(),
+            )
+        )
+
+    # Union-find over the (lake, vfp) graph. Keys are TAGGED: synthetic lake ids
+    # are allocated above max(dataframe.index), which bounds them against routing
+    # node ids but NOT against virtual_fp_id, so bare ints could merge unrelated
+    # lakes through a collision.
+    parent: dict[tuple[str, int], tuple[str, int]] = {}
+
+    def find(x: tuple[str, int]) -> tuple[str, int]:
+        root = parent.setdefault(x, x)
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    for lake, vfp in edges:
+        root_l, root_v = find(("lake", lake)), find(("vfp", vfp))
+        if root_l != root_v:
+            parent[root_l] = root_v
+
+    # An edgeless lake gets a null label so the caller's groupby drops it, matching
+    # what groupby("virtual_fp_id") did with its NaN key. Demoting it instead would
+    # unhook a Great Lake anchored only by fp_id from its type-6 DA.
+    edge_lakes = {lake for lake, _ in edges}
+    roots: dict[tuple[str, int], int] = {}
+
+    def _label(root: tuple[str, int]) -> int:
+        return roots.setdefault(root, len(roots))
+
+    lake_cluster = pd.Series(
+        [
+            _label(find(("lake", i))) if i in edge_lakes else pd.NA
+            for i in waterbody_df.index.to_numpy().astype(int).tolist()
+        ],
+        index=waterbody_df.index,
+        dtype="Int64",
+    )
+    vfp_cluster = {vfp: _label(find(("vfp", vfp))) for _, vfp in edges}
+    return lake_cluster, vfp_cluster
+
+
+def _outlet_link_per_lake(
+    outlet_vfps: "pd.Series[float]",
+    vfp_ids: "NDArray[np.int64]",
+    up_nodes: "NDArray[np.int64]",
+    downstream: "NDArray[np.int64]",
+) -> dict[int, int]:
+    """Each lake's outlet link: the one link of its declared flowpath whose
+    downstream leaves that flowpath. Empty if any flowpath fails to resolve to
+    exactly one, which is the caller's signal to fall back."""
+    outlets: dict[int, int] = {}
+    for vfp in pd.unique(outlet_vfps.dropna().to_numpy()):
+        rows = np.flatnonzero(vfp_ids == vfp)
+        if rows.size == 0:
+            continue
+        internal = set(up_nodes[rows])
+        terminal = [row for row in rows if downstream[row] not in internal]
+        if len(terminal) != 1:
+            return {}
+        outlets[int(vfp)] = int(terminal[0])
+    return outlets
+
+
+def _links_by_nearest_outlet(
+    links: pd.DataFrame, outlet_vfps: "pd.Series[float]",
+) -> dict[int, pd.DataFrame]:
+    """Split a cluster's links among its lakes, each taking what drains to IT.
+
+    Multi-source upstream walk from every lake outlet; each link goes to the first
+    outlet reaching it. This buys two things over one set per cluster: nothing
+    below a lake's outlet is absorbed (the crosswalk lists flowpaths INTERSECTING
+    the polygon, and 26% of CONUS lakes have one continuing past the dam), and
+    serial lakes chain via topology rather than DataFrame row order. Each returned
+    set has exactly one exit by construction.
+
+    Returns ``{outlet virtual_fp_id: links}``; empty means fall back.
+    """
+    up_nodes = links["up_node_id"].to_numpy()
+    downstream = links["downstream"].to_numpy()
+    vfp_ids = links["vfp_id"].to_numpy()
+
+    feeders: dict[int, list[int]] = {}
+    for row, node in enumerate(downstream):
+        feeders.setdefault(node, []).append(row)
+
+    outlets = _outlet_link_per_lake(outlet_vfps, vfp_ids, up_nodes, downstream)
+    if not outlets:
+        return {}
+
+    # Breadth-first so "first claim" means nearest by link count; a claimed link is
+    # not re-expanded, which stops a downstream lake swallowing an upstream one's
+    # catchment.
+    owner: dict[int, int] = {}
+    frontier = [(row, vfp) for vfp, row in outlets.items()]
+    for row, vfp in frontier:
+        owner.setdefault(row, vfp)
+    while frontier:
+        nxt: list[tuple[int, int]] = []
+        for row, vfp in frontier:
+            for feeder in feeders.get(up_nodes[row], ()):
+                if feeder not in owner:
+                    owner[feeder] = vfp
+                    nxt.append((feeder, vfp))
+        frontier = nxt
+
+    claimed: dict[int, list[int]] = {}
+    for row, vfp in owner.items():
+        claimed.setdefault(vfp, []).append(row)
+    return {vfp: links.iloc[sorted(rows)] for vfp, rows in claimed.items()}
+
+
 def _validate_flowpaths_channel_params(flowpaths):
     """Raise if any MC-kernel channel parameter is non-finite (NaN/Inf)."""
     if flowpaths is None or flowpaths.empty:
@@ -87,7 +232,9 @@ def _validate_flowpaths_channel_params(flowpaths):
 
 # Layers a geopackage may legitimately omit (read_geo_file loads them as empty
 # frames); validation must not reject a valid lake-free / non-reservoir domain.
-OPTIONAL_LAYERS: frozenset[str] = frozenset({"lakes", "reservoir_da"})
+OPTIONAL_LAYERS: frozenset[str] = frozenset(
+    {"lakes", "reservoir_da", "lake_vfp_crosswalk"}
+)
 
 # Columns a PRESENT layer may omit: NHF >= 1.1.4 only, consumed only by the
 # scaling DA (which raises its own clear error when enabled without them).
@@ -200,6 +347,10 @@ LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
     ("gages", None, True),
     ("hydrolocations", None, True),
     ("reservoir_da", ["nhf_lake_id", "lake_id", "site_no", "da_type"], True),
+    # Every vfp intersecting each lake polygon, one lake to many (NHF >= 1.2.2).
+    # Without it _refactor_reservoirs absorbs only the declared outlet vfp and
+    # routes the rest of the lake as MC channel.
+    ("lake_vfp_crosswalk", ["nhf_lake_id", "virtual_fp_id"], True),
 ]
 
 def read_qlat_file(f):
@@ -678,7 +829,7 @@ class NHFPreprocessMixin:
         else:
             self._poi_nex_dict = None
 
-    def preprocess_waterbodies(self, lakes):
+    def preprocess_waterbodies(self, lakes, lake_vfp_crosswalk=None):
         if not lakes.empty:
             # Add lat, lon, and crs columns for LAKEOUT files:
             if self.output_parameters.get("lakeout_output", None):
@@ -738,7 +889,7 @@ class NHFPreprocessMixin:
                 self.great_lakes_climatology_df = pd.DataFrame()
 
             # Condense flowpaths in a reservoir to single level pool node
-            self._refactor_reservoirs()          
+            self._refactor_reservoirs(lake_vfp_crosswalk)
 
             self._waterbody_types_df = pd.DataFrame(
                 data=1, index=self.waterbody_dataframe.index, columns=["reservoir_type"]
@@ -787,38 +938,69 @@ class NHFPreprocessMixin:
 
 
     
-    def _refactor_reservoirs(self):
+    def _refactor_reservoirs(self, lake_vfp_crosswalk=None):
         """Refactor network connectivity to explicitly represent reservoirs (waterbodies) and their interactions with flowpaths and links.
 
         Conceptual model:
             - Multiple flowpaths may exist within a single waterbody.
             - A single flowpath may intersect multiple waterbodies.
 
-        For each flowpath containing at least one waterbody (``outlet_fp``):
-            1. Identify all flowpaths contained within any waterbody intersecting
-            the outlet flowpath (``all_fp``).
+        Nothing inside a lake polygon is routed as MC channel: every flowpath
+        draining to the lake's outlet is dropped from the link table and replaced
+        by its level pool, and whatever discharged into them discharges into the
+        pool instead.
+
+        For each waterbody (``wb_group``):
+            1. Identify the flowpaths intersecting it, from ``lake_vfp_crosswalk``.
             2. Identify all network links associated with these flowpaths (``all_links``).
             3. Remove all links in ``all_links`` from the network dataframe.
-            4. For each waterbody associated with ``outlet_fp``, insert ordered
-            connections into the network connectivity structure.
+            4. Insert ordered connections for the waterbodies into the network
+            connectivity structure.
             5. For each link whose downstream node lies within ``all_links``,
             redirect its connection to the most upstream waterbody.
             6. Create a synthetic headwater link (``qlat_link``) that drains into
             the appropriate waterbody link (``wb_link``).
-            7. Redirect all lateral inflows (qlats) from ``all_fp`` to ``qlat_link``.
+            7. Redirect all lateral inflows (qlats) from ``all_links`` to ``qlat_link``.
 
-
+        Parameters
+        ----------
+        lake_vfp_crosswalk : pandas.DataFrame, optional
+            NHF ``lake_vfp_crosswalk``. Omitted or empty absorbs each lake's
+            declared outlet flowpath only, leaving the rest of the lake as MC.
         """
-        # Precompute the routing links of every waterbody flowpath ONCE. The
-        # original code re-scanned the full (multi-million-row) link table with
-        # `self.dataframe["fp_id"].isin(...)` and dropped from it once per
-        # waterbody -- O(n_links x n_waterbodies), tens of minutes at CONUS. A
-        # waterbody's links are exactly the links whose virtual_fp_id == its 
-        # virtual_fp_id, so one isin (restricted to waterbody virtual_fp_ids) 
-        # plus one groupby gives an O(1) lookup.
-        wb_vfp_ids = set(self.waterbody_dataframe["virtual_fp_id"].dropna())
-        wb_links = self.dataframe[self.dataframe["vfp_id"].isin(wb_vfp_ids)].reset_index()
-        links_by_vfp = {vfp: sub for vfp, sub in wb_links.groupby("vfp_id")}
+        # Precompute every absorbed flowpath's links ONCE: one isin plus one
+        # groupby. The original per-waterbody rescan of the full link table was
+        # O(n_links x n_waterbodies), tens of minutes at CONUS.
+        lake_cluster, vfp_cluster = _lake_vfp_clusters(
+            self.waterbody_dataframe, lake_vfp_crosswalk
+        )
+        wb_links = self.dataframe[
+            self.dataframe["vfp_id"].isin(set(vfp_cluster))
+        ].reset_index()
+        wb_links["cluster"] = wb_links["vfp_id"].map(vfp_cluster)
+        links_by_cluster = {cid: sub for cid, sub in wb_links.groupby("cluster")}
+
+        # One work item per level pool: (links to absorb, the lakes it replaces).
+        # Cluster so no flowpath is claimed twice, then split back per lake so a
+        # lake never moves its discharge point. Lakes sharing one declared outlet
+        # stay a single chained group, as before the crosswalk was consumed.
+        work: list[tuple[Optional[pd.DataFrame], pd.DataFrame]] = []
+        for cid, wb_group in self.waterbody_dataframe.groupby(lake_cluster):
+            cluster_links = links_by_cluster.get(cid)
+            if cluster_links is None:
+                work.append((None, wb_group))
+                continue
+            by_outlet = _links_by_nearest_outlet(
+                cluster_links, wb_group["virtual_fp_id"]
+            )
+            for outlet_vfp, sub_group in wb_group.groupby("virtual_fp_id"):
+                absorbed = by_outlet.get(int(outlet_vfp))
+                if absorbed is None:
+                    # No crosswalk resolution for this lake: fall back to its own
+                    # declared flowpath, the behavior that shipped before.
+                    absorbed = cluster_links[cluster_links["vfp_id"] == outlet_vfp]
+                    absorbed = None if absorbed.empty else absorbed
+                work.append((absorbed, sub_group))
 
         # Build the connections graph from the full link table up front so the
         # per-waterbody pops below are uniform; dataframe / zero_nodes removals are
@@ -836,28 +1018,28 @@ class NHFPreprocessMixin:
         skipped_wb: list[int] = []
         nodes_removed: list[int] = []
         downstream_groups = self.dataframe.groupby("downstream").groups
-        for outlet_vfp, wb_group in self.waterbody_dataframe.groupby("virtual_fp_id"):
+        for all_links, wb_group in work:
             # Until this is implemented in NHF, spoof here
             wb_group["lake_order"] = np.arange(len(wb_group))
             wb_group = wb_group.sort_values("lake_order")
 
-            # Routing links of this waterbody's flowpath (None if its flowpath was
-            # eliminated in discretization -> nothing to model as a reservoir).
-            all_links = links_by_vfp.get(outlet_vfp)
+            # None if discretization eliminated every flowpath of this cluster.
             if all_links is None:
                 skipped_wb.extend(wb_group.index.astype(int).tolist())
                 continue
             ds_set = set(all_links["downstream"]).difference(all_links["up_node_id"])
             us_set = set(all_links["up_node_id"]).difference(all_links["downstream"])
-            if len(ds_set) != 1 or len(us_set) != 1:
-                # This waterbody does not collapse to a single inlet -> outlet
-                # chain (its flowpath was eliminated/merged in discretization, or
-                # it spans a junction). Skip it: its links are left untouched in
-                # self.dataframe and route as plain MC channels. Mirrors the
-                # bandaid() fallback used for problematic NHD/HYFeatures lakes.
+            if len(ds_set) != 1:
+                # No single outlet even on the declared-outlet fallback (flowpath
+                # merged away in discretization, or it spans a junction). Leave its
+                # links in self.dataframe to route as MC, like bandaid() does for
+                # problematic NHD/HYFeatures lakes.
                 skipped_wb.extend(wb_group.index.astype(int).tolist())
                 continue
-            ds, us = ds_set.pop(), us_set.pop()
+            # us_set is NOT required to be a singleton: absorbing the whole lake
+            # makes many inlets normal, one per tributary arm. Only the outlet must
+            # be unique, since that is where the level pool discharges.
+            ds = ds_set.pop()
 
             # This waterbody's up-node ids as native Python ints, computed once and
             # reused below (removal list, connections pops, node remap, crosswalk).
@@ -874,11 +1056,17 @@ class NHFPreprocessMixin:
             for i in wb_group.index.values:
                 self.connections[i] = [ds]
                 ds = i
-            for i in downstream_groups.get(us, []):
-                self.connections[i] = [ds]
+            for us in us_set:
+                for i in downstream_groups.get(us, []):
+                    self.connections[i] = [ds]
 
-            # Add synthetic headwater reach
-            headwater = all_links[all_links["vfp_id"] == outlet_vfp].iloc[0]
+            # Synthetic headwater reach, cut from the declared outlet flowpath so a
+            # single-flowpath lake collapses exactly as before. Any absorbed link
+            # will do otherwise: the row only supplies channel parameters for the
+            # reach collecting the lake's qlat.
+            head_vfp = wb_group["virtual_fp_id"].iloc[0]
+            head_rows = all_links[all_links["vfp_id"] == head_vfp]
+            headwater = (all_links if head_rows.empty else head_rows).iloc[0]
             head_id = int(headwater["up_node_id"])
             self.connections[head_id] = [ds]
             headwater["downstream"] = ds
