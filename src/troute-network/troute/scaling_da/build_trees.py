@@ -116,9 +116,9 @@ def build_gage_trees_from_mappings(
             stop |= gage_stop_set - {gage_seg}
         if stop_at_waterbodies:
             stop |= waterbody_set
-        # The gage's own segment is never a stop, even if it sits on a waterbody
-        # flowpath or belongs to the global gage set (gage at a reservoir outlet
-        # is a legitimate case; the gage itself is still corrected).
+        # The root is never a stop (evaluation harnesses walk held-out gages
+        # through here). Production preprocessing excludes lake-id-crosswalked
+        # gages loudly BEFORE this layer; reservoir DA owns those segments.
         stop.discard(gage_seg)
         tree = build_one_gage_tree(
             gage_seg,

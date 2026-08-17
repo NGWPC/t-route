@@ -15,6 +15,7 @@ writes full output, and exits 0 while assimilating nothing.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,7 +26,7 @@ import numpy as np
 from troute.scaling_da.build_trees import build_gage_trees_from_mappings
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from troute.AbstractNetwork import AbstractNetwork
     from troute.scaling_da.gage_tree import GageTree
@@ -186,35 +187,109 @@ def resolve_holdout(
     return holdout
 
 
-def _theta_by_site(
-    network: AbstractNetwork, theta_by_vpu: Mapping[str, float], theta_default: float
-) -> dict[str, float]:
-    """site_no -> region theta from the gage's VPU; absent sites use the default.
+def _read_theta_csv(path: str | None) -> dict[str, float]:
+    """``gage id -> theta`` from a two-column CSV, or empty when unset.
 
-    Configured VPU keys matching no gage are warned about: the hydrofabric's keys
-    are zero-padded strings ("01"), and a mistyped key would silently fall back
-    to the default everywhere.
+    A header is optional: a first row whose second field is not a number is
+    treated as one. Ids are kept as STRINGS exactly as written, because gage ids
+    are zero-padded ("03031500") and reading them as numbers would silently drop
+    the leading zero and match nothing.
+
+    A configured file that is missing or unreadable raises rather than falling
+    back to the default exponent everywhere, which would look like it had been
+    applied.
     """
-    if not theta_by_vpu:
+    if not path:
         return {}
+    src = Path(path)
+    if not src.exists():
+        raise FileNotFoundError(
+            f"streamflow_scaling_parameters.theta.per_tree_csv not found: {path}"
+        )
+    out: dict[str, float] = {}
+    for lineno, raw in enumerate(src.read_text().splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 2:
+            raise ValueError(
+                f"{path}:{lineno}: expected 'gage_id,theta', got {raw!r}"
+            )
+        site, value = parts[0], parts[1]
+        try:
+            theta = float(value)
+        except ValueError:
+            if lineno == 1:
+                continue  # a header row
+            raise ValueError(
+                f"{path}:{lineno}: theta must be a number, got {value!r}"
+            ) from None
+        if not math.isfinite(theta) or theta <= 0:
+            raise ValueError(
+                f"{path}:{lineno}: theta must be finite and positive, got {theta!r}"
+            )
+        out[site] = theta
+    if not out:
+        raise ValueError(
+            f"streamflow_scaling_parameters.theta.per_tree_csv has no usable rows: {path}"
+        )
+    return out
+
+
+def _theta_by_site(
+    network: AbstractNetwork,
+    theta_per_tree: Mapping[str, float],
+    theta_by_vpu: Mapping[str, float],
+    theta_default: float,
+    known_sites: Iterable[str] = (),
+) -> dict[str, float]:
+    """site_no -> theta, most specific source first.
+
+    Order is ``per_tree`` (keyed by gage id), then ``by_vpu`` (keyed by the
+    gage's hydrofabric VPU), then the default. One tree carries one exponent,
+    which is the finest resolution the closed form admits.
+
+    Keys matching no gage are warned about in both cases: a mistyped id or a
+    VPU key that is not zero-padded would otherwise fall back to the default
+    everywhere and look like it had been applied.
+    """
+    by_site: dict[str, float] = {}
     gage_vpu = getattr(network, "gage_vpu", None) or {}
-    if not gage_vpu:
-        LOG.warning(
-            "scaling DA: theta.by_vpu is set but the hydrofabric provided no "
-            "gage->VPU mapping; every tree uses the default theta %.2f.",
-            theta_default,
-        )
-        return {}
-    by_site = {
-        site: theta_by_vpu[vpu] for site, vpu in gage_vpu.items() if vpu in theta_by_vpu
-    }
-    unused = sorted(set(theta_by_vpu) - set(gage_vpu.values()))
-    if unused:
-        LOG.warning(
-            "scaling DA: theta.by_vpu has %d key(s) matching no gage in this "
-            "domain: %s. The hydrofabric's vpu_id values here are %s.",
-            len(unused), unused, sorted(set(gage_vpu.values()))[:8],
-        )
+
+    if theta_by_vpu:
+        if gage_vpu:
+            by_site.update({
+                site: theta_by_vpu[vpu]
+                for site, vpu in gage_vpu.items()
+                if vpu in theta_by_vpu
+            })
+            unused = sorted(set(theta_by_vpu) - set(gage_vpu.values()))
+            if unused:
+                LOG.warning(
+                    "scaling DA: theta.by_vpu has %d key(s) matching no gage in this "
+                    "domain: %s. The hydrofabric's vpu_id values here are %s.",
+                    len(unused), unused, sorted(set(gage_vpu.values()))[:8],
+                )
+        else:
+            LOG.warning(
+                "scaling DA: theta.by_vpu is set but the hydrofabric provided no "
+                "gage->VPU mapping; those entries cannot be applied.",
+            )
+
+    if theta_per_tree:
+        # Applied AFTER by_vpu so the more specific key wins.
+        by_site.update({str(k): float(v) for k, v in theta_per_tree.items()})
+        known = set(map(str, known_sites)) | set(gage_vpu)
+        if known:
+            unused = sorted(set(map(str, theta_per_tree)) - known)
+            if unused:
+                LOG.warning(
+                    "scaling DA: theta.per_tree_csv has %d gage id(s) matching no gage "
+                    "in this domain: %s. Those entries do nothing; check them "
+                    "against the ids in the TimeSlice files.",
+                    len(unused), unused[:8],
+                )
     return by_site
 
 
@@ -232,6 +307,7 @@ class ScalingDASetup:
     ts_folder: Path | None = None
     theta_default: float = 0.77
     theta_by_vpu: dict[str, float] = field(default_factory=dict)
+    theta_per_tree: dict[str, float] = field(default_factory=dict)
 
 
 def build_scaling_da_setup(
@@ -254,6 +330,7 @@ def build_scaling_da_setup(
         theta_cfg = theta_cfg.model_dump() if hasattr(theta_cfg, "model_dump") else {}
     theta_default = float(theta_cfg.get("default", 0.77))
     theta_by_vpu = {str(k): float(v) for k, v in (theta_cfg.get("by_vpu") or {}).items()}
+    theta_per_tree = _read_theta_csv(theta_cfg.get("per_tree_csv"))
 
     df = network.dataframe
     if "total_da_sqkm" not in df.columns:
@@ -277,6 +354,17 @@ def build_scaling_da_setup(
     # roster's gages; synthetic -> every crosswalked gage.
     sites = obs_sites if not synthetic else set(gage_seg)
     holdout = resolve_holdout(params, gage_seg)
+    # A gage crosswalked to a lake id is excluded LOUDLY: the kernel routes
+    # that segment as a reservoir object (reservoir DA owns it). A gage on the
+    # channel below a reservoir still assimilates.
+    on_lake = sorted(s for s in sites if gage_seg.get(s) in waterbody)
+    if on_lake:
+        LOG.warning(
+            "scaling DA: %d gage(s) crosswalk to reservoir-routed segments and "
+            "are EXCLUDED from streamflow scaling (reservoir DA owns those "
+            "segments): %s",
+            len(on_lake), on_lake[:8],
+        )
     da_sites = sorted(
         s for s in sites if gage_seg.get(s) not in waterbody and s not in holdout
     )
@@ -302,7 +390,10 @@ def build_scaling_da_setup(
         area,
         waterbody_segs=waterbody,
         theta_default=theta_default,
-        theta_by_site=_theta_by_site(network, theta_by_vpu, theta_default),
+        theta_by_site=_theta_by_site(
+            network, theta_per_tree, theta_by_vpu, theta_default,
+            known_sites=set(gage_seg) | set(all_gage_seg),
+        ),
         gage_stop_segs=source_segs,
         site_filter=frozenset(da_sites),
     )
@@ -332,12 +423,12 @@ def build_scaling_da_setup(
     LOG.info("scaling DA: tree build took %.2f s", time.perf_counter() - _tb)
     LOG.info(
         "scaling DA: %d disjoint source trees covering %d segments "
-        "(theta default %.2f, %d VPU override(s), %d tree(s) regionalized); "
+        "(theta default %.2f, %d theta override(s) configured, %d tree(s) regionalized); "
         "%d gage(s) injected%s",
         len(trees),
         sum(int(t.seg_order.size) for t in trees.values()),
         theta_default,
-        len(theta_by_vpu),
+        len(theta_by_vpu) + len(theta_per_tree),
         sum(1 for t in trees.values() if t.theta != theta_default),
         len(da_sites),
         f" ({len(holdout)} held out)" if holdout else "",
@@ -353,4 +444,5 @@ def build_scaling_da_setup(
         ts_folder=ts_folder,
         theta_default=theta_default,
         theta_by_vpu=theta_by_vpu,
+        theta_per_tree=theta_per_tree,
     )

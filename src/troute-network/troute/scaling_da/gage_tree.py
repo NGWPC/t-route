@@ -7,8 +7,8 @@ arrays (segment order, per-segment drainage area, per-segment theta, and the
 parent index and confluence flag each node needs) suitable for tight
 per-timestep DA loops in :mod:`troute.routing.fast_reach.scaling_da`.
 
-This is the pure-NumPy reference structure that the eventual Cython kernel
-consumes; :func:`build_one_gage_tree` is topology-agnostic (it takes a reverse
+This is the structure the compiled spread kernel consumes;
+:func:`build_one_gage_tree` is topology-agnostic (it takes a reverse
 connectivity mapping, an area lookup, and a stop set), so the t-route network
 builder in a later stage supplies those from the real network instead of the
 proof-of-concept's Ohio loader.
@@ -16,11 +16,14 @@ proof-of-concept's Ohio loader.
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
+
+LOG = logging.getLogger("TROUTE")
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -129,10 +132,10 @@ class GageTree:
             dtype=np.int64,
             count=self.n_segments,
         )
-        # A pruned branch can be missing from the flow frame (a stop that is outside the
-        # routed columns); drop it rather than raising, and rebuild the CSR so the pointers
-        # still line up with the segments that survived the lookup.
-        ptr, cols = self.pruned_ptr, []
+        # A pruned branch absent from the flow frame is dropped, LOUDLY: its
+        # flow then leaves the confluence denominator and surviving siblings
+        # inherit a share Edge Case 1 says must stay unallocated.
+        ptr, cols, dropped = self.pruned_ptr, [], []
         new_ptr = np.zeros(self.n_segments + 1, dtype=np.int64)
         if ptr.size == self.n_segments + 1:
             for i in range(self.n_segments):
@@ -140,7 +143,17 @@ class GageTree:
                     pos = fp_to_position.get(int(self.pruned_segs[k]))
                     if pos is not None:
                         cols.append(int(pos))
+                    else:
+                        dropped.append(int(self.pruned_segs[k]))
                 new_ptr[i + 1] = len(cols)
+        if dropped:
+            LOG.warning(
+                "gage tree %s: %d pruned branch segment(s) absent from the routed "
+                "flow frame (%s); their flow cannot enter the confluence "
+                "denominator, so surviving siblings at those junctions receive a "
+                "LARGER share than Edge Case 1 intends.",
+                self.gage_fp, len(dropped), dropped[:5],
+            )
         return GageTree(
             gage_fp=self.gage_fp,
             gage_area_sqkm=self.gage_area_sqkm,

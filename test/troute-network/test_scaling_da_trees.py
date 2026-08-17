@@ -219,3 +219,191 @@ def test_tree_with_unmapped_reservoir_segment_is_dropped() -> None:
     # With the lake correctly in the stop set, the tree is kept and simply stops there.
     trees = build_gage_trees_from_mappings(rconn, {"G": 10}, area, waterbody_segs=frozenset({20}))
     assert trees["G"].seg_order.tolist() == [10]
+
+
+class TestExplicitSetsFailClosed:
+    """Explicit qlat_forcing_sets bypass the enlargement and the fold, so a
+    first set too short for the DA span must be rejected before routing: the
+    traced span is part of the result and must not depend on the partition."""
+
+    def _sets(self, *nts):
+        return [{"nts": n} for n in nts]
+
+    def test_short_first_set_in_a_long_run_raises(self):
+        import pytest
+
+        from troute.AbstractNetwork import _require_span_covering_first_set
+
+        with pytest.raises(ValueError, match="opening window"):
+            _require_span_covering_first_set(self._sets(96, 480), 48.0, 300.0)
+
+    def test_a_run_genuinely_shorter_than_the_span_passes(self):
+        """The trace warns and caps for a short RUN; only a short PARTITION of a
+        long run is an error."""
+        from troute.AbstractNetwork import _require_span_covering_first_set
+
+        _require_span_covering_first_set(self._sets(96, 96), 48.0, 300.0)
+
+    def test_a_covering_first_set_passes(self):
+        from troute.AbstractNetwork import _require_span_covering_first_set
+
+        _require_span_covering_first_set(self._sets(576, 96), 48.0, 300.0)
+
+    def test_no_scaling_da_is_a_no_op(self):
+        from troute.AbstractNetwork import _require_span_covering_first_set
+
+        _require_span_covering_first_set(self._sets(4, 480), 0.0, 300.0)
+
+
+class TestForcingWindowCoversTheSpread:
+    """The -V5 window sizer must read the spread width out of the raw config.
+
+    The halo that feeds the forward innovation window is one forcing window
+    deep, so a window shorter than innovation_spread_h leaves its own tail on
+    persistence and the result starts depending on max_loop_size, which is a
+    memory knob. The BMI driver enlarges for the same reason; this pins the
+    -V5 half's input.
+    """
+
+    def test_off_when_the_scaling_da_is_not_enabled(self):
+        from troute.AbstractNetwork import _scaling_da_spread_h
+
+        assert _scaling_da_spread_h(None) == 0.0
+        assert _scaling_da_spread_h({}) == 0.0
+        assert _scaling_da_spread_h({"streamflow_da": {"streamflow_scaling": False}}) == 0.0
+
+    def test_the_lag_span_and_the_spread_ADD(self):
+        """The innovation is averaged forward over innovation_spread_h and the lag
+        then reads that average at t + tau, so a window's tail needs raw
+        innovation out to tau_max + spread: 48 + 12, not max(48, 12). At the
+        defaults (lag off, spread 0) nothing is required; each mechanism adds
+        its own horizon when enabled."""
+        from troute.AbstractNetwork import _scaling_da_spread_h
+
+        assert _scaling_da_spread_h({"streamflow_da": {"streamflow_scaling": True}}) == 0.0
+        assert _scaling_da_spread_h({"streamflow_da": {
+            "streamflow_scaling": True,
+            "streamflow_scaling_parameters": {"travel_time_lag": True},
+        }}) == 48.0
+        assert _scaling_da_spread_h({"streamflow_da": {
+            "streamflow_scaling": True,
+            "streamflow_scaling_parameters": {"travel_time_lag": True,
+                                              "innovation_spread_h": 12.0},
+        }}) == 60.0
+
+    def test_explicit_value_wins_including_zero(self):
+        from troute.AbstractNetwork import _scaling_da_spread_h
+
+        def cfg(v):
+            return {"streamflow_da": {"streamflow_scaling": True,
+                                      "streamflow_scaling_parameters": {
+                                          "innovation_spread_h": v,
+                                          "travel_time_lag": False}}}
+
+        assert _scaling_da_spread_h(cfg(6.0)) == 6.0
+        # zero must not fall back to the default: it is the no-halo case, where
+        # nothing reads past a window boundary and no enlargement is wanted.
+        assert _scaling_da_spread_h(cfg(0.0)) == 0.0
+
+    def test_a_shorter_lag_span_can_still_be_the_binding_one(self):
+        from troute.AbstractNetwork import _scaling_da_spread_h
+
+        cfg = {"streamflow_da": {"streamflow_scaling": True,
+                                 "streamflow_scaling_parameters": {
+                                     "travel_time_lag": True,
+                                     "innovation_spread_h": 0.0,
+                                     "lag_window_h": 6.0}}}
+        assert _scaling_da_spread_h(cfg) == 6.0
+        cfg["streamflow_da"]["streamflow_scaling_parameters"]["innovation_spread_h"] = 4.0
+        assert _scaling_da_spread_h(cfg) == 10.0
+
+
+class TestShortFinalWindowIsFoldedIn:
+    """A final remainder shorter than the travel-time span is not self-contained.
+
+    The enlargement exempts the final window, which is right for the forward
+    halo and wrong for the lag: measured on the Ohio subset with a 12 h lag, a
+    4-file remainder moved the last four hours by 17.1 m3/s (backward) and
+    12.9 m3/s (forward) against an evenly divided run.
+    """
+
+    def _sets(self, *sizes):
+        return [
+            {"qlat_files": [f"f{i}_{k}" for k in range(n)], "nts": n * 12,
+             "final_timestamp": f"t{i}"}
+            for i, n in enumerate(sizes)
+        ]
+
+    def test_a_short_remainder_is_merged_into_the_window_before_it(self):
+        from troute.AbstractNetwork import _fold_short_final_set
+
+        sets = self._sets(46, 46, 4)
+        _fold_short_final_set(sets, 12)
+        assert len(sets) == 2
+        assert len(sets[-1]["qlat_files"]) == 50
+        assert sets[-1]["nts"] == 50 * 12
+        assert sets[-1]["final_timestamp"] == "t2"
+
+    def test_a_remainder_at_least_as_long_as_the_span_is_left_alone(self):
+        from troute.AbstractNetwork import _fold_short_final_set
+
+        sets = self._sets(46, 46, 12)
+        _fold_short_final_set(sets, 12)
+        assert [len(s["qlat_files"]) for s in sets] == [46, 46, 12]
+
+    def test_a_single_short_window_has_nowhere_to_fold(self):
+        from troute.AbstractNetwork import _fold_short_final_set
+
+        sets = self._sets(4)
+        _fold_short_final_set(sets, 12)
+        assert [len(s["qlat_files"]) for s in sets] == [4]
+
+
+class TestThetaPerTree:
+    """theta resolves per gage tree: per_tree, then by_vpu, then default.
+
+    One tree carries one exponent (the closed form telescopes only for a
+    constant), so a gage id is the finest key the method admits. The proposal
+    fits 0.77 on a 0.3-21.2 km2 semi-humid watershed and says simple scaling
+    stops holding above roughly 50 km2, with regional exponents from 0.2 to 0.9,
+    so this is how an operator carries their own regional values.
+    """
+
+    class _Net:
+        def __init__(self, gage_vpu=None):
+            self.gage_vpu = gage_vpu or {}
+
+    def _resolve(self, **kw):
+        from troute.scaling_da.preprocess import _theta_by_site
+
+        return _theta_by_site(
+            self._Net(kw.pop("gage_vpu", {})),
+            kw.pop("per_tree", {}),
+            kw.pop("by_vpu", {}),
+            kw.pop("default", 0.77),
+            known_sites=kw.pop("known_sites", ()),
+        )
+
+    def test_per_tree_keys_are_gage_ids(self):
+        got = self._resolve(per_tree={"03031500": 0.55}, known_sites={"03031500"})
+        assert got == {"03031500": 0.55}
+
+    def test_per_tree_wins_over_by_vpu(self):
+        got = self._resolve(
+            per_tree={"03031500": 0.30},
+            by_vpu={"05": 0.85},
+            gage_vpu={"03031500": "05", "03049800": "05"},
+        )
+        assert got["03031500"] == 0.30   # the specific key
+        assert got["03049800"] == 0.85   # falls to its VPU
+
+    def test_sites_named_nowhere_are_absent_so_the_default_applies(self):
+        got = self._resolve(per_tree={"03031500": 0.4}, known_sites={"03031500"})
+        assert "09999999" not in got
+
+    def test_an_unmatched_per_tree_id_warns_rather_than_silently_doing_nothing(self, caplog):
+        import logging as _logging
+
+        with caplog.at_level(_logging.WARNING, logger="TROUTE"):
+            self._resolve(per_tree={"BADID": 0.4}, known_sites={"03031500"})
+        assert any("per_tree" in r.getMessage() for r in caplog.records)
