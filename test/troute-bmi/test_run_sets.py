@@ -92,7 +92,7 @@ class TestMemoryIsOnlyACap:
         """A configured window that cannot fit is capped, with a warning."""
         # available*0.9 sized so the memory loop is ~1/4 of the run
         m = _model(nts_cols=96, max_loop_size=96)
-        required = 2 * 96 * 12 * 200
+        required = 2 * 96 * 12 * 100  # the measured per-element factor
         monkeypatch.setattr(
             tm.psutil, "virtual_memory",
             lambda: SimpleNamespace(available=(required / 4) / 0.9),
@@ -106,7 +106,7 @@ class TestMemoryIsOnlyACap:
     def test_memory_split_without_config_warns(self, monkeypatch, caplog):
         """No max_loop_size and real pressure: split, but say the results depend on it."""
         m = _model(nts_cols=96)
-        required = 2 * 96 * 12 * 200
+        required = 2 * 96 * 12 * 100  # the measured per-element factor
         monkeypatch.setattr(
             tm.psutil, "virtual_memory",
             lambda: SimpleNamespace(available=(required / 4) / 0.9),
@@ -178,22 +178,36 @@ class TestRamCapIsAnErrorUnderActiveAssimilation:
         with pytest.raises(MemoryError, match="Set max_loop_size"):
             list(m._build_run_sets(_qlats(96)))
 
-    def test_window_below_the_lag_horizon_is_enlarged(self, plenty_of_memory):
-        # 24 columns at 1 h/col = 24 h, under the 48 h default travel-time
-        # horizon: the deferred-window halo is one window deep, so windows grow
-        # to cover it (and to tile the screen interval). Enlarging max_loop_size
-        # cannot change results -- it is a memory knob -- but a window below the
-        # horizon would.
-        m = _model(nts_cols=96, max_loop_size=24)
-        m._scaling_da = object()
-        sets = list(m._build_run_sets(_qlats(96)))
-        assert [s["qlats"].shape[1] for s in sets] == [48, 48]
+    # These two isolate the SPREAD half: the lag is off (also the default) and
+    # the spread is set explicitly, since its default is 0.
+    _NO_LAG = {"innovation_spread_h": 12.0, "travel_time_lag": False}
 
-    def test_window_covering_the_horizon_is_untouched(self, plenty_of_memory):
-        m = _model(nts_cols=96, max_loop_size=48)
-        m._scaling_da = object()
+    def test_window_below_the_spread_window_is_enlarged(self, plenty_of_memory):
+        # 8 columns at 1 h/col = 8 h, under the 12 h default innovation_spread_h:
+        # the halo that feeds the forward window is one window deep, so a window
+        # shorter than the spread leaves its own tail uncovered. Enlarging
+        # max_loop_size cannot change results -- it is a memory knob -- but a
+        # window below the spread would.
+        m = _model(nts_cols=96, max_loop_size=8)
+        m._scaling_da = SimpleNamespace(**self._NO_LAG)
         sets = list(m._build_run_sets(_qlats(96)))
-        assert [s["qlats"].shape[1] for s in sets] == [48, 48]
+        assert [s["qlats"].shape[1] for s in sets] == [12] * 8
+
+    def test_window_covering_the_spread_window_is_untouched(self, plenty_of_memory):
+        m = _model(nts_cols=96, max_loop_size=24)
+        m._scaling_da = SimpleNamespace(**self._NO_LAG)
+        sets = list(m._build_run_sets(_qlats(96)))
+        assert [s["qlats"].shape[1] for s in sets] == [24] * 4
+
+    def test_the_lag_span_and_spread_add_up_to_the_window(self, plenty_of_memory):
+        """With the lag on, a window must cover the traced span AND the spread:
+        the innovation is averaged forward over the spread and the lag reads that
+        average at t + tau, so the tail needs both."""
+        m = _model(nts_cols=96, max_loop_size=24)
+        m._scaling_da = SimpleNamespace(innovation_spread_h=12.0,
+                                        travel_time_lag=True, lag_window_h=48.0)
+        sets = list(m._build_run_sets(_qlats(96)))
+        assert [s["qlats"].shape[1] for s in sets] == [60, 36]
 
     def test_without_the_da_the_warning_behavior_stands(self, monkeypatch, caplog):
         self._pressure(monkeypatch)
@@ -202,3 +216,28 @@ class TestRamCapIsAnErrorUnderActiveAssimilation:
             sets = list(m._build_run_sets(_qlats(96)))
         assert len(sets) > 1
         assert "caps the run window" in caplog.text
+
+    def test_a_short_update_is_not_reported_as_a_memory_problem(self, plenty_of_memory):
+        """The cap has two causes and they need different fixes.
+
+        With memory ample, mem_loop_size is just this update's forcing count, so
+        an update shorter than the required span fails for a reason no bigger
+        machine can fix. Reporting that as "free memory" sends an operator to
+        the wrong place, which is exactly what happened when ngen-sized updates
+        were first tried against the shipped span.
+        """
+        m = _model(nts_cols=6, max_loop_size=6)
+        # The lag and spread are OFF by default now, so the scenario sets them
+        # explicitly: a 48 h span against a 6-column update.
+        m._scaling_da = SimpleNamespace(
+            travel_time_lag=True, lag_window_h=48.0, innovation_spread_h=12.0
+        )
+        with pytest.raises(ValueError, match="Memory is NOT the limit"):
+            list(m._build_run_sets(_qlats(6)))
+
+    def test_a_genuine_memory_cap_still_reports_memory(self, monkeypatch):
+        self._pressure(monkeypatch)
+        m = _model(nts_cols=96, max_loop_size=96)
+        m._scaling_da = object()
+        with pytest.raises(MemoryError, match="part of the result"):
+            list(m._build_run_sets(_qlats(96)))

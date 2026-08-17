@@ -24,7 +24,6 @@ import nwm_routing.nwm_route as nwm_routing
 from nwm_routing.output import nwm_output_generator
 from nwm_routing.scaling_da_apply import (
     build_scaling_da,
-    validate_window_envelope,
     network_gage_segments,
 )
 
@@ -230,12 +229,6 @@ class Model:
         # full_results = None
         # Materialized: the hand-off logic needs to know the window count.
         run_sets = list(self._build_run_sets(qlats))
-        if self._scaling_da is not None:
-            # The same backstop the -V5 driver runs: _build_run_sets enlarges
-            # windows to the horizon/interval, but an interval that is not a
-            # whole number of qlat columns skips the rounding, and a straddled
-            # screen epoch would silently make results depend on the partition.
-            validate_window_envelope(run_sets, self._scaling_da, default_dt=self.dt)
         # The travel-time lag's deferral, WITHIN this update call only: a
         # non-final window's spread waits for the next window's innovation (its
         # halo). Local by construction, so nothing is ever pending across
@@ -309,7 +302,19 @@ class Model:
                 great_lakes_climatology_df=self._network.great_lakes_climatology_df,
                 da_parameter_dict=self._data_assimilation.assimilation_parameters,
                 assume_short_ts=self.compute_parameters.get('assume_short_ts', False),
-                return_courant=self.compute_parameters.get('return_courant', False),
+                # Forced on for ROUTING when a traced travel-time shift is
+                # configured: the trace reads r[2] for each reach's transit. The
+                # OUTPUT call below keeps reading the config value, so this does
+                # not start writing Courant output files. Mirrors the -V5 driver.
+                # Dropped again once the trace has filled its cache: after that
+                # the kernel would fill an [n_seg, nts*3] block per window that
+                # nothing reads. Mirrors the -V5 driver.
+                # Two requests, not one: the user's is permanent and feeds the
+                # output writer, the trace's is dropped once its cache is full.
+                return_courant=self.compute_parameters.get('return_courant', False) or (
+                    getattr(getattr(self, "_scaling_da", None), "travel_time_lag", False)
+                    and not self._scaling_da._trace_cached(self._scaling_da.trees)
+                ),
                 waterbodies_df=self._network._waterbody_df,
                 data_assimilation_parameters=self.waterbody_parameters,
                 waterbody_types_df=self._network._waterbody_types_df,
@@ -390,7 +395,8 @@ class Model:
                     # the spread closes with decayed persistence -- the same
                     # semantics as the run's final window on the -V5 driver.
                     self._scaling_da.apply_in_kernel(
-                        run_results, run["nts"], self.dt, run["t0"]
+                        run_results, run["nts"], self.dt, run["t0"],
+                        seed_untimed=True,
                     )
                     # Record (without installing) the seeded hand-off q0 for
                     # create_state(). Under ngen every window is the last of its
@@ -473,6 +479,13 @@ class Model:
             "usbr": self._data_assimilation._reservoir_usbr_param_df,
             "rfc": self._data_assimilation._reservoir_rfc_param_df,
             "gl": self._data_assimilation._great_lakes_param_df,
+            # Result-determining state: without it a resumed run retraces from
+            # its own first window and shifts corrections.
+            "scaling_tau": (
+                self._scaling_da.trace_checkpoint()
+                if getattr(self, "_scaling_da", None) is not None
+                else None
+            ),
         }
 
     def load_state(self, data: dict):
@@ -499,6 +512,12 @@ class Model:
             self._data_assimilation._reservoir_usbr_param_df = data["usbr"]
         self._data_assimilation._reservoir_rfc_param_df = data["rfc"]
         self._data_assimilation._great_lakes_param_df = data["gl"]
+        if getattr(self, "_scaling_da", None) is not None:
+            # Restore-or-invalidate, never keep: a stale own-trace surviving a
+            # load is the divergence this entry exists to prevent.
+            self._scaling_da.restore_trace_checkpoint(
+                data.get("scaling_tau"), dt=float(self.dt)
+            )
         self._network.update_waterbody_water_elevation()
 
     def reset_time(self):
@@ -619,7 +638,10 @@ class Model:
         required_bytes = qlats.shape[0] \
             * qlats.shape[1] \
             * self.qts_subdivisions \
-            * 200  # 200 based size of large arrays made during compute plus some padding
+            * 100  # bytes per link-timestep, measured: a 96 h single-window
+        # run over this 103,559-link domain peaks at 7.86 GB whole-process RSS
+        # (70.7 B per element); the old 200 blocked runs the machine performs,
+        # which is now fatal under active scaling DA (hard error, not shrink).
         system_memory = psutil.virtual_memory()
         available_memory = system_memory.available * 0.9  # only account for 90% of the currently available memory
         mem_divisions = math.ceil(required_bytes / available_memory)
@@ -634,26 +656,28 @@ class Model:
         scaling_active = getattr(self, "_scaling_da", None) is not None
         cfg_loop = self.forcing_parameters.get("max_loop_size") or 0
         if scaling_active and cfg_loop > 0:
-            # The travel-time lag needs every non-final window to cover
-            # max_travel_time_h (its halo is one window deep) and to tile
-            # screen_interval_h. max_loop_size counts qlat COLUMNS here, so
-            # convert via the column cadence and enlarge -- mirroring the -V5
-            # side (AbstractNetwork.build_forcing_sets does this to the file
-            # count). The final window of each update is exempt (edge closure).
-            # getattr with the ScalingDA class defaults: tests stub _scaling_da.
+            # The forward innovation window reads past the end of a window into
+            # the next one's innovation, and that halo is exactly ONE window
+            # deep, so a window shorter than innovation_spread_h leaves its own
+            # tail uncovered and the result starts depending on the partition.
+            # max_loop_size counts qlat COLUMNS here, so convert via the column
+            # cadence and enlarge. The final window of each update is exempt
+            # (edge closure). getattr with the ScalingDA class default: tests
+            # stub _scaling_da.
             col_s = float(self.qts_subdivisions) * float(self.dt)
-            horizon_h = float(getattr(self._scaling_da, "max_travel_time_h", 48.0))
-            interval_h = float(getattr(self._scaling_da, "screen_interval_h", 24.0))
-            horizon_cols = math.ceil(horizon_h * 3600.0 / col_s)
-            need = max(int(cfg_loop), horizon_cols)
-            iv = round(interval_h * 3600.0 / col_s)
-            if iv > 0 and abs(iv - interval_h * 3600.0 / col_s) < 1e-9:
-                need = math.ceil(need / iv) * iv
+            spread_h = float(getattr(self._scaling_da, "innovation_spread_h", 0.0))
+            # The travel-time lag is measured over a fixed span taken from the
+            # first window, so that window has to contain it. Otherwise the span
+            # follows max_loop_size and a memory knob changes discharge.
+            # SUM, not max: the lag reads the SMOOTHED innovation at t + tau, so
+            # the tail of a window needs raw innovation out to tau_max + spread.
+            if getattr(self._scaling_da, "travel_time_lag", False):
+                spread_h += float(getattr(self._scaling_da, "lag_window_h", 48.0))
+            need = max(int(cfg_loop), math.ceil(spread_h * 3600.0 / col_s))
             if need > cfg_loop:
                 LOG.info(
                     "scaling DA: max_loop_size enlarged %d -> %d forcing columns "
-                    "so every non-final window covers max_travel_time_h and "
-                    "tiles screen_interval_h.",
+                    "so every non-final window covers innovation_spread_h.",
                     int(cfg_loop), need,
                 )
                 cfg_loop = need
@@ -661,6 +685,28 @@ class Model:
             loop_size = min(int(cfg_loop), mem_loop_size)
             if loop_size < int(cfg_loop):
                 if scaling_active:
+                    # Two very different causes land here and must not be
+                    # reported as one. mem_divisions == 1 means memory was never
+                    # the limit: the cap IS this update's own forcing, because
+                    # mem_loop_size is then just nts. A caller cannot fix that
+                    # with a bigger machine, only by feeding longer updates or
+                    # asking for a shorter span, so saying "free memory" sends
+                    # them to the wrong place entirely.
+                    if mem_divisions <= 1:
+                        raise ValueError(
+                            f"this update supplies {nts} forcing timestep(s), but the "
+                            f"scaling DA requires windows of {int(cfg_loop)} -- the "
+                            "larger of the configured max_loop_size and the DA's own "
+                            "span (innovation_spread_h, plus lag_window_h when "
+                            "travel_time_lag is on). The window partition is part of "
+                            "the result under active assimilation, so it must not "
+                            "shrink silently to the update. Memory is NOT the limit "
+                            "here. Either drive longer updates, lower max_loop_size "
+                            "to the update cadence, or reduce the DA span "
+                            "(lag_window_h / innovation_spread_h); halving "
+                            "lag_window_h also halves the longest resolvable travel "
+                            "time."
+                        )
                     raise MemoryError(
                         f"available memory caps the run window at {loop_size} forcing "
                         f"timesteps, below the configured max_loop_size of "

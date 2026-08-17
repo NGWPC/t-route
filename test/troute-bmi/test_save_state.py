@@ -10,11 +10,12 @@ sentinel on the first run after a load.
 These tests drive ``create_state``/``load_state`` in isolation via
 ``Model.__new__`` so they need neither a config file nor a built network.
 """
+from __future__ import annotations
+
 import pickle
 
 import pandas as pd
 import pytest
-
 from troute_nwm_bmi.troute_model import Model
 
 
@@ -40,6 +41,19 @@ class _DataAssimilationStub:
         self._reservoir_usbr_param_df = pd.DataFrame({"e": [7]})
         self._reservoir_rfc_param_df = pd.DataFrame({"c": [3]})
         self._great_lakes_param_df = pd.DataFrame({"d": [4]})
+
+
+class _ScalingDAStub:
+    """Presence marker for load_state's branch; records the trace restore."""
+
+    def __init__(self):
+        self.restored_with = "never called"
+
+    def trace_checkpoint(self):
+        return None
+
+    def restore_trace_checkpoint(self, ckpt, dt):
+        self.restored_with = (ckpt, dt)
 
 
 def _make_model(time, subnetwork):
@@ -117,6 +131,7 @@ def _spread_then_q0(spread: bool = True):
     """
     import numpy as np
     from nwm_routing.scaling_da_apply import ScalingDA
+
     from troute.AbstractNetwork import AbstractNetwork
     from troute.scaling_da import build_gage_trees_from_mappings
 
@@ -126,6 +141,9 @@ def _spread_then_q0(spread: bool = True):
     da = ScalingDA.__new__(ScalingDA)
     da.trees, da.gage_seg = trees, {"G": 100}
     da.min_flow, da.max_source_pbias, da._loop_obs = 1e-6, None, None
+    # These run_results carry no Courant block; with the class-default lag ON
+    # that is a fail-closed error, and the lag is not what this file tests.
+    da.travel_time_lag = False
 
     nts = 2
     arr = np.zeros((3, 4 * nts), dtype=np.float32)
@@ -200,7 +218,8 @@ def test_load_state_installs_the_warmstate_the_run_will_need():
 
     # Resumed analysis: scaling DA active -> cycling state installed.
     analysis = _make_model(0.0, [None, None, None])
-    analysis._scaling_da = object()
+    analysis._scaling_da = _ScalingDAStub()
+    analysis.dt = 300
     analysis.load_state(pickle.loads(pickle.dumps(state, pickle.HIGHEST_PROTOCOL)))
     assert analysis._network._q0.loc[101, "qd0"] == 6.0
 
@@ -213,7 +232,8 @@ def test_load_state_installs_the_warmstate_the_run_will_need():
 
     # The loaded hand-off is RETAINED (superseded only by the next routed window),
     # so a checkpoint survives load -> create round-trips; see the test below.
-    assert forecast._seeded_q0 is not None and analysis._seeded_q0 is not None
+    assert forecast._seeded_q0 is not None
+    assert analysis._seeded_q0 is not None
 
 
 def test_checkpoint_round_trip_preserves_the_forecast_handoff():
@@ -235,7 +255,8 @@ def test_checkpoint_round_trip_preserves_the_forecast_handoff():
     # the cycling q0 for itself, but what it re-serializes must still carry the
     # hand-off for whoever loads the copy next.
     relay = _make_model(0.0, [None, None, None])
-    relay._scaling_da = object()
+    relay._scaling_da = _ScalingDAStub()
+    relay.dt = 300
     relay.load_state(pickle.loads(pickle.dumps(state, pickle.HIGHEST_PROTOCOL)))
     resaved = pickle.loads(pickle.dumps(relay.create_state(), pickle.HIGHEST_PROTOCOL))
     assert resaved["seeded_q0"] is not None
@@ -262,6 +283,7 @@ def test_cycling_warmstate_never_accumulates_the_correction():
     """
     import numpy as np
     from nwm_routing.scaling_da_apply import ScalingDA
+
     from troute.AbstractNetwork import AbstractNetwork
     from troute.scaling_da import build_gage_trees_from_mappings
 
@@ -271,6 +293,9 @@ def test_cycling_warmstate_never_accumulates_the_correction():
     da = ScalingDA.__new__(ScalingDA)
     da.trees, da.gage_seg = trees, {"G": 100}
     da.min_flow, da.max_source_pbias, da._loop_obs = 1e-6, None, None
+    # These run_results carry no Courant block; with the class-default lag ON
+    # that is a fail-closed error, and the lag is not what this file tests.
+    da.travel_time_lag = False
 
     def one_window():
         nts = 2
