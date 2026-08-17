@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from functools import partial
 import pandas as pd
 import numpy as np
+import math
 import multiprocessing
 from datetime import datetime, timedelta
 
@@ -18,11 +19,93 @@ import troute.nhd_io as nhd_io
 from .AbstractRouting import MCOnly, MCwithDiffusive, MCwithDiffusiveNatlXSectionNonRefactored, MCwithDiffusiveNatlXSectionRefactored
 
 import logging
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 LOG = logging.getLogger("TROUTE")
+
+def _scaling_da_spread_h(da_parameters: "Mapping[str, Any] | None") -> float:
+    """Hours of forcing every non-final window must cover for the scaling DA.
+
+    The larger of the innovation spread (whose halo is one window deep) and the
+    span the travel-time lag is measured over. Both decide results, so a window
+    shorter than either would let max_loop_size, a memory knob, change
+    discharge. Read straight off the raw config block rather than off a built
+    ScalingDA: the forcing windows are laid out before the DA object exists.
+    """
+    sda = (da_parameters or {}).get("streamflow_da") or {}
+    if not sda.get("streamflow_scaling"):
+        return 0.0
+    params = sda.get("streamflow_scaling_parameters") or {}
+    need = float(params.get("innovation_spread_h", 0.0))
+    if bool(params.get("travel_time_lag", False)):
+        # SUM, not max. The innovation is first averaged forward over
+        # innovation_spread_h, and the lag then reads that average at t + tau, so
+        # the last timestep of a window needs raw innovation out to
+        # tau_max + spread. Sizing on the larger of the two left the tail of that
+        # read past the halo, where it silently fell back to the terminal value,
+        # and how far past depended on where the boundary fell.
+        need += float(params.get("lag_window_h", 48.0))
+    return need
+
+
+def _require_span_covering_first_set(
+    run_sets: "list[dict[str, Any]]", spread_h: float, dt: "float | None"
+) -> None:
+    """Fail closed when explicit ``qlat_forcing_sets`` cannot host the DA span.
+
+    Explicit sets bypass the enlargement and the final-remainder fold, so a
+    short FIRST set would silently become the cached trace span and the
+    partition would change discharge. Raises only when the run could supply
+    the span but the partition does not; a genuinely short run warns and caps.
+    """
+    if not run_sets or spread_h <= 0 or not dt:
+        return
+    need = math.ceil(spread_h * 3600.0 / float(dt))
+    first = int(run_sets[0].get("nts") or 0)
+    total = sum(int(r.get("nts") or 0) for r in run_sets)
+    if first < need <= total:
+        raise ValueError(
+            f"qlat_forcing_sets: the first set supplies {first} timestep(s) but "
+            f"the scaling DA needs an opening window of {need} to cover "
+            "lag_window_h + innovation_spread_h, and the run is long enough to "
+            "supply it. The traced span is part of the result, so it must not "
+            "depend on the partition: enlarge the first set, lower lag_window_h "
+            "or innovation_spread_h, or set travel_time_lag: false."
+        )
+
+
+def _fold_short_final_set(run_sets: "list[dict[str, Any]]", spread_files: int) -> None:
+    """Fold a final remainder shorter than ``spread_files`` into the window before it.
+
+    The enlargement above exempts the FINAL window, which is right for the
+    forward halo (nothing follows it to read) and wrong for the travel-time lag:
+    a final window shorter than the lag reads across a boundary it cannot
+    supply, so the run's tail depends on where the boundaries fell. Measured on
+    the Ohio subset with a 12 h lag, a 4-file remainder differed from an evenly
+    divided run by 17.1 m3/s backward and 12.9 m3/s forward over the last four
+    hours; folding it in returns both to zero. Mutates ``run_sets`` in place.
+    """
+    if len(run_sets) < 2 or len(run_sets[-1]["qlat_files"]) >= spread_files:
+        return
+    tail = run_sets.pop()
+    LOG.info(
+        "scaling DA: final remainder of %d forcing file(s) folded into the window "
+        "before it, which then holds %d; a remainder shorter than the travel-time "
+        "span is not self-contained.",
+        len(tail["qlat_files"]),
+        len(run_sets[-1]["qlat_files"]) + len(tail["qlat_files"]),
+    )
+    run_sets[-1]["qlat_files"] += tail["qlat_files"]
+    run_sets[-1]["nts"] += tail["nts"]
+    run_sets[-1]["final_timestamp"] = tail["final_timestamp"]
+
 
 class AbstractNetwork(ABC):
     """
-    
+
     """
     __slots__ = ["_dataframe", "_waterbody_connections", "_gages",
                 "_terminal_codes", "_connections", "_waterbody_df",
@@ -856,6 +939,14 @@ class AbstractNetwork(ABC):
         max_loop_size      = forcing_parameters.get("max_loop_size", 12)
         dt                 = forcing_parameters.get("dt", None)
 
+        # Explicit sets must host the DA span or fail before anything routes.
+        if run_sets:
+            _require_span_covering_first_set(
+                run_sets,
+                _scaling_da_spread_h(self.data_assimilation_parameters),
+                dt,
+            )
+
         try:
             qlat_input_folder = pathlib.Path(qlat_input_folder)
             assert qlat_input_folder.is_dir() == True
@@ -968,8 +1059,29 @@ class AbstractNetwork(ABC):
             nfiles = int(np.ceil(nts / qts_subdivisions))
             if stream_output:
                 stream_output_time = stream_output.get('stream_output_time', None)
-                if stream_output_time and stream_output_time > max_loop_size:
-                    max_loop_size = stream_output_time
+                # stream_output_time is HOURS; max_loop_size counts forcing
+                # FILES. Comparing them raw was only right for hourly forcing
+                # (-1 = whole run in one file, exempt).
+                if stream_output_time and stream_output_time > 0:
+                    sot_files = math.ceil(stream_output_time * 3600.0 / dt_qlat)
+                    if sot_files > max_loop_size:
+                        max_loop_size = sot_files
+            # The scaling DA's forward innovation window reads into the NEXT
+            # window's innovation, and that halo is exactly one window deep, so a
+            # window shorter than innovation_spread_h leaves its own tail on
+            # persistence and the result starts depending on the partition. The
+            # BMI driver enlarges for the same reason; this is the -V5 half.
+            spread_h = _scaling_da_spread_h(self.data_assimilation_parameters)
+            if spread_h > 0:
+                spread_files = math.ceil(spread_h * 3600.0 / dt_qlat)
+                if spread_files > max_loop_size:
+                    LOG.info(
+                        "scaling DA: max_loop_size enlarged %d -> %d forcing files "
+                        "so every non-final window covers the innovation spread "
+                        "and the travel-time measurement span.",
+                        max_loop_size, spread_files,
+                    )
+                    max_loop_size = spread_files
             # list of forcing file datetimes
             #datetime_list = [t0 + dt_qlat_timedelta * (n + 1) for n in
             #                 range(nfiles)]
@@ -1034,6 +1146,18 @@ class AbstractNetwork(ABC):
                 k += max_loop_size
                 j += 1
 
+            # A FINAL remainder shorter than the span is folded into the window
+            # before it. The enlargement above exempts the final window, which is
+            # right for the forward halo (nothing follows it to read) but wrong
+            # for the travel-time lag: a final window shorter than the lag reads
+            # across a boundary it cannot supply, so the run's tail depends on
+            # where the boundaries fell. Measured on the Ohio subset with a 12 h
+            # lag: a 4-file final remainder differed from an evenly divided run
+            # by 17.1 m3/s (backward) and 12.9 m3/s (forward) over the last four
+            # hours; folding it in returns both to zero.
+            if spread_h > 0:
+                _fold_short_final_set(run_sets, math.ceil(spread_h * 3600.0 / dt_qlat))
+
         if self._use_et_channel_loss:
             if et_glob_filter=="cat-*":  # will be called if using NGEN catchment files (cat-<CATCHMENT_ID>.csv)
                 print("Reformating ET catchment files into xr dataset")
@@ -1047,6 +1171,26 @@ class AbstractNetwork(ABC):
                     run_sets[i]["et_forcing_ds"] = et_ds
             elif et_glob_filter is not None:
                 raise NotImplementedError("ET reads are only implemented for catchment files at this time with a `cat-*` filter")
+
+        # REALIZED window, written back so downstream consumers describe the run
+        # that actually happened. max_loop_size is enlarged above to cover the
+        # scaling DA's travel-time horizon (and by stream_output_time), so a
+        # report reading the CONFIGURED value describes a partitioning that never
+        # ran. Taken from run_sets rather than the local, so it is correct in
+        # every branch of this function, including an explicit qlat_forcing_sets.
+        # The configured value is preserved alongside rather than overwritten;
+        # this function already writes qts_subdivisions back the same way.
+        if run_sets:
+            _dt = float(forcing_parameters.get("dt") or 0.0)
+            _nts = [int(r["nts"]) for r in run_sets if r.get("nts")]
+            if _dt and _nts:
+                forcing_parameters.setdefault(
+                    "max_loop_size_configured", forcing_parameters.get("max_loop_size")
+                )
+                # Non-final windows are uniform; the last one is the remainder.
+                forcing_parameters["max_loop_size_realized_h"] = (
+                    max(_nts) * _dt / 3600.0
+                )
 
         return run_sets
     

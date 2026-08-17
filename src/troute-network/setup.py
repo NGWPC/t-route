@@ -1,8 +1,8 @@
 from setuptools import setup, find_namespace_packages
-from distutils.extension import Extension
+from setuptools import Extension
 import sys
 import numpy as np
-from distutils.command.build_ext import build_ext
+from setuptools.command.build_ext import build_ext
 import os
 import subprocess
 

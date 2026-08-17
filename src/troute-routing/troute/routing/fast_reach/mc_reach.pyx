@@ -290,6 +290,12 @@ cpdef object compute_network_structured(
     #define and initialize the final output array, add one extra time step for initial conditions
     cdef int qvd_ts_w = 4  # There are 4 values per timestep (corresponding to 4 columns per timestep)
     cdef np.ndarray[float, ndim=3] flowveldepth_nd = np.zeros((data_idx.shape[0], nsteps+1, qvd_ts_w), dtype='float32')
+    # Courant diagnostics (cn, ck, X per timestep), sized like flowveldepth so the
+    # same reshape/mask applies. Allocated only under return_courant -- at CONUS
+    # scale this is gigabytes nobody asked for otherwise.
+    cdef int courant_ts_w = 3
+    cdef np.ndarray[float, ndim=3] courant_nd = np.zeros(
+        (data_idx.shape[0] if return_courant else 0, nsteps+1, courant_ts_w), dtype='float32')
     #Make ndarrays from the mem views for convience of indexing...may be a better method
     cdef np.ndarray[float, ndim=2] data_array = np.asarray(data_values)
     cdef np.ndarray[float, ndim=2] init_array = np.asarray(initial_conditions)
@@ -450,6 +456,13 @@ cpdef object compute_network_structured(
             # TODO: Compare performance with math.isnan (imported for nogil...)
             if not np.isnan(usgs_values[gage_i, 0]):
                 flowveldepth_nd[usgs_position_i, 0, 0] = usgs_values[gage_i, 0]
+                # Seed lastobs from the t0 observation when none was provided;
+                # otherwise the first hour of every forcing loop ran uncorrected
+                # (lastobs = NaN passes the raw model value through). A real
+                # lastobs (file or restart) still takes precedence.
+                if np.isnan(lastobs_values[gage_i]):
+                    lastobs_values[gage_i] = usgs_values[gage_i, 0]
+                    lastobs_times[gage_i] = 0.0
 
     
     #---------------------------------------------------------------------------------------------
@@ -521,7 +534,12 @@ cpdef object compute_network_structured(
     #Init buffers
     lateral_flows = np.zeros( max_buff_size, dtype='float32' )
     buf_view = np.zeros( (max_buff_size, 14), dtype='float32')
-    out_buf = np.full( (max_buff_size, 3), -1, dtype='float32')
+    # 6 columns, not 3: compute_reach_kernel writes qdc/velc/depthc into 0..2 and,
+    # under return_courant, cn/ck/X into 3..5 with boundscheck off. A 3-wide buffer
+    # made the last row's Courant write an out-of-bounds heap write on the longest
+    # reach (a memory-safety fix; interior rows were overwritten before any read,
+    # so no numerical result changes).
+    out_buf = np.full( (max_buff_size, 6), -1, dtype='float32')
 
     cdef int num_reaches = len(reach_objects)
     #Dynamically allocate a C array of reach structs
@@ -534,6 +552,7 @@ cpdef object compute_network_structured(
     cdef _Reach* r
     #create a memory view of the ndarray
     cdef float[:,:,::1] flowveldepth = flowveldepth_nd
+    cdef float[:,:,::1] courant = courant_nd
     cdef np.ndarray[float, ndim=3] upstream_array = np.empty((data_idx.shape[0], nsteps+1, 1), dtype='float32')
     cdef float reservoir_outflow, reservoir_water_elevation
     cdef int id = 0
@@ -822,6 +841,13 @@ cpdef object compute_network_structured(
                 for _i in range(r.reach.mc_reach.num_segments):
                     segment = get_mc_segment(r, _i)
 
+                    # Courant diagnostics, straight through from the kernel's columns 3..5.
+                    # Guarded because courant_nd has zero rows unless return_courant is set.
+                    if return_courant:
+                        courant[segment.id, timestep, 0] = out_buf[_i, 3]
+                        courant[segment.id, timestep, 1] = out_buf[_i, 4]
+                        courant[segment.id, timestep, 2] = out_buf[_i, 5]
+
                     # Setting flow based on the output of MC - SSOUT - ELOSS
                     flowveldepth[segment.id, timestep, 0] = out_buf[_i, 0] - ssout - eloss_array[segment.id, qlat_ts_previous]
 
@@ -903,11 +929,18 @@ cpdef object compute_network_structured(
     output = np.asarray(flowveldepth[:,1:,:], dtype='float32')
     #do the same for the upstream_array
     output_upstream = np.asarray(upstream_array[:,1:,:], dtype='float32')
+    # Same slice/reshape/mask as flowveldepth; r[2] stays the long-standing 0
+    # placeholder when Courant output is not requested.
+    if return_courant:
+        courant_out = np.asarray(courant[:,1:,:], dtype='float32')
+        courant_out = courant_out.reshape(courant_out.shape[0], -1)[fill_index_mask]
+    else:
+        courant_out = 0
     #return np.asarray(data_idx, dtype=np.intp), np.asarray(flowveldepth.base.reshape(flowveldepth.shape[0], -1), dtype='float32')
     return (
         np.asarray(data_idx, dtype=np.intp)[fill_index_mask], 
         output.reshape(output.shape[0], -1)[fill_index_mask], 
-        0, 
+        courant_out, 
         (
             np.asarray([data_idx[usgs_position_i] for usgs_position_i in usgs_positions]), 
             np.asarray(lastobs_times), 

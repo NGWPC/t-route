@@ -657,7 +657,9 @@ def remap_courant(courant: pd.DataFrame, fp_outlet_crosswalk: dict[int, int]) ->
 
     cn_cols = [c for c in cols if c[1] == "cn"]
     ck_cols = [c for c in cols if c[1] == "ck"]
-    x_cols = [c for c in cols if c[1] == "x"]
+    # Uppercase "X", matching the writers; lowercase selected nothing and the
+    # reindex rebuilt every X column as NaN.
+    x_cols = [c for c in cols if c[1] == "X"]
 
     cn_out = base.groupby("id2")[cn_cols].sum()
     ck_out = base.groupby("id2")[ck_cols].max()

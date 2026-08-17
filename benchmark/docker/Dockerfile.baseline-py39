@@ -6,7 +6,7 @@
 # Build from a worktree of that commit (run from the repo root):
 #
 #   git worktree add --detach /tmp/troute-baseline 8d17710d
-#   docker build --target dev -f benchmark/Dockerfile.baseline-py39 \
+#   docker build --target dev -f benchmark/docker/Dockerfile.baseline-py39 \
 #     --build-arg TROUTE_NATIVE=1 -t troute-dev:baseline /tmp/troute-baseline
 #   git worktree remove --force /tmp/troute-baseline
 #

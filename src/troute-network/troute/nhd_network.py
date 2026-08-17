@@ -101,12 +101,18 @@ def extract_waterbody_connections(rows, target_col = 'waterbody', waterbody_null
     
     '''    
     
-    wbody_map = (rows.loc[rows[target_col] != waterbody_null, target_col].
-                     astype("int").
-                     to_dict()
-                    )
-    
-    return wbody_map
+    return _extract_waterbody_connections(rows, target_col, waterbody_null)
+
+
+def _extract_waterbody_connections(rows, target_col="waterbody", waterbody_null=-9999):
+    """Undecorated twin of :func:`extract_waterbody_connections` for internal
+    callers, so the library does not warn at itself; the public wrapper keeps
+    warning for outside code."""
+    return (
+        rows.loc[rows[target_col] != waterbody_null, target_col]
+        .astype("int")
+        .to_dict()
+    )
 
 
 def gage_mapping(segment_gage_df, gage_col="gages"):
