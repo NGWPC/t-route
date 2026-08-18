@@ -4,10 +4,8 @@ import pickle
 import typing
 import numpy as np
 from bmipy import Bmi
+from datetime import datetime, timezone
 import logging
-
-from ewts.helper import getenv_any
-from ewts.logger import configure_existing_logger
 
 from .troute_model import Model, BmiVars
 
@@ -16,27 +14,19 @@ if typing.TYPE_CHECKING:
 
 LOG = logging.getLogger("TROUTE")
 
+try:
+    from ewts.helper import getenv_any
+    from ewts.logger import configure_existing_logger
+    TROUTE_USE_EWTS = True
+except ImportError:
+    TROUTE_USE_EWTS = False
+
 _VAR_NAME_UNITS_MAP = {
     BmiVars.CATCHMENT_VALUE: ['streamflow_cms', 'm3 s-1'],
     BmiVars.NEXUS_VALUE: ['streamflow_cms', 'm3 s-1'],
-    BmiVars.CHANNEL_WATER_RATE: ['streamflow_cms', 'm3 s-1'],
-    BmiVars.CHANNEL_WATER_SPEED: ['streamflow_ms', 'm s-1'],
-    BmiVars.CHANNEL_WATER_DEPTH: ['streamflow_m', 'm'],
-    BmiVars.LAKE_WATER_INCOMING: ['waterbody_cms', 'm3 s-1'],
-    BmiVars.LAKE_WATER_OUTGOING: ['waterbody_cms', 'm3 s-1'],
-    BmiVars.LAKE_WATER_ELEVATION: ['waterbody_m', 'm'],
 }
 
-_OUTPUT_VAR_NAMES = [
-    BmiVars.CHANNEL_WATER_ID,
-    BmiVars.CHANNEL_WATER_RATE,
-    BmiVars.CHANNEL_WATER_SPEED,
-    BmiVars.CHANNEL_WATER_DEPTH,
-    BmiVars.LAKE_WATER_ID,
-    BmiVars.LAKE_WATER_INCOMING,
-    BmiVars.LAKE_WATER_OUTGOING,
-    BmiVars.LAKE_WATER_ELEVATION,
-]
+_OUTPUT_VAR_NAMES = []
 
 _INPUT_VAR_NAMES = [
     BmiVars.CATCHMENT_ID,
@@ -47,31 +37,64 @@ _INPUT_VAR_NAMES = [
     BmiVars.NGEN_DT,
 ]
 
+class StdoutStyleFormatter(logging.Formatter):
+
+    INFO_FORMAT = (
+        "%(asctime)s %(name)-8s %(levelname)-7s %(message)s"
+    )
+
+    DETAILED_FORMAT = (
+        "%(asctime)s %(name)-8s %(levelname)-7s "
+        "%(message)s "
+        "[%(filename)s.%(funcName)s(L%(lineno)s)]"
+    )
+
+    def format(self, record):
+        if record.levelno == logging.INFO:
+            self._style._fmt = self.INFO_FORMAT
+        else:
+            self._style._fmt = self.DETAILED_FORMAT
+
+        return super().format(record)
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    
+
+def _configure_stdout_logging():
+    LOG.setLevel(logging.INFO)
+
+    if not LOG.handlers:
+        handler = logging.StreamHandler()
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(StdoutStyleFormatter())
+        LOG.addHandler(handler)
+
+    LOG.propagate = False
 
 class BmiTroute(Bmi):
     _model: Model
 
     def __init__(self):
-        val = getenv_any("EWTS_USE_NGEN_BRIDGE", "").strip().lower()
-        if val in {"1", "true", "yes", "on"}:
-            configure_existing_logger(LOG)
+        if TROUTE_USE_EWTS:
+            val = getenv_any("EWTS_USE_NGEN_BRIDGE", "").strip().lower()
+            if val in {"1", "true", "yes", "on"}:
+                configure_existing_logger(LOG)
+            else:
+                _configure_stdout_logging()
+                LOG.warning("ewts package installed but EWTS_USE_NGEN_BRIDGE not on. Falling back to default logging.")
+        else:
+            _configure_stdout_logging()
 
         super().__init__()
         self._values: dict[str, NDArray] = {
             BmiVars.NGEN_DT: np.array([-1], dtype=np.intc),
-            BmiVars.NEXUS_ID: np.zeros(0, dtype=np.intc),
+            BmiVars.NEXUS_ID: np.zeros(0, dtype=np.int64),
             BmiVars.NEXUS_VALUE: np.zeros(0, dtype=np.double),
-            BmiVars.CATCHMENT_ID: np.zeros(0, dtype=np.intc),
+            BmiVars.CATCHMENT_ID: np.zeros(0, dtype=np.int64),
             BmiVars.CATCHMENT_VALUE: np.zeros(0, dtype=np.double),
             BmiVars.UPSTREAM_ID: np.zeros(0, dtype=int),
-            BmiVars.CHANNEL_WATER_ID: np.zeros(0, dtype=np.int64),
-            BmiVars.CHANNEL_WATER_RATE: np.zeros(0, dtype=np.float32),
-            BmiVars.CHANNEL_WATER_SPEED: np.zeros(0, dtype=np.float32),
-            BmiVars.CHANNEL_WATER_DEPTH: np.zeros(0, dtype=np.float32),
-            BmiVars.LAKE_WATER_ID: np.zeros(0, dtype=np.int64),
-            BmiVars.LAKE_WATER_INCOMING: np.zeros(0, dtype=np.float32),
-            BmiVars.LAKE_WATER_OUTGOING: np.zeros(0, dtype=np.float32),
-            BmiVars.LAKE_WATER_ELEVATION: np.zeros(0, dtype=np.float32),
         }
         self._free_serialized()
 

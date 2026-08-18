@@ -2,16 +2,18 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 import time
 from pathlib import Path
-from pprint import pformat
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from .AbstractNetwork import AbstractNetwork
+from troute.AbstractNetwork import AbstractNetwork
 from troute.nhf_discretize import discretize_flowpaths
+from troute.scaling_da import build_scaling_da_setup
 
 from troute.nhf_preprocess import (
+    LAKE_ID_FIELD,
+    WATERBODY_DF_FIELDS,
     NHFPreprocessMixin,
     read_geo_file,
     read_qlat_file,
@@ -41,6 +43,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         "_upstream_inflow_df",
         "_nexus_virtual_seg_ids",
         "_fp_outlet_crosswalk",
+        "_diversion_da",
     ]
 
     def __init__(
@@ -57,10 +60,12 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         verbose=False,
         showtiming=False,
         from_files=True,
-        value_dict={},
-        bmi_parameters={},
+        value_dict=None,
+        bmi_parameters=None,
     ):
         """ """
+        if value_dict is None:
+            value_dict = {}
         self.supernetwork_parameters = supernetwork_parameters
         self.waterbody_parameters = waterbody_parameters
         self.data_assimilation_parameters = data_assimilation_parameters
@@ -75,8 +80,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
         if self.verbose:
             LOG.info("creating NHF supernetwork connections set")
-        if self.showtiming:
-            start_time = time.time()
+        start_time = time.perf_counter() if self.showtiming else None
 
         # ------------------------------------------------
         # Load hydrofabric information
@@ -88,25 +92,35 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             # NHF always reads topology from .gpkg files, even in BMI mode.
             # The ngen framework provides only qlat data via BMI; network
             # geometry comes from the geopackage specified in supernetwork_parameters.
-            nhf = read_geo_file(
-                self.supernetwork_parameters,
-                self.waterbody_parameters,
-                self.compute_parameters,
-                self.compute_parameters.get("cpu_pool", 1),
-            )
+            nhf = read_geo_file(self.supernetwork_parameters,self.compute_parameters.get("cpu_pool", 1))
 
             # Handle different key column names between flowpaths and flowpath_attributes
             flowpaths = nhf["flowpaths"]
-            waterbodies = nhf["waterbodies"]
+            waterbodies = nhf["lakes"]
             gages = nhf["gages"]
             reference_flowpaths = nhf["reference_flowpaths"]
             virtual_flowpaths = nhf["virtual_flowpaths"]
-            virtual_nexus = nhf["virtual_nexus"]
             hydrolocations = nhf["hydrolocations"]
+            reservoir_da = nhf["reservoir_da"]
 
             # Preprocess network objects
+            (
+                virtual_flowpaths,
+                reference_flowpaths,
+                waterbodies,
+                self.div_reverse_lookup,
+            ) = _force_headwater_routing(
+                virtual_flowpaths, reference_flowpaths, waterbodies
+            )
             discretization_len = self.supernetwork_parameters.get("nhf_discretization_len", 300.0)
-            self.preprocess_network(flowpaths, reference_flowpaths, virtual_flowpaths, discretization_len)
+            # Create a list of waterbody associated flowpaths that can be used
+            # to protect waterbody-bearing flowpaths from being aggregated away
+            # during short-reach discretization
+            wb_fp_ids = set(waterbodies["fp_id"].dropna().astype(int).values)
+            self.preprocess_network(
+                flowpaths, reference_flowpaths, virtual_flowpaths,
+                discretization_len, protected_fp_ids=wb_fp_ids,
+            )
 
             self.crosswalk_nex_flowpath_poi(
                 virtual_flowpaths,
@@ -117,29 +131,103 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             )
 
             # Preprocess waterbody objects
-            self.preprocess_waterbodies(waterbodies, virtual_nexus)
+            self.preprocess_waterbodies(waterbodies, nhf["lake_vfp_crosswalk"])
 
-            # Preprocess data assimilation objects #TODO: Move to DataAssimilation.py?
-            self.preprocess_data_assimilation(
-                flowpaths,
-                reference_flowpaths,
-                virtual_flowpaths,
-                virtual_nexus,
-                waterbodies,
-                gages
-            )
+            # Preprocess data assimilation objects
+            self.preprocess_data_assimilation(gages, reservoir_da)
+
+            # Resolved here, where the flowpaths layer is still in scope; the DA reads
+            # it to pick each gage tree's region theta.
+            self.build_gage_vpu_map(gages, flowpaths)
 
 
         if self.verbose:
             LOG.info("supernetwork connections set complete")
-        if self.showtiming:
-            LOG.info("... in %s seconds." % (time.time() - start_time))
+        if self.showtiming and start_time is not None:
+            LOG.info("... in %s seconds." % (time.perf_counter() - start_time))
 
         super().__init__(from_files, value_dict)
 
         # Create empty dataframe for coastal_boundary_depth_df. This way we can check if
         # it exists, and only read in SCHISM data during 'assemble_forcings' if it doesn't
         self._coastal_boundary_depth_df = pd.DataFrame()
+
+        # Simple-scaling DA static inputs (crosswalk, source set, gage trees):
+        # network data processing, generated here beside the other DA inputs and
+        # only when the DA is enabled. Needs the finalized routed dataframe, so it
+        # runs after super().__init__.
+        _sda = (self.data_assimilation_parameters or {}).get("streamflow_da") or {}
+        self.scaling_da_setup = None
+        if _sda.get("streamflow_scaling"):
+            self.scaling_da_setup = build_scaling_da_setup(
+                self,
+                _sda.get("streamflow_scaling_parameters") or {},
+                self.data_assimilation_parameters,
+                cpu_pool=self.compute_parameters.get("cpu_pool"),
+            )
+
+    def initial_warmstate_preprocess(self, from_files, value_dict):
+        """Read the warm state, then broadcast an fp-keyed restart onto routing links.
+
+        A lite channel restart pickle stores q0 at flowpath level, keyed by a
+        'feature_id' column, but routing is indexed by 'up_node_id', so every link
+        belonging to a flowpath takes that flowpath's value. Links whose fp_id is
+        absent from the restart (e.g. synthetic waterbody headwaters) are zero-filled
+        rather than left NaN. This lives here, not in nhf_routing, so the BMI gets the
+        same treatment as the CLI: both build the network through this class.
+        """
+        super().initial_warmstate_preprocess(from_files, value_dict)
+
+        if not (from_files and self.restart_parameters.get("lite_channel_restart_file", None)):
+            return
+
+        restart_file = self.restart_parameters["lite_channel_restart_file"]
+        restart = self._q0
+        missing = [c for c in ("feature_id", "qd0", "h0", "qu0", "ql0") if c not in restart]
+        if missing:
+            raise ValueError(
+                f"lite_channel_restart_file {restart_file} is missing column(s) {missing}. "
+                "An NHF channel restart holds fp-level q0 keyed by a 'feature_id' column."
+            )
+        if restart["feature_id"].duplicated().any():
+            raise ValueError(
+                f"lite_channel_restart_file {restart_file} has duplicate feature_id values, "
+                "so a flowpath would take whichever row the merge happened to pick."
+            )
+
+        q0 = pd.merge(
+            restart,
+            self._dataframe.reset_index()[["up_node_id", "fp_id"]],
+            left_on="feature_id",
+            right_on="fp_id",
+            how="right",
+        )
+
+        # Report what the zero-fill below is covering up. A restart that is
+        # truncated, or built against a different hydrofabric, otherwise proceeds as
+        # a nominal warm start while cold-starting real channels, which shows up only
+        # as an unexplained transient. Synthetic waterbody headwaters are expected to
+        # be absent, so they are counted separately rather than raising the alarm.
+        uncovered = q0.loc[q0["feature_id"].isna(), "fp_id"]
+        if not uncovered.empty:
+            synthetic = set(getattr(self, "div_reverse_lookup", {}) or {})
+            real = uncovered[~uncovered.isin(synthetic)]
+            if not real.empty:
+                LOG.warning(
+                    "channel restart %s covers %d of %d routing links; %d link(s) on "
+                    "%d real flowpath(s) are cold-started at zero, e.g. %s. Check that "
+                    "the restart matches this hydrofabric and time.",
+                    restart_file, len(q0) - len(uncovered), len(q0), len(real),
+                    real.nunique(), sorted(real.unique().tolist())[:5],
+                )
+            LOG.debug(
+                "channel restart: %d link(s) on synthetic waterbody headwaters "
+                "zero-filled as expected", len(uncovered) - len(real),
+            )
+
+        self._q0 = (
+            q0.set_index("up_node_id")[["qd0", "h0", "qu0", "ql0"]].fillna(0).astype("float32")
+        )
 
     def extract_waterbody_connections(rows, target_col, waterbody_null=-9999):
         """Extract waterbody mapping from dataframe.
@@ -158,16 +246,9 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         """
         return self._waterbody_connections
 
-    @property
-    def gages(self):
-        """
-        FIXME
-        """
-        return self._gages
-
-    @property
-    def great_lakes_climatology_df(self):
-        return pd.DataFrame()
+    @waterbody_connections.setter
+    def waterbody_connections(self, val):
+        self._waterbody_connections = val
 
     @property
     def waterbody_null(self):
@@ -178,20 +259,30 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         """Map outlet link_id -> fp_id for reindexing outputs."""
         return self._fp_outlet_crosswalk
 
-    def preprocess_network(self, flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, discretization_len_m=300.0):
+    @property
+    def diversion_da(self) -> dict:
+        """Map outlet node_id of each diverted flowpath to the gage reach node_id."""
+        return self._diversion_da
+
+    @diversion_da.setter
+    def diversion_da(self, val: dict) -> None:
+        self._diversion_da = val
+
+    def preprocess_network(self, flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, discretization_len_m=300.0, protected_fp_ids: set[int] | None = None):
         """Create routing links (self._dataframe) and weighting data to assign fp flows to links."""
         self._dataframe, self.nexus_remapping = discretize_flowpaths(
             flowpaths=flowpaths,
             virtual_flowpaths=virtual_flowpaths,
             reference_flowpaths=reference_flowpaths,
             discretization_len_m=discretization_len_m,
+            protected_fp_ids=protected_fp_ids,
         )
         self._connections = None  # Forces recomputation on first call to self.connections
         self._terminal_codes = set(self._dataframe["downstream"]).difference(self._dataframe.index)  # Outlets
-        self._build_fp_outlet_crosswalk(reference_flowpaths, virtual_flowpaths, self.nexus_remapping)
+        self._build_fp_outlet_crosswalk(reference_flowpaths, virtual_flowpaths)
         self._build_div_weighting_matrix(virtual_flowpaths, reference_flowpaths, self.nexus_remapping)
 
-    def _build_fp_outlet_crosswalk(self, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]):
+    def _build_fp_outlet_crosswalk(self, reference_flowpaths: pd.DataFrame, virtual_flowpaths: pd.DataFrame):
         """Build a mapping from routing link ID to fp_id to be used when writing results.
         
         N.B. There are a few strategies one could use to assign an outflow timeseries for a merged flowpath
@@ -203,8 +294,8 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         ids = reference_flowpaths["fp_id"].dropna().astype(int).unique()
         ids_merged = set(ids).difference(self._dataframe["fp_id"])
 
-        # Aggregate links in _dataframe to get one outlet per fp_id.  Assumes node IDs increase in downstream direction.
-        mapping_base = self._dataframe.reset_index().groupby("fp_id", sort=False)["up_node_id"].max().reset_index().astype(int)
+        # Aggregate links in _dataframe to get one outlet per fp_id.
+        mapping_base = self._dataframe.loc[self._dataframe.groupby("fp_id", sort=False)["segment_order"].idxmax()].reset_index()[["fp_id", "up_node_id"]].astype(int)
         link_2_fp = mapping_base.set_index("up_node_id")["fp_id"].to_dict()
         fp_2_link = mapping_base.set_index("fp_id")["up_node_id"].to_dict()
 
@@ -226,19 +317,22 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         cross_fp = cross_fp[cross_fp["fp_id_dn"] != cross_fp["fp_id_up"]]
 
         # Build merged fp → upstream fp mapping, then resolve chains for consecutive merges
-        merged_to_upstream = dict(zip(cross_fp["fp_id_dn"], cross_fp["fp_id_up"]))
-        merged_mapping = {}
+        merged_to_upstream = cross_fp.set_index("fp_id_dn")["fp_id_up"].groupby(level=0).agg(list)
+        merged_mapping = defaultdict(list)
         for merged_fp in ids_merged:
-            current = merged_fp
-            seen = set()
-            while current in ids_merged and current in merged_to_upstream:
-                if current in seen:
-                    break
-                seen.add(current)
-                current = merged_to_upstream[current]
-            if current in fp_2_link:
-                outlet_link = fp_2_link[current]
-                merged_mapping.setdefault(outlet_link, []).append(merged_fp)
+            q = list(merged_to_upstream.get(merged_fp, []))
+            visited = set()
+            while len(q) > 0:
+                cur = q.pop()
+                if cur in visited:
+                    continue
+                visited.add(cur)
+                us = merged_to_upstream.get(cur)
+                if us:
+                    q.extend(us)
+                else:
+                    merged_mapping[fp_2_link[cur]].append(merged_fp)
+
 
         # Put all results into the mapping dict
         self._fp_outlet_crosswalk = defaultdict(list)
@@ -248,7 +342,19 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # Append virtual mapping
         for k, v in merged_mapping.items():
             self._fp_outlet_crosswalk[k].extend(v)
-        
+
+        temporary_ids = set(self.div_reverse_lookup)
+        empty_links = []
+        for link_id, fp_ids in self._fp_outlet_crosswalk.items():
+            output_fp_ids = [fp_id for fp_id in fp_ids if fp_id not in temporary_ids]
+            if len(output_fp_ids) == len(fp_ids):
+                continue
+            if output_fp_ids:
+                self._fp_outlet_crosswalk[link_id] = output_fp_ids
+            else:
+                empty_links.append(link_id)
+        for link_id in empty_links:
+            del self._fp_outlet_crosswalk[link_id]
 
     def _build_div_weighting_matrix(self, virtual_flowpaths: pd.DataFrame, reference_flowpaths: pd.DataFrame, nexus_remapping: dict[int, int]) -> pd.DataFrame:
         """Create weights that can be used to expand div direct runoff into vfp direct runoff.
@@ -298,12 +404,49 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # Make weights
         self.weights = np.nan_to_num(vfp_map["percentage_area_contribution"].to_numpy())
 
-        # In case NHF percents per div don't sum to 100, distribute remainder evenly
-        groups = vfp_map["div_id"].astype("int64").to_numpy()
-        known_sum = np.bincount(groups, weights=self.weights)
-        vfp_count = np.bincount(groups)
-        share = np.divide(1 - known_sum, vfp_count, out=np.zeros_like(vfp_count, dtype=float), where=vfp_count!=0)
-        self.weights += share[groups]
+        # Check whether percentage_area_contribution sums close to 100 per div.
+        # Factorize div_id to dense 0..K-1 group codes before bincount. div_id may be
+        # a large, sparse identifier (NHF >= 1.2.0 ids are ~1e15), and bincount on the
+        # raw values would allocate a max(div_id)-sized array.
+        codes, uniq_divs = pd.factorize(vfp_map["div_id"].astype("int64").to_numpy(), sort=False)
+        known_sum = np.bincount(codes, weights=self.weights)
+        vfp_count = np.bincount(codes)
+
+        # A forced-routing headwater carries a temporary div holding a single vfp with
+        # a partial share, and that share is applied against the ORIGINAL div's runoff
+        # once div_id is mapped back a few lines below. Topping it up to 1.0 would hand
+        # the headwater the whole divide on top of what its siblings already take, so
+        # these are exempt from both the redistribution and the warning.
+        forced_ids = set(self.div_reverse_lookup.keys()) | set(self.div_reverse_lookup.values())
+        forced_group = np.fromiter(
+            (d in forced_ids for d in uniq_divs), dtype=bool, count=len(uniq_divs)
+        )
+
+        # Warn about divs whose weights don't sum near 1 and are not forced-routing headwaters
+        bad_mask = ~np.isclose(known_sum, 1.0, atol=0.01)
+        bad_divs = [uniq_divs[i] for i in np.where(bad_mask & ~forced_group)[0]]
+        if bad_divs:
+            LOG.warning(
+                "%d div_id(s) had percentage_area_contribution not summing to 100 "
+                "(and are not forced-routing headwaters); redistributed the shortfall "
+                "evenly across each divide's vfps, e.g. %s",
+                len(bad_divs), bad_divs[:10]
+            )
+
+        # In case NHF percents per div don't sum to 100, distribute the remainder
+        # evenly. Warning without redistributing means the divide's whole direct
+        # runoff is never routed: an 80% divide silently loses a fifth of its lateral
+        # inflow, everywhere downstream, for the whole run.
+        share = np.divide(
+            1 - known_sum,
+            vfp_count,
+            out=np.zeros_like(vfp_count, dtype=float),
+            where=(vfp_count != 0) & ~forced_group,
+        )
+        self.weights = self.weights + share[codes]
+
+        # Reverse temporary div_id assignment for any forced-routing headwaters
+        vfp_map["div_id"] = vfp_map["div_id"].replace(self.div_reverse_lookup)
 
         # Set class variables
         self.vfp_nex_ids = vfp_map["up_node_id"].to_numpy()
@@ -313,7 +456,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
     def _load_forcing(self, run: dict[str, Any]) -> pd.DataFrame:
         """Load channel forcing data for a run set."""
-        qlat_input_folder = run.get("qlat_input_folder", None)
+        qlat_input_folder = run.get("qlat_input_folder")
 
         if qlat_input_folder:
             qlat_input_folder = Path(qlat_input_folder)
@@ -386,9 +529,23 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
         # mapping catchments to flowpath IDs
         mapping_dict = dict(zip(
             self._dataframe['divide_id'].values,
-            self._dataframe.index.values
+            self._dataframe.index.values,
+            strict=True,
         ))
-        keys = np.array([mapping_dict[key] for key in ds_AET[col_idx].values])
+        # Vectorized divide_id -> flowpath-id lookup (replaces a per-element
+        # Python loop over the full forcing). map() yields NaN for any divide_id
+        # absent from the crosswalk; guard explicitly so a missing id still fails
+        # loudly (as the comprehension's KeyError did) instead of silently
+        # reindexing to zero at the reindex() below.
+        divide_ids = ds_AET[col_idx].values
+        mapped = pd.Series(divide_ids).map(mapping_dict)
+        if mapped.isna().any():
+            missing = pd.unique(divide_ids[mapped.isna().to_numpy()])
+            raise KeyError(
+                f"{len(missing)} ET divide_id(s) absent from the "
+                f"divide_id->flowpath crosswalk, e.g. {list(missing[:10])}"
+            )
+        keys = mapped.to_numpy()
 
         time_strings = pd.to_datetime(ds_AET.time.values).strftime('%Y%m%d%H%M')
         aet_df = pd.DataFrame(
@@ -465,3 +622,98 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             self._usace_lake_gage_crosswalk = inputs.get("usace_lake_gage_crosswalk", None)
             self._usbr_lake_gage_crosswalk = inputs.get("usbr_lake_gage_crosswalk", None)
             self._rfc_lake_gage_crosswalk = inputs.get("rfc_lake_gage_crosswalk", None)
+
+
+def _max_id(*columns: pd.Series) -> int:
+    """Largest id across *columns*, ignoring blanks and non-numeric entries."""
+    maxima = [
+        pd.to_numeric(c, errors="coerce").max()
+        for c in columns
+    ]
+    finite = [m for m in maxima if pd.notna(m)]
+    return int(max(finite)) if finite else 0
+
+
+def _force_headwater_routing(
+    virtual_flowpaths: pd.DataFrame,
+    reference_flowpaths: pd.DataFrame,
+    waterbodies: pd.DataFrame,
+) -> pd.DataFrame:
+    """Modify datasets such that routing can be performed on headwater virtual flowpaths.
+
+    This functionality is currently implemented for waterbodies on virtual
+    flowpaths, but it could be used for gages as well.
+    """
+    # Establish eligible headwaters.
+    forced_vfps = []
+    headwater_vfps = (
+        virtual_flowpaths[virtual_flowpaths["up_virtual_nex_id"].isna()][
+            "virtual_fp_id"
+        ]
+        .astype(int)
+        .values
+    )
+
+    # Force routing on headwater vfps with waterbodies
+    numeric_lake_id = pd.to_numeric(waterbodies[LAKE_ID_FIELD], errors="coerce")
+    _waterbodies = waterbodies.loc[numeric_lake_id.notna()].copy()
+    _required_lp_fields = list(set(WATERBODY_DF_FIELDS).difference(["fp_id"]))
+    waterbody_vfps = _waterbodies.dropna(subset=_required_lp_fields)["virtual_fp_id"].astype(int).values
+    forced_vfps.extend(list(set(headwater_vfps).intersection(waterbody_vfps)))
+
+    # In the future, could add more conditions here
+
+    ### Modify datasets ###
+    # Add new up_virtual_nex_id so that vfps won't be dropped in network refactor.
+    # Above BOTH nexus columns: an id taken from the upstream column alone can still
+    # be a real downstream nexus, which would wire a forced headwater onto it.
+    max_up_id = _max_id(
+        virtual_flowpaths["up_virtual_nex_id"], virtual_flowpaths["dn_virtual_nex_id"]
+    ) + 1
+    new_ids = np.arange(max_up_id, max_up_id + len(forced_vfps))
+    virtual_flowpaths.loc[
+        virtual_flowpaths["virtual_fp_id"].astype(int).isin(forced_vfps),
+        "up_virtual_nex_id",
+    ] = new_ids
+
+    # Assign each headwater its own temporary div_id.
+    # This must be done because the current conceptual model assumes that
+    # there confluences in a div. This comes up in _build_div_weighting_matrix
+    # Where having multiple options for up_node_id will confuse the lat
+    # placement.
+    # Allocate above every namespace the value is written into, not just div_id: the
+    # same number goes into the fp_id column two statements below. A synthetic id
+    # that collides with a real fp_id makes two flowpaths share an identifier, so
+    # the groupby("fp_id") that picks one outlet per flowpath merges them, and the
+    # crosswalk pruning that drops these temporary ids drops the real flowpath's
+    # output along with them. Being strictly above the ceiling is what rules that
+    # out, so there is nothing left to check afterwards.
+    max_div_id = _max_id(
+        reference_flowpaths["div_id"],
+        reference_flowpaths["fp_id"],
+        virtual_flowpaths["virtual_fp_id"],
+    ) + 1
+    new_div_mapping = {vfp: max_div_id + ind for ind, vfp in enumerate(forced_vfps)}
+    force_mask = reference_flowpaths["virtual_fp_id"].astype(int).isin(forced_vfps)
+    reference_flowpaths.loc[force_mask, "new_div_id"] = reference_flowpaths.loc[
+        force_mask, "virtual_fp_id"
+    ].map(new_div_mapping)
+    reference_flowpaths.loc[force_mask, "fp_id"] = reference_flowpaths.loc[
+        force_mask, "virtual_fp_id"
+    ].map(new_div_mapping)
+    div_reverse_lookup = (
+        reference_flowpaths.loc[force_mask, ["new_div_id", "div_id"]]
+        .astype(int)
+        .set_index("new_div_id")["div_id"]
+        .to_dict()
+    )
+    reference_flowpaths.loc[force_mask, "div_id"] = reference_flowpaths.loc[
+        force_mask, "new_div_id"
+    ]
+    reference_flowpaths = reference_flowpaths.drop(columns="new_div_id")
+
+    force_mask = waterbodies["virtual_fp_id"].astype("Int64").isin(forced_vfps)
+    waterbodies.loc[force_mask, "fp_id"] = waterbodies.loc[
+        force_mask, "virtual_fp_id"
+    ].map(new_div_mapping)
+    return virtual_flowpaths, reference_flowpaths, waterbodies, div_reverse_lookup

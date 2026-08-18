@@ -3,6 +3,7 @@
 from enum import IntEnum
 import numpy as np
 from itertools import chain
+from libc.stdint cimport int64_t
 from operator import itemgetter
 from array import array
 from numpy cimport ndarray  # TODO: Do we need to import numpy and ndarray separately?
@@ -90,10 +91,16 @@ cdef void compute_reach_kernel(float qup, float quc, int nreach, const float[:,:
     cdef reach.QVD *out = &rv
 
     cdef:
-        float dt, qlat, dx, bw, tw, twcc, n, ncc, cs, s0, qdp, velp, depthp
+        float dt, qlat, qdpp, dx, bw, tw, twcc, n, ncc, cs, s0, qdp, velp, depthp
         int i
 
     for i in range(nreach):
+        # Guard the pre-existing -Wmaybe-uninitialized on qlat/qdpp: the
+        # qlat_add_loc if/elif/elif chain has no else. A no-op for
+        # qlat_add_loc in {0,1,2} (immediately overwritten); deterministic
+        # otherwise.
+        qlat = 0
+        qdpp = 0
         if qlat_add_loc == 0:
             qlat = 0
             qup += input_buf[i, 0]
@@ -206,28 +213,28 @@ cpdef object compute_network_structured(
     const float[:] time_since_lastobs_init,
     const double da_decay_coefficient,
     const float[:,:] reservoir_usgs_obs,
-    const int[:] reservoir_usgs_wbody_idx,
+    const int64_t[:] reservoir_usgs_wbody_idx,
     const float[:] reservoir_usgs_time,
     const float[:] reservoir_usgs_update_time,
     const float[:] reservoir_usgs_prev_persisted_flow,
     const float[:] reservoir_usgs_persistence_update_time,
     const float[:] reservoir_usgs_persistence_index,
     const float[:,:] reservoir_usace_obs,
-    const int[:] reservoir_usace_wbody_idx,
+    const int64_t[:] reservoir_usace_wbody_idx,
     const float[:] reservoir_usace_time,
     const float[:] reservoir_usace_update_time,
     const float[:] reservoir_usace_prev_persisted_flow,
     const float[:] reservoir_usace_persistence_update_time,
     const float[:] reservoir_usace_persistence_index,
     const float[:,:] reservoir_usbr_obs,
-    const int[:] reservoir_usbr_wbody_idx,
+    const int64_t[:] reservoir_usbr_wbody_idx,
     const float[:] reservoir_usbr_time,
     const float[:] reservoir_usbr_update_time,
     const float[:] reservoir_usbr_prev_persisted_flow,
     const float[:] reservoir_usbr_persistence_update_time,
     const float[:] reservoir_usbr_persistence_index,
     const float[:,:] reservoir_rfc_obs,
-    const int[:] reservoir_rfc_wbody_idx,
+    const int64_t[:] reservoir_rfc_wbody_idx,
     const int[:] reservoir_rfc_totalCounts,
     list reservoir_rfc_file,
     const int[:] reservoir_rfc_use_forecast,
@@ -248,7 +255,8 @@ cpdef object compute_network_structured(
     bint return_courant=False,
     int da_check_gage = -1,
     bint from_files=True,
-    int qlat_add_loc = QlatLocation.MIDDLE
+    int qlat_add_loc = QlatLocation.MIDDLE,
+    dict diversion_da = {}
     ):
     
     """
@@ -262,6 +270,9 @@ cpdef object compute_network_structured(
         qlats (ndarray): a 2D array of qlat values (nodes x nsteps). The index must be shared with data_values
         initial_conditions (ndarray): an n x 3 array of initial conditions. n = nodes, column 1 = qu0, column 2 = qd0, column 3 = h0
         assume_short_ts (bool): Assume short time steps (quc = qup)
+        diversion_da (dict): maps segment position in data_idx (int) -> gage index in usgs_values (int).
+            Represents reaches where diverted flow (observed at a gage) must be subtracted from
+            MC-routed flow, e.g., Mississippi R. losses at the Old River Control Structure.
     Notes:
         Array dimensions are checked as a precondition to this method.
         This version creates python objects for segments and reaches,
@@ -279,6 +290,12 @@ cpdef object compute_network_structured(
     #define and initialize the final output array, add one extra time step for initial conditions
     cdef int qvd_ts_w = 4  # There are 4 values per timestep (corresponding to 4 columns per timestep)
     cdef np.ndarray[float, ndim=3] flowveldepth_nd = np.zeros((data_idx.shape[0], nsteps+1, qvd_ts_w), dtype='float32')
+    # Courant diagnostics (cn, ck, X per timestep), sized like flowveldepth so the
+    # same reshape/mask applies. Allocated only under return_courant -- at CONUS
+    # scale this is gigabytes nobody asked for otherwise.
+    cdef int courant_ts_w = 3
+    cdef np.ndarray[float, ndim=3] courant_nd = np.zeros(
+        (data_idx.shape[0] if return_courant else 0, nsteps+1, courant_ts_w), dtype='float32')
     #Make ndarrays from the mem views for convience of indexing...may be a better method
     cdef np.ndarray[float, ndim=2] data_array = np.asarray(data_values)
     cdef np.ndarray[float, ndim=2] init_array = np.asarray(initial_conditions)
@@ -412,6 +429,7 @@ cpdef object compute_network_structured(
     # replace initial conditions with gage observations, wherever available
     cdef int gages_size = usgs_positions.shape[0]
     cdef int gage_maxtimestep = usgs_values.shape[1]
+    cdef bint has_diversion = len(diversion_da) > 0
     cdef int gage_i, usgs_position_i
     cdef float a, da_decay_minutes, da_weighted_shift, replacement_val  # , original_val, lastobs_val,
     cdef float [:] lastobs_values, lastobs_times
@@ -438,16 +456,23 @@ cpdef object compute_network_structured(
             # TODO: Compare performance with math.isnan (imported for nogil...)
             if not np.isnan(usgs_values[gage_i, 0]):
                 flowveldepth_nd[usgs_position_i, 0, 0] = usgs_values[gage_i, 0]
+                # Seed lastobs from the t0 observation when none was provided;
+                # otherwise the first hour of every forcing loop ran uncorrected
+                # (lastobs = NaN passes the raw model value through). A real
+                # lastobs (file or restart) still takes precedence.
+                if np.isnan(lastobs_values[gage_i]):
+                    lastobs_values[gage_i] = usgs_values[gage_i, 0]
+                    lastobs_times[gage_i] = 0.0
 
     
     #---------------------------------------------------------------------------------------------
     #---------------------------------------------------------------------------------------------
 
     # reservoir id index arrays
-    cdef np.ndarray[int, ndim=1] usgs_idx  = np.asarray(reservoir_usgs_wbody_idx)
-    cdef np.ndarray[int, ndim=1] usace_idx = np.asarray(reservoir_usace_wbody_idx)
-    cdef np.ndarray[int, ndim=1] usbr_idx = np.asarray(reservoir_usbr_wbody_idx)
-    cdef np.ndarray[int, ndim=1] rfc_idx = np.asarray(reservoir_rfc_wbody_idx)
+    cdef np.ndarray[np.int64_t, ndim=1] usgs_idx  = np.asarray(reservoir_usgs_wbody_idx)
+    cdef np.ndarray[np.int64_t, ndim=1] usace_idx = np.asarray(reservoir_usace_wbody_idx)
+    cdef np.ndarray[np.int64_t, ndim=1] usbr_idx = np.asarray(reservoir_usbr_wbody_idx)
+    cdef np.ndarray[np.int64_t, ndim=1] rfc_idx = np.asarray(reservoir_rfc_wbody_idx)
 
     # reservoir update time arrays
     cdef np.ndarray[float, ndim=1] usgs_update_time  = np.asarray(reservoir_usgs_update_time)
@@ -499,7 +524,7 @@ cpdef object compute_network_structured(
         for idx, val in enumerate(tmp["results"]):
             flowveldepth_nd[fill_index, (idx//qvd_ts_w) + 1, idx%qvd_ts_w] = val
             if data_idx[fill_index]  in lake_numbers_col:
-                res_idx = binary_find(lake_numbers_col, [data_idx[fill_index]])
+                res_idx = binary_find(lake_numbers_col, [data_idx[fill_index]])[0]
                 flowveldepth_nd[fill_index, 0, 0] = wbody_parameters[res_idx, 9] # TODO ref dataframe column label
             else:
                 flowveldepth_nd[fill_index, 0, 0] = init_array[fill_index, 0] # initial flow condition
@@ -509,7 +534,12 @@ cpdef object compute_network_structured(
     #Init buffers
     lateral_flows = np.zeros( max_buff_size, dtype='float32' )
     buf_view = np.zeros( (max_buff_size, 14), dtype='float32')
-    out_buf = np.full( (max_buff_size, 3), -1, dtype='float32')
+    # 6 columns, not 3: compute_reach_kernel writes qdc/velc/depthc into 0..2 and,
+    # under return_courant, cn/ck/X into 3..5 with boundscheck off. A 3-wide buffer
+    # made the last row's Courant write an out-of-bounds heap write on the longest
+    # reach (a memory-safety fix; interior rows were overwritten before any read,
+    # so no numerical result changes).
+    out_buf = np.full( (max_buff_size, 6), -1, dtype='float32')
 
     cdef int num_reaches = len(reach_objects)
     #Dynamically allocate a C array of reach structs
@@ -522,6 +552,7 @@ cpdef object compute_network_structured(
     cdef _Reach* r
     #create a memory view of the ndarray
     cdef float[:,:,::1] flowveldepth = flowveldepth_nd
+    cdef float[:,:,::1] courant = courant_nd
     cdef np.ndarray[float, ndim=3] upstream_array = np.empty((data_idx.shape[0], nsteps+1, 1), dtype='float32')
     cdef float reservoir_outflow, reservoir_water_elevation
     cdef int id = 0
@@ -810,8 +841,24 @@ cpdef object compute_network_structured(
                 for _i in range(r.reach.mc_reach.num_segments):
                     segment = get_mc_segment(r, _i)
 
+                    # Courant diagnostics, straight through from the kernel's columns 3..5.
+                    # Guarded because courant_nd has zero rows unless return_courant is set.
+                    if return_courant:
+                        courant[segment.id, timestep, 0] = out_buf[_i, 3]
+                        courant[segment.id, timestep, 1] = out_buf[_i, 4]
+                        courant[segment.id, timestep, 2] = out_buf[_i, 5]
+
                     # Setting flow based on the output of MC - SSOUT - ELOSS
                     flowveldepth[segment.id, timestep, 0] = out_buf[_i, 0] - ssout - eloss_array[segment.id, qlat_ts_previous]
+
+                    # Subtract diverted flow for control-structure reaches (e.g., Old River).
+                    # has_diversion is hoisted out of the loops below: without it every
+                    # one of the ~1.1M CONUS segments pays a Python dict membership test
+                    # at every one of the ~288 timesteps on runs that divert nothing.
+                    if has_diversion and segment.id in diversion_da:
+                        gage_i = diversion_da[segment.id]
+                        if timestep < gage_maxtimestep and not isnan(usgs_values[gage_i, timestep]):
+                            flowveldepth[segment.id, timestep, 0] -= usgs_values[gage_i, timestep]
 
                     if reach_has_gage[i] == da_check_gage:
                         printf("segment.id: %ld\t", segment.id)
@@ -882,11 +929,18 @@ cpdef object compute_network_structured(
     output = np.asarray(flowveldepth[:,1:,:], dtype='float32')
     #do the same for the upstream_array
     output_upstream = np.asarray(upstream_array[:,1:,:], dtype='float32')
+    # Same slice/reshape/mask as flowveldepth; r[2] stays the long-standing 0
+    # placeholder when Courant output is not requested.
+    if return_courant:
+        courant_out = np.asarray(courant[:,1:,:], dtype='float32')
+        courant_out = courant_out.reshape(courant_out.shape[0], -1)[fill_index_mask]
+    else:
+        courant_out = 0
     #return np.asarray(data_idx, dtype=np.intp), np.asarray(flowveldepth.base.reshape(flowveldepth.shape[0], -1), dtype='float32')
     return (
         np.asarray(data_idx, dtype=np.intp)[fill_index_mask], 
         output.reshape(output.shape[0], -1)[fill_index_mask], 
-        0, 
+        courant_out, 
         (
             np.asarray([data_idx[usgs_position_i] for usgs_position_i in usgs_positions]), 
             np.asarray(lastobs_times), 

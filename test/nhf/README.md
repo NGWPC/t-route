@@ -1,57 +1,319 @@
-# NHF Tests Overview
+# NHF Tests
 
-Integrating the NHF schema with t-route required several new data-loaders to be defined. To ensure that those loaders were implemented correctly and that no regression occurs as the codebase advances, some new tests were developed. The tests fall into two categories: unit tests and end-to-end tests.
+Tests for the NHF (NextGen Hydrofabric) routing implementation and the t-route V5 CLI.
 
-Unit tests are in `test_flow_scaling_utils.py`, `test_flow_scaling.py`, and `test_nhf_utils.py`. These tests are run through the regular pytest interfaces.  For example, to run all tests, you would call `pytest test/nhf`.
+- **Integration tests** — full model runs, marked `integration` for pytest. Each test checks whether its input data exists and skips if not. Run `prep_tests.py` first.
+- **Unit tests** — partially broken, see below.
+- **Diagnostic suite** — standalone scripts for plotting and metrics. Not collected by pytest.
 
-End-to-end tests are more open-ended. The `make_forcing.py` script may be used to generate forcing data for NHF (or a subset of NHF) using NWM v3.0 retrospective data. Once forcing data is generated, t-route is run as normal.  `generate_diagnostics.py` may then be used to generate a suite of diagnostic metrics at a random subsample of reaches. `generate_diagnostics.py` may be run on t-route runs not generated with `make_forcing.py`.  For example, diagnostics can be generated for the run described in `test/nhf/conecuh_case/README.md`. The workflow below shows how an end-to-end test can be run for a December 2009 event in the Conecuh River basin.
-
-```consol
-cd test/nhf/conecuh_case/
-
-python ../make_forcing.py --start-time "2009-12-12 00:00" --end-time "2009-12-29 00:00" --case-id conecuh_case --hf-file 437343.gpkg --run-id retro
-
-python -m nwm_routing -V5 -f retro.yaml
-
-python ../generate_diagnostics.py conecuh_case/retro.yaml
-```
-
-**Note** If you need to subset the hydrofabric from a larger area to a specific watershed, you can use subset_nhf.py.  Example below for Conecuh
-```consol
-python ../subset_nhf.py --source-gpkg /path/to/big_nhf.gpkg" --out-gpkg domain/437343.gpkg --outlet-fp-id 437343
-```
-
-## `make_forcing.py` Details
-
-To make a new forcing dataset, you must start with the NHF (or a subset of the NHF) available. The command line arguments are as follows.
-
- - start-time: the start time for the simulation
- - end-time: the end time for the simulation
- - case-id: the name of the subdirectory of `test/nhf/` where the run data will be placed
- - hf-file: name of the NHF geopackage.  This file must be in the directory `test/nhf/{case-id}/domain`.
- - run-id: the ID of the run.  There may be multiple events per case that you want to run, and this field allows the events to be distinguished.
- - generate-reference-data: Whether or not to export retrospective data and USGS observed data at any gages in the NHF area.  If true, these data may be used in the `generate_diagnostics.py` to plot at-gage comparisons between the retrospective, observed, and NHF datasets.
- - add-runout-period: If true, an additional one half of the simulation time is added after end-time. In this time window all qlat values are set to zero. This option allows water to move through the network and will generally provide a better estimate of volume conservation.
-
-## Diagnostic Details
-
-To improve efficiency for large datasets, `generate_diagnostics.py` will run on a small sample of reaches within the modeled area. The number of samples is controlled via the --n-samples flag in the CLI call. Those reaches are selected with the following criteria.
-
-### Subset Selection Criteria
-
-- 5% of subset contains **shortest reaches**
-- 5% of subset contains **longest reaches**
-- 5% of subset contains **steepest reaches**
-- 5% of subset contains **shallowest reaches**
-- Balance remaining 80% of subset across **stream orders**
+BMI execution (`utils/run_bmi.py`) is currently broken.
 
 ---
 
-NB: Graphics below come from a subset of 500 reaches in the conecuh_case example.  Codebase at commit 4b3a98054daafa942fd94bf3de6d4783b207a4ca
+## Quick Start
+
+> [!WARNING]
+> Running these commands will create some indices in the flowpath table and update the lakes table directly on your source geopackage.  If any of your workflows depend on hashes of the source file, be warned!
+
+### 1 — Build test data
+
+```console
+# All tests (uses default NHF geopackage at /t-route/nhf_1.2.1.gpkg)
+python -m test.nhf.prep_tests
+
+# All tests with explicit NHF geopackage path
+python -m test.nhf.prep_tests --nhf-gpkg /path/to/nhf.gpkg
+
+# Specific tests only
+python -m test.nhf.prep_tests --nhf-gpkg /path/to/nhf.gpkg --test conecuh patuxent
+
+# Re-generate existing data
+python -m test.nhf.prep_tests --nhf-gpkg /path/to/nhf.gpkg --refresh
+```
+
+### 2 — Run tests
+
+```console
+# All tests (unit + integration)
+pytest test/nhf
+
+# Integration tests only
+pytest -m integration
+
+# Unit tests only
+pytest -m "not integration" test/nhf
+```
+
+### 3 — Plot test hydrographs (optional)
+
+```console
+# All test cases
+python -m test.nhf.plot_tests
+
+# Specific test cases
+python -m test.nhf.plot_tests --test conecuh ciss_creek
+```
+
+---
+
+## Integration Tests
+
+Each test runs t-route end-to-end and checks model output.  If the input data is missing the test is skipped — run `prep_tests.py` first.
+
+### Conecuh River (`conecuh_case`)
+
+Base NHF test, routing on an Alabama basin (USGS gage 02374250) for a December 2009 flood.
+
+Passing criteria: Peak flow at outlet is within acceptable range.
+
+| Parameter | Value |
+|---|---|
+| Outlet fp_id | `1270581653591645` |
+| Period | 2009-12-12 to 2009-12-29 |
+| Forcing | `retro` |
+| Lat / Lon | 31.06503,-87.06368 |
+
+---
+
+### Patuxent Reservoir (`patuxent`)
+
+Simple, well-gauged site for checking level-pool reservoir behaviour.
+
+Passing criteria: Peak outflow upstream and downstream of one of the reservoirs is within acceptable range.
+
+| Parameter | Value |
+|---|---|
+| Outlet fp_id | `1284196257037837` |
+| Period | 2011-09-05 to 2011-09-15 |
+| Forcing | `retro` |
+| Lat / Lon | 38.91812,-76.68369 |
+
+---
+
+### Ciss Creek (`ciss_creek`)
+
+Single flowpath with four reservoirs including two on the main flowpath and two on a shared virtual flowpath.  Checks
+
+ - level pool routing is ocurring on virtual flowpaths
+ - many reservoirs will route when on the same flowpath or virtual flowpath
+ - lakeout file is usable
+
+Passing criteria: Peak outflow is within acceptable range.
+
+| Parameter | Value |
+|---|---|
+| Outlet fp_id | `1288454913281725` |
+| Period | 2000-01-01 to 2000-01-03 |
+| Forcing | `pulse` |
+| Lat / Lon | 46.26594,-69.58566 |
+
+---
+
+### Great Lakes (`great_lakes`)
+
+DA-forced outflows from four fp_id-bearing Great Lakes (Superior, Huron-Michigan, Erie, Ontario). Uses USGS timeslice files, Canadian timeslice files, and a Lake Ontario outflow CSV. Checks that forced values propagate correctly downstream. A domain is committed to the repo and runs as-is; use `prep_tests.py --test great_lakes --refresh` with a newer NHF geopackage to regenerate.
+
+Passing criteria: Flows at outlets of lakes match DA values very closely
+
+| Parameter | Value |
+|---|---|
+| Lake fp_ids | `1278348162056612` (Superior), `1276364270499315` (Huron-Michigan), `1286192735893685` (Erie), `1287248237297035` (Ontario) |
+| Period | 2000-01-01 to 2000-01-03 |
+| Forcing | Zero qlat + USGS/Canada DA timeslice files + Lake Ontario outflow CSV |
+
+---
+
+### Four Lakes (`four_lakes`)
+
+Runs all four reservoir DA types in one shot: USGS persistence (type 2), USACE persistence (type 3), RFC time-series (type 4), USBR persistence (type 7). `prep_tests.py` generates synthetic constant-flow DA files. The test checks that the immediately-downstream reach of each reservoir carries the expected outflow. This test also tests the lakeout functionality.
+
+Passing criteria: Flows at outlets of lakes (which have been forced low) match DA values very closely
+
+| Parameter | Value |
+|---|---|
+| Outlet fp_id | `1276182780176988` |
+| Period | 2020-01-01 00:00 to 01:00 |
+| Forcing | Constant qlat + synthetic DA files |
+| Lat / Lon | 42.90326,-89.21309 |
+
+---
+
+## Unit Tests
+
+| File | Coverage |
+|---|---|
+| `test_flow_scaling.py` | Catchment discharge distribution to NHF links |
+| `test_flow_scaling_utils.py` | Flow scaling utility functions (`expand_flow_scaling_to_flowveldepth`, `merge_routing_and_nonrouting_results`, `create_nonrouting_run_result`) |
+| `test_nhf_utils.py` | NHF network topology utilities (`build_downstream_connections`, `build_upstream_terminal`, `find_headwaters`, `find_tailwaters`, `validate_connections`) |
+
+**`test_flow_scaling.py` is currently broken.** `distribute_catchment_discharge` was removed from `troute.nhf_discretize` and the tests were not updated. `test_flow_scaling.py` will fail at import until this is fixed.
+
+---
+
+## Diagnostic Suite
+
+`utils/generate_diagnostics.py` computes a standard set of hydraulic metrics for any completed run. It exists because raw NetCDF output is hard to QC — routing bugs often produce reasonable-looking hydrographs while quietly violating volume conservation or generating bad Courant numbers.
+
+```console
+python test/nhf/utils/generate_diagnostics.py -f /path/to/run.yaml
+python test/nhf/utils/generate_diagnostics.py -f /path/to/run.yaml --n-samples 500
+```
+
+See [Diagnostic Suite Specifics](#diagnostic-suite-specifics) for metric details.
+
+---
+
+# CLI Reference
+
+## `prep_tests.py`
+
+Builds test input data without running the tests. Skips existing outputs unless `--refresh` is passed.
+
+```
+python -m test.nhf.prep_tests [OPTIONS]
+
+Options:
+  --nhf-gpkg PATH        NHF geopackage path (default: /t-route/nhf_1.2.1.gpkg).
+  --test NAME [NAME ...] Which tests to prep. Default: all.
+                         Choices: conecuh patuxent ciss_creek great_lakes
+                                  four_lakes
+  --refresh              Regenerate even if outputs already exist.
+```
+
+## `plot_tests.py`
+
+Generates hydrograph PNGs for every reach monitored by each test case's `PEAK_BOUNDS`.
+
+```
+python -m test.nhf.plot_tests [OPTIONS]
+
+Options:
+  --test NAME [NAME ...] Which tests to plot. Default: all.
+                         Choices: conecuh patuxent ciss_creek great_lakes
+                                  four_lakes
+```
+
+## `utils/subset_nhf.py`
+
+Pulls all NHF components upstream of an outlet flowpath into a new geopackage. Called by `prep_tests.py` automatically.
+
+```
+python test/nhf/utils/subset_nhf.py [OPTIONS]
+
+Options:
+  --source-gpkg PATH     Source NHF geopackage.
+  --out-gpkg PATH        Output geopackage path.
+  --outlet-fp-id INT     fp_id of the outlet flowpath.
+```
+
+## `utils/make_forcing.py`
+
+Writes per-timestep lateral inflow CSVs for a given case.
+
+```
+python test/nhf/utils/make_forcing.py [OPTIONS]
+
+Options:
+  --hf-path PATH         Path to the NHF GeoPackage.
+  --forcing-dir PATH     Directory to write per-timestep forcing CSVs.
+  --start-time STR       Simulation start (e.g. "2009-12-12 00:00").
+  --end-time STR         Simulation end.
+  --forcing-mode MODE    retro | pulse | constant  (default: retro)
+  --peak-qlat FLOAT      Peak discharge m³/s for pulse mode (default: 10000).
+  --constant-qlat FLOAT  Constant qlat m³/s for constant mode (default: 1.0).
+  --runout-period INT    Hours of zero-qlat runout to append after end-time (default: 0).
+```
+
+| Mode | Description |
+|---|---|
+| `retro` | Hourly lateral inflows from the NWM v3.0 retrospective Zarr on S3. Requires a `reference_flowpaths` layer in the gpkg. |
+| `pulse` | Synthetic unit-hydrograph pulse scaled to `--peak-qlat`, applied uniformly to all reaches. Shape is resampled to fit `[start-time, end-time]`. |
+| `constant` | Flat `--constant-qlat` on every reach for every timestep. |
+
+## `utils/make_configs.py`
+
+Generates a t-route YAML configuration file from a `Config` dataclass. Primarily used internally by test setup functions.
+
+```
+python test/nhf/utils/make_configs.py [OPTIONS]
+
+Options:
+  --root-dir PATH        Root directory for the test case.
+  --start-time STR       Simulation start time.
+  --end-time STR         Simulation end time.
+```
+
+## `utils/make_da.py`
+
+Generates synthetic DA (data assimilation) forcing files. Supports persistence DA types (USGS, USACE, USBR, Canada/WSC) as 15-minute timeslice NetCDFs, and RFC forecast files as hourly per-station NetCDFs.
+
+```
+python test/nhf/utils/make_da.py [OPTIONS]
+
+Options:
+  --da-type TYPE         DA type: usgs | usace | usbr | canada | rfc.
+  --station-ids ID ...   One or more station identifiers.
+  --start-time STR       Simulation start time.
+  --end-time STR         Simulation end time.
+  --output-dir PATH      Root output directory (default: reservoir_da/).
+  --discharge FLOAT      Constant discharge value m³/s (default: 1.0).
+  --discharge-quality INT  Quality flag (default: 100).
+  --rfc-lookback-hours INT  Hours of observed lookback in RFC files (default: 28).
+  --rfc-forecast-hours INT  Hours of synthetic forecast in RFC files (default: 12).
+```
+
+## `utils/generate_reference_data.py`
+
+Fetches NWM v3.0 retrospective streamflow and USGS observed discharge for all active gages in a hydrofabric. Writes `gage_reference_data.nc`.
+
+```
+python test/nhf/utils/generate_reference_data.py [OPTIONS]
+
+Options:
+  --config PATH          Path to the t-route config YAML.
+  --output-dir PATH      Directory to write gage_reference_data.nc.
+  --dv-only              Skip instantaneous-value (IV) requests; derive all values
+                         from daily means interpolated to the retrospective time index.
+```
+
+## `utils/generate_diagnostics.py`
+
+Computes hydraulic QC metrics on a random sample of reaches from a completed run. See [Diagnostic Suite Specifics](#diagnostic-suite-specifics).
+
+```
+python test/nhf/utils/generate_diagnostics.py [OPTIONS]
+
+Options:
+  -f, --file PATH        Path to t-route config YAML.
+  -n, --n-samples INT    Number of flowpaths to sample (default: 500).
+```
+
+## `utils/run_bmi.py`
+
+Runs a t-route config file through the BMI interface. **Currently broken.**
+
+```
+python test/nhf/utils/run_bmi.py [OPTIONS]
+
+Options:
+  --config-file PATH     Path to the config YAML.
+```
+
+---
+
+# Diagnostic Suite Specifics
+
+`generate_diagnostics.py` runs on a random sample of reaches for efficiency. Sample size is set with `--n-samples`. Reaches are drawn as follows:
+
+- 5% shortest reaches
+- 5% longest reaches
+- 5% steepest reaches
+- 5% shallowest reaches
+- remaining 80% distributed across stream orders
+
+NB: example graphics below are from a 500-reach sample of the conecuh_case run at commit 4b3a98054daafa942fd94bf3de6d4783b207a4ca.
 
 ### Per-Reach Data Collection
-
-For each reach, record:
 
 - Upstream inflows ($Q_{us}$)
 - Lateral inflows ($Q_{lat}$)
@@ -263,17 +525,3 @@ The histogram of this ratio can be used to determine how well the NHF discretiza
 ##### Histogram + eCDF of $dx$ / Ponce-Optimal Reach Length
 
 ![Reach Length Ratio Histogram](diagnostic_example_images/dx_ratio_distribution.png)
-
-
-## Running the CONUS case
-
-To run t-route on NHF at the CONUS scale, use the example workflow below. This test runs t-route for a portion of the 2022 US summer floods over all of CONUS.
-
-```console
-cd test/nhf/conus
-mkdir domain
-ln -s /path/to/your/nhf.gpkg domain/nhf.gpkg
-python ../make_forcing.py --start-time "2022-07-25 00:00" --end-time "2022-07-26 12:00" --case-id conus --hf-file nhf.gpkg --run-id retro
-python -m nwm_routing -V5 -f retro.yaml
-python ../generate_diagnostics.py --file retro.yaml 
-```

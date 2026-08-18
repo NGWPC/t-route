@@ -430,7 +430,7 @@ def _read_config_file(custom_input_file): #TODO: Update this function, I dont' t
         data = yaml.load(custom_file, Loader=yaml.SafeLoader)
 
     troute_configuration = Config(**data)
-    config_dict = troute_configuration.dict()
+    config_dict = troute_configuration.model_dump()
 
     log_parameters = config_dict.get('log_parameters')
     compute_parameters = config_dict.get('compute_parameters')
