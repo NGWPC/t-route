@@ -110,13 +110,18 @@ def build_da_sets(da_params, run_sets, t0):
         if LakeOntario_outflow:
             LakeOntario_outflow = pathlib.Path(LakeOntario_outflow)
 
+        # timedelta of TimeSlice data. The convention is 15 minutes, and the filenames
+        # say so, but an observation record can arrive at any cadence: hourly USGS data in
+        # 15 minute-named files is common. Read the cadence from the directory rather than
+        # assuming it, or three names in four are enumerated, missed and warned about.
+        dt_timeslice = _timeslice_cadence(
+            usgs_timeslices_folder or usace_timeslices_folder or usbr_timeslices_folder
+        )
+
         # the number of timeslice files appended to the front- and back-ends
         # of the TimeSlice file interpolation stack
         pad_hours = da_params.get("timeslice_lookback_hours",0)
-        timeslice_pad = pad_hours * 4 # number of 15 minute TimeSlices in the pad
-
-        # timedelta of TimeSlice data - typically 15 minutes
-        dt_timeslice = timedelta(minutes = 15)
+        timeslice_pad = int(round(pad_hours * 3600 / dt_timeslice.total_seconds()))
 
         da_sets = [] # initialize list to store TimeSlice set lists
 
@@ -130,7 +135,7 @@ def build_da_sets(da_params, run_sets, t0):
             # timestamps of TimeSlice files desired for run set i
             timestamps = pd.date_range(
                 t0 - dt_timeslice * timeslice_pad,
-                run_sets[i]['final_timestamp'] + dt_timeslice * 4,
+                run_sets[i]['final_timestamp'] + _timeslice_lead_out(dt_timeslice),
                 freq=dt_timeslice
             )
 
@@ -194,6 +199,59 @@ def build_da_sets(da_params, run_sets, t0):
             t0 = run_sets[i]['final_timestamp']
             
     return da_sets
+
+# Lead-out past the end of a run set, so the interpolator brackets the final model
+# timestep. One hour, which is what the old ``dt_timeslice * 4`` meant at the assumed
+# 15 minute cadence. Wall-clock like ``timeslice_lookback_hours`` at the front.
+_TIMESLICE_LEAD_OUT = timedelta(hours=1)
+
+
+def _timeslice_lead_out(dt_timeslice):
+    """Lead-out at *dt_timeslice* spacing, never less than one file.
+
+    A cadence coarser than the lead-out would round down to zero files past the end of
+    the run, leaving the last timestep nothing to interpolate against.
+    """
+    return max(_TIMESLICE_LEAD_OUT, dt_timeslice)
+
+
+def _timeslice_cadence(timeslices_folder, default=timedelta(minutes=15)):
+    """The spacing between the TimeSlice files in *timeslices_folder*.
+
+    Taken as the most common gap between consecutive file timestamps, which is robust to
+    a missing file here and there. Falls back to *default* when the directory is absent,
+    empty or holds a single file, so callers behave as they did before.
+
+    Arguments
+    ---------
+    - timeslices_folder (pathlib.PosixPath): TimeSlice directory
+    - default                   (timedelta): cadence to assume when it cannot be measured
+
+    Returns
+    -------
+    - cadence (timedelta)
+    """
+    if not timeslices_folder:
+        return default
+    folder = pathlib.Path(timeslices_folder)
+    if not folder.is_dir():
+        return default
+
+    stamps = []
+    for f in folder.glob("*TimeSlice.ncdf"):
+        try:
+            stamps.append(datetime.strptime(f.name[:19], "%Y-%m-%d_%H:%M:%S"))
+        except ValueError:
+            continue
+    if len(stamps) < 2:
+        return default
+
+    stamps.sort()
+    gaps = [b - a for a, b in zip(stamps, stamps[1:]) if b > a]
+    if not gaps:
+        return default
+    return max(set(gaps), key=gaps.count)
+
 
 def _check_timeslice_exists(filenames, timeslices_folder):
     """
