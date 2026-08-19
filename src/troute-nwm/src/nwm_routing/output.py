@@ -255,6 +255,13 @@ def nwm_output_generator(
             q_df = flow_df.iloc[:,0::3]
             d_df = flow_df.iloc[:,2::3]
 
+        # Reservoir rows carry water-surface elevation in the depth slot, so publish
+        # a depth for them. Must run after LAKEOUT takes its copy above, which keeps
+        # the elevation, and before the rename and remap below. In place is safe: the
+        # ql-drop above is a non-contiguous column drop, so the frame cannot be a view
+        # onto the kernel arrays.
+        _convert_waterbody_depth(flowveldepth, waterbodies_df)
+
         # replace waterbody lake_ids with outlet link ids
         if (link_lake_crosswalk):
             flowveldepth = flowveldepth.rename(index=link_lake_crosswalk)
@@ -622,6 +629,42 @@ def nwm_output_generator(
         )
 
         LOG.debug("parity check complete in %s seconds." % (time.time() - start_time))
+
+
+def _convert_waterbody_depth(
+    flowveldepth: pd.DataFrame, waterbodies_df: pd.DataFrame
+) -> None:
+    """Rewrite reservoir rows' depth columns from elevation to stage above the outlet.
+
+    Mutates *flowveldepth* in place. A no-op without waterbodies or ``OrificeE``.
+
+    The value is depth above the orifice invert, not depth to the bed: the hydrofabric
+    has no bed elevation, and the invert is the datum level pool treats as an empty
+    lake. Clamped at zero, since reservoir DA can drive a lake below its own invert.
+    """
+    if waterbodies_df.empty or "OrificeE" not in waterbodies_df.columns:
+        return
+
+    lake_ids = waterbodies_df.index.intersection(flowveldepth.index)
+    if lake_ids.empty:
+        return
+
+    d_cols = [c for c in flowveldepth.columns if c[1] == "d"]
+    if not d_cols:
+        return
+
+    invert = waterbodies_df.loc[lake_ids, "OrificeE"].to_numpy(dtype="float32")
+    stage = flowveldepth.loc[lake_ids, d_cols].to_numpy(dtype="float32") - invert[:, None]
+
+    n_below = int((stage < 0).any(axis=1).sum())
+    if n_below:
+        LOG.warning(
+            "waterbody depth: %d reservoir(s) sat below their orifice invert at some "
+            "timestep (deepest %.2f m below); published depth clamped to 0",
+            n_below, float(-stage.min()),
+        )
+
+    flowveldepth.loc[lake_ids, d_cols] = np.maximum(stage, 0.0)
 
 
 def remap_outputs(flowveldepth: pd.DataFrame, fp_outlet_crosswalk: dict[int, int]) -> pd.DataFrame:

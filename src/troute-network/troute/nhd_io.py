@@ -2385,7 +2385,13 @@ def write_flowveldepth_netcdf(stream_output_directory, file_name,
             {
                 'long_name': 'Depth',
                 'units': 'm',
-                'missing_value': -9999.0
+                'missing_value': -9999.0,
+                # On a flowpath a reservoir occupies, this is stage above the outlet
+                # invert, not depth to the bed. See _convert_waterbody_depth.
+                'comment': (
+                    'channel flow depth; on reservoir features, water surface '
+                    'height above the orifice invert'
+                ),
             }
         )
         
