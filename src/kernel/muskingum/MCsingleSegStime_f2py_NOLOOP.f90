@@ -39,7 +39,7 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
 
     integer :: iter
     integer :: maxiter, tries
-    logical :: converged
+    logical :: converged, stalled
     real(prec) :: mindepth, aerror, rerror
     real(prec) :: R, twl, h_1, h, h_0, Qj, Qj_0
 
@@ -106,6 +106,7 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
         !* Qj_0 = 0 is the reference's (MUSKINGCUNGE.f90 label 110), lost in the
         !* port; interval 1 forms X from it on the first pass. The rest are here
         !* so every intent(inout) actual is defined before its first use.
+        stalled = .false.
         Qj_0 = 0.0_prec
         Qj   = 0.0_prec
         C1   = 0.0_prec
@@ -137,14 +138,19 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
                 sqrt_s0, sqrt_1pz2, sqrt_s0_over_n, sqrt_s0_over_ncc, &
                 two_sqrt_1pz2, bw_plus_2bfdz)
 
+            !* Neither branch may set h_1 = h: a zero step reads as convergence
+            !* below, which publishes the iterate as if it were a root.
             if(Qj_0-Qj .ne. 0.0_prec) then
                 h_1 = h - ((Qj * (h_0 - h))/(Qj_0 - Qj)) !update h, 3rd estimate
 
+                !* Negative step means the root is below the bracket, so halve
+                !* towards zero; expanding h upwards moved away from it.
                 if(h_1 .lt. 0.0_prec) then
-                    h_1 = h
+                    h_1 = 0.5_prec * h
                 endif
             else
-                h_1 = h
+                h_1 = h            !* degenerate slope; repeating it reproduces it
+                stalled = .true.
             endif
 
             if(h .gt. 0.0_prec) then
@@ -163,14 +169,18 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
             if( h .lt. mindepth) then  ! exit loop if depth is very small
                 goto 111
             endif
+            if( stalled ) then
+                goto 111
+            endif
         end do !*do while (rerror .gt. 0.01 .and. ....
 111    continue
 
         !* iter alone is not failure: the loop can meet its tolerance on the
-        !* same pass that takes iter to maxiter.
-        converged = (rerror .le. 0.01_prec) .or. (aerror .lt. mindepth)
+        !* same pass that takes iter to maxiter. A stall is never convergence.
+        converged = (.not. stalled) .and. &
+            ((rerror .le. 0.01_prec) .or. (aerror .lt. mindepth))
 
-        if(.not. converged .and. iter .ge. maxiter) then
+        if(.not. converged .and. (stalled .or. iter .ge. maxiter)) then
             tries = tries + 1
 
             if(tries .le. 4) then  ! expand the search space
