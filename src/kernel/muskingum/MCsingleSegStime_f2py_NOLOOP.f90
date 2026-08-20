@@ -502,6 +502,14 @@ subroutine hydraulic_geometry(h, bfd, bw, twcc, z, sqrt_1pz2, &
         R_loc       = AREA_loc / WP_loc
     else
         ! Floodplain (compound channel) case.
+        !* KNOWN LIMITATION, inherited from NWM (MUSKINGCUNGE.f90) and deliberately
+        !* not changed here: WPC below carries the whole floodplain top width at zero
+        !* floodplain area, so one composite R makes discharge DROP 77.3% as depth
+        !* crosses bankfull, which is a constant of the NHF parameterization
+        !* (ncc/n = 2, twcc/tw = 3 for all 1.1M CONUS flowpaths). The normal-flow
+        !* curve is therefore non-monotone and the depth solve ill-posed near
+        !* bankfull. Fixing it means summing conveyance per subsection, which
+        !* diverges from the reference model.
         h_gt_bf_loc = h - bfd
         h_lt_bf_loc = bfd
         AREA_loc    = (bw + bfd * z) * bfd
