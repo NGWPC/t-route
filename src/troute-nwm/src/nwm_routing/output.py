@@ -308,6 +308,18 @@ def nwm_output_generator(
         
         nudge = np.concatenate([r[9] for r in results])  # Corresponds to the ordering of the outflows from line 843 troute/routing/fast_reach/mc_reach.pyx
         usgs_positions_id = np.concatenate([r[3][0] for r in results])
+        if fp_outlet_crosswalk:
+            # These are routing link ids, but flowveldepth has already been remapped
+            # to fp ids, so every row missed and the whole variable was written as the
+            # fill value. Carry the gage rows over to the ids they are published under.
+            nudge_ids, nudge_rows = [], []
+            for row, link_id in enumerate(usgs_positions_id):
+                for fp_id in fp_outlet_crosswalk.get(int(link_id), ()):
+                    nudge_ids.append(fp_id)
+                    nudge_rows.append(row)
+            if nudge_ids:
+                nudge = nudge[nudge_rows]
+                usgs_positions_id = np.asarray(nudge_ids)
         nhd_io.write_flowveldepth(
             Path(stream_output_directory),
             stream_output_mask, 

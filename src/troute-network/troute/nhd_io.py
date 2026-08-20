@@ -2575,10 +2575,18 @@ def write_flowveldepth(
         # Drop the first column
         nudge = nudge[:, 1:]
     nudge_df = pd.DataFrame(data=nudge, index=usgs_positions_id).iloc[:,ind]
-    empty_ids = list(set(flowveldepth.index).difference(set(nudge_df.index)))
     pd.set_option('future.no_silent_downcasting', True)
-    empty_df = pd.DataFrame(index=empty_ids, columns=nudge_df.columns).fillna(-9999.0)
-    nudge_df = pd.concat([nudge_df, empty_df]).loc[flowveldepth.index]
+    # updated_flowveldepth has already made the index a (featureID, Type) MultiIndex,
+    # so matching nudge on it directly never overlapped and every gage row was replaced
+    # by the fill value. Line the two up on featureID.
+    feature_ids = (
+        flowveldepth.index.get_level_values("featureID")
+        if isinstance(flowveldepth.index, pd.MultiIndex)
+        else flowveldepth.index
+    )
+    nudge_df = nudge_df[~nudge_df.index.duplicated(keep="first")].reindex(feature_ids)
+    nudge_df = nudge_df.fillna(-9999.0)
+    nudge_df.index = flowveldepth.index
     file_name_time = t0
     jobs = []
     
