@@ -39,6 +39,7 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
 
     integer :: iter
     integer :: maxiter, tries
+    logical :: converged
     real(prec) :: mindepth, aerror, rerror
     real(prec) :: R, twl, h_1, h, h_0, Qj, Qj_0
 
@@ -165,7 +166,11 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
         end do !*do while (rerror .gt. 0.01 .and. ....
 111    continue
 
-        if(iter .ge. maxiter) then
+        !* iter alone is not failure: the loop can meet its tolerance on the
+        !* same pass that takes iter to maxiter.
+        converged = (rerror .le. 0.01_prec) .or. (aerror .lt. mindepth)
+
+        if(.not. converged .and. iter .ge. maxiter) then
             tries = tries + 1
 
             if(tries .le. 4) then  ! expand the search space
@@ -174,6 +179,19 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
                 maxiter = maxiter + 25 !and increase the number of allowable iterations
                 goto 110
             endif
+
+            !* Search abandoned. Publishing h returns it as next step's depthp,
+            !* re-seeding the same failing search, so hold the previous depth.
+            !* Both intervals, in order: interval 2 forms X from interval 1's C1..C4.
+            h = max(depthp, mindepth)
+            call secant2_h(z, bw, bfd, twcc, s0, n, ncc, dt, dx, &
+                qdp, ql, qup, quc, h, 1, Qj_0, C1, C2, C3, C4, X, &
+                sqrt_s0, sqrt_1pz2, sqrt_s0_over_n, sqrt_s0_over_ncc, &
+                two_sqrt_1pz2, bw_plus_2bfdz)
+            call secant2_h(z, bw, bfd, twcc, s0, n, ncc, dt, dx, &
+                qdp, ql, qup, quc, h, 2, Qj, C1, C2, C3, C4, X, &
+                sqrt_s0, sqrt_1pz2, sqrt_s0_over_n, sqrt_s0_over_ncc, &
+                two_sqrt_1pz2, bw_plus_2bfdz)
                     !print*, "Musk Cunge WARNING: Failure to converge"
                     !print*, 'RouteLink index:', idx + linkls_s(my_id+1) - 1
                     !print*, "id,err,iters,tries",PC*ncc))/(WP+WPC))) * &
