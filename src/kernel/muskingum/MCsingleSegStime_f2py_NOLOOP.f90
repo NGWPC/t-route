@@ -102,6 +102,16 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
         .or. qdp .gt. 0.0_prec .or. qdc .gt. 0.0_prec) then  !only solve if there's water to flux
 110 continue
 
+        !* Qj_0 = 0 is the reference's (MUSKINGCUNGE.f90 label 110), lost in the
+        !* port; interval 1 forms X from it on the first pass. The rest are here
+        !* so every intent(inout) actual is defined before its first use.
+        Qj_0 = 0.0_prec
+        Qj   = 0.0_prec
+        C1   = 0.0_prec
+        C2   = 0.0_prec
+        C3   = 0.0_prec
+        C4   = 0.0_prec
+
         !Uncomment next two lines for old initialization
         !WPC = 0.0_prec
         !AREAC = 0.0_prec
@@ -249,7 +259,12 @@ subroutine secant2_h(z, bw, bfd, twcc, s0, n, ncc, dt, dx, &
     ! constant across the Secant iteration; pre-computed by the caller.
     real(prec), intent(in) :: sqrt_s0_over_n, sqrt_s0_over_ncc
     real(prec), intent(in) :: two_sqrt_1pz2, bw_plus_2bfdz
-    real(prec), intent(out) :: Qj, C1, C2, C3, C4, X
+    !* NOT intent(out): interval 1 reads Qj, and interval 2 reads C1..C4, before
+    !* assigning them. Declaring them intent(out) let the compiler treat the
+    !* caller's stores as dead and delete them, so the reads picked up whatever
+    !* the stack held and the published depth depended on call order.
+    real(prec), intent(inout) :: Qj, C1, C2, C3, C4
+    real(prec), intent(out) :: X
     integer,    intent(in) :: interval
 
     real(prec) :: twl, AREA, WP, R, r_23, s3
