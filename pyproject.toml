@@ -39,6 +39,7 @@ testpaths = ["test"]
 addopts = "--continue-on-collection-errors"
 markers = [
     "integration: end-to-end NHF model runs (require preprocessed data; run with -m integration)",
+    "endtoend: full nwm_routing CLI runs on the committed LowerColorado data (no external data needed)",
 ]
 filterwarnings = [
     # Third-party warnings, nothing in t-route can act on it.
@@ -158,3 +159,10 @@ reportUnknownLambdaType = false
 reportUnknownMemberType = false
 reportUnknownParameterType = false
 reportUnknownVariableType = false
+
+[tool.fortitude]
+include = ["src/**/*.f90"]
+
+[tool.fortitude.check]
+ignore = ["S001", "S101", "S241", "MOD021", "S231", "C003", "C131"]
+line-length = 120

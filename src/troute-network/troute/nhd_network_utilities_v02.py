@@ -10,6 +10,7 @@ import netCDF4
 from joblib import delayed, Parallel
 
 import troute.nhd_io as nhd_io
+from troute.hyfeature_network_utilities import _timeslice_cadence, _timeslice_lead_out
 import troute.nhd_network as nhd_network
 
 LOG = logging.getLogger("TROUTE")
@@ -564,13 +565,17 @@ def build_da_sets(da_params, run_sets, t0):
         if usace_timeslices_folder:
             usace_timeslices_folder = pathlib.Path(usace_timeslices_folder)
         
+        # Measured, not assumed. Shares the helper with the -V5/NHF copy of
+        # build_da_sets so the two cannot drift. Falls back to 15 minutes, the
+        # canonical NWM cadence this path assumed.
+        dt_timeslice = _timeslice_cadence(
+            usgs_timeslices_folder or usace_timeslices_folder
+        )
+
         # the number of timeslice files appended to the front- and back-ends
         # of the TimeSlice file interpolation stack
         pad_hours = da_params.get("timeslice_lookback_hours",0)
-        timeslice_pad = pad_hours * 4 # number of 15 minute TimeSlices in the pad
-
-        # timedelta of TimeSlice data - typically 15 minutes
-        dt_timeslice = timedelta(minutes = 15)
+        timeslice_pad = int(round(pad_hours * 3600 / dt_timeslice.total_seconds()))
 
         da_sets = [] # initialize list to store TimeSlice set lists
 
@@ -584,7 +589,7 @@ def build_da_sets(da_params, run_sets, t0):
             # timestamps of TimeSlice files desired for run set i
             timestamps = pd.date_range(
                 t0 - dt_timeslice * timeslice_pad,
-                run_sets[i]['final_timestamp'] + dt_timeslice * 4,
+                run_sets[i]['final_timestamp'] + _timeslice_lead_out(dt_timeslice),
                 freq=dt_timeslice
             )
 
