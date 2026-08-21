@@ -1,0 +1,49 @@
+name: tests
+
+# The previous workflow only fired on master, which this repository does not use,
+# so nothing gated a pull request and four end-to-end cases sat broken.
+on:
+  push:
+    branches: [ development ]
+  pull_request:
+    branches: [ development ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential gfortran \
+            netcdf-bin libnetcdf-dev libnetcdff-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Build t-route
+        run: ./compiler.sh no-e
+
+      # -m "not integration" drops only the NHF cases that need preprocessed data
+      # from outside the repository. Everything else, including the LowerColorado
+      # end-to-end runs, uses data committed under test/.
+      - name: Run tests
+        run: pytest -q -m "not integration" --durations=10
