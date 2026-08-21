@@ -274,19 +274,33 @@ def _check_timeslice_exists(filenames, timeslices_folder):
     
     """
     
-    # check that all USGS TimeSlice files in the set actually exist
-    drop_list = []
+    # The caller spells the cadence token as 15min because that is the NWM
+    # convention, but the producer writes whatever its observations actually are
+    # (the hourly USGS store writes 60min). Match on the timestamp and the family
+    # and accept any cadence, so an hourly directory is not silently empty.
+    filenames_existing = []
     for f in filenames:
-        try:
-            J = pathlib.Path(timeslices_folder.joinpath(f))     
-            assert J.is_file() == True
-        except AssertionError:
+        J = pathlib.Path(timeslices_folder).joinpath(f)
+        if J.is_file():
+            filenames_existing.append(f)
+            continue
+        stamp, _, rest = f.partition(".")
+        _, _, family = rest.partition(".")
+        match = sorted(pathlib.Path(timeslices_folder).glob(f"{stamp}.*.{family}"))
+        if not match:
             LOG.warning("Missing TimeSlice file %s", J)
-            drop_list.append(f)
+            continue
+        if len(match) > 1:
+            # Two products for one timestamp is not the NWM layout, and picking
+            # by name would silently prefer whichever sorts first.
+            LOG.warning(
+                "Ambiguous TimeSlice for %s: %s; using %s",
+                stamp, [m.name for m in match], match[0].name,
+            )
+        else:
+            LOG.info("TimeSlice %s not found; using %s", f, match[0].name)
+        filenames_existing.append(match[0].name)
 
-    # Assemble a list of existing TimeSlice files, only
-    filenames_existing = [x for x in filenames if x not in drop_list]   
-    
     return filenames_existing
 
 def build_forcing_sets(
