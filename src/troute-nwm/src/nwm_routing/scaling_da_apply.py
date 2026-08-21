@@ -1241,10 +1241,9 @@ class ScalingDA:
                     qmb, None, gmap, trees,
                     min_flow_cms=self.min_flow, dq_o_by_site=dqo,
                     lag_by_site=lag, edge_decay=_edge,
+                    post_add={cp: d[c0:c1] for cp, d in obs_debt.items()},
                 )
                 corr = qc.to_numpy()  # [chunk_time, seg]
-                for cp, d in obs_debt.items():
-                    corr[:, cp] += d[c0:c1]
                 # Same write path as the unchunked call, so the correction lands
                 # in DEPTH as well as discharge on every chunk.
                 self._scatter_c0 = c0
@@ -1265,12 +1264,8 @@ class ScalingDA:
                 dq_o_by_site=dq_o_by_site,
                 lag_by_site=lag,
                 edge_decay=_edge,
+                post_add=obs_debt or None,
             )
-            if obs_debt:
-                cvals = q_corr.to_numpy(dtype=np.float64, copy=True)
-                for cp, d in obs_debt.items():
-                    cvals[:, cp] += d
-                q_corr = pd.DataFrame(cvals, index=q_corr.index, columns=q_corr.columns)
             self._scatter_back(run_results, q_corr)
         if seed_untimed and self.travel_time_lag and lag:
             # Rewrite the hand-off instant with the untimed spread: full
@@ -1292,10 +1287,9 @@ class ScalingDA:
                 min_flow_cms=self.min_flow,
                 dq_o_by_site={s: dq_o_by_site[s][nt - 1 : nt] for s in dq_o_by_site},
                 lag_by_site=lag0, edge_decay=_edge,
+                post_add={cp: d[nt - 1 : nt] for cp, d in obs_debt.items()},
             )
             last_vals = qc_last.to_numpy(dtype=np.float64, copy=True)
-            for cp, d in obs_debt.items():
-                last_vals[:, cp] += d[nt - 1 : nt]
             self._scatter_c0 = nt - 1
             self._scatter_back(
                 run_results,

@@ -287,6 +287,7 @@ def apply_scaling_da(
     dq_o_by_site: Mapping[str, NDArray[np.float64]] | None = None,
     lag_by_site: Mapping[str, tuple[NDArray[np.float64], NDArray[np.int64]]] | None = None,
     edge_decay: float = 1.0,
+    post_add: Mapping[int, NDArray[np.float64]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Apply the simple-scaling DA correction to *q_model* using *q_obs*.
 
@@ -584,6 +585,15 @@ def apply_scaling_da(
 
     if skipped:
         LOG.warning("apply_scaling_da: skipped %d sites: %s", len(skipped), skipped[:5])
+
+    # Added BEFORE the clip, not by the caller afterwards. The caller restores the
+    # raw at-gage nudge that the smoothing removed; clipping first and restoring
+    # second turns any smoothed correction that drives the background below zero
+    # into a one-sided positive error at the gage, so the site no longer reproduces
+    # its own observation.
+    if post_add:
+        for col, vals in post_add.items():
+            q_corrected[:, col] += vals
 
     np.clip(q_corrected, 0.0, None, out=q_corrected)
 
