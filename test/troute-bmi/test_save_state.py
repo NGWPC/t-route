@@ -63,11 +63,14 @@ def _da_config(**enabled):
     so a stub with no config would report every type OFF and the frames would never
     be restored. These tests are about runs that DO use them.
     """
-    flags = {"usgs": True, "usace": True, "usbr": True, "rfc": True, "gl": True}
+    flags = {"usgs": True, "usace": True, "usbr": True, "rfc": True, "gl": True,
+             "nudging": True}
     flags.update(enabled)
     return {
         "compute_parameters": {
             "data_assimilation_parameters": {
+                # lastobs belongs to streamflow nudging, and is dropped when it is off.
+                "streamflow_da": {"streamflow_nudging": flags["nudging"]},
                 "reservoir_da": {
                     "reservoir_persistence_da": {
                         "reservoir_persistence_usgs": flags["usgs"],
@@ -573,26 +576,59 @@ def test_an_enabled_run_with_no_observations_yet_still_takes_the_checkpoint():
     )
 
 
-def test_a_deliberately_off_checkpoint_does_not_block_a_routed_model():
-    """An empty frame the checkpoint RECORDED as off is not a stale-state gap.
-
-    A routed model restoring a checkpoint that carries no frame is normally rejected,
-    because neither frame describes the restored time. When the checkpoint says the
-    type was switched off, its emptiness is deliberate and there is nothing stale to
-    inherit, so switching the type on mid-cycle must not kill the run.
-    """
+def test_switching_a_type_on_mid_cycle_works_on_a_fresh_model():
+    """The workflow the recorded flags exist for: cycle N runs RFC off, cycle N+1
+    runs it on. ngen builds a model per cycle, so the restoring model is fresh and
+    the checkpoint's deliberate emptiness costs it nothing."""
     off = _make_model(0.0, _ExecutionPlanLike(), rfc=False)
     off._data_assimilation._reservoir_rfc_param_df = pd.DataFrame()
     state = _state_from(off)
     assert state["reservoir_da_enabled"]["rfc"] is False
 
+    fresh = _make_model(0.0, _ExecutionPlanLike())  # RFC on, nothing routed
+    live = fresh._data_assimilation._reservoir_rfc_param_df
+    fresh.load_state(state)  # must not raise
+    pd.testing.assert_frame_equal(
+        fresh._data_assimilation._reservoir_rfc_param_df, live
+    )
+
+
+def test_a_routed_model_still_refuses_a_checkpoint_with_no_frame():
+    """A model that HAS routed would keep state the restored time does not describe,
+    and the kernel reads update_time and timeseries_idx straight out of it. That the
+    checkpoint recorded the type as off does not make the live frame any fresher."""
+    off = _make_model(0.0, _ExecutionPlanLike(), rfc=False)
+    off._data_assimilation._reservoir_rfc_param_df = pd.DataFrame()
+    state = _state_from(off)
+
     routed = _make_model(3600.0, _ExecutionPlanLike())  # RFC on
     routed._has_routed = True
-    live = routed._data_assimilation._reservoir_rfc_param_df
-    routed.load_state(state)  # must not raise
-    pd.testing.assert_frame_equal(
-        routed._data_assimilation._reservoir_rfc_param_df, live
-    )
+    with pytest.raises(ValueError, match="already routed"):
+        routed.load_state(state)
+
+
+def test_a_rejected_load_leaves_the_model_untouched():
+    """A refused restore must not half-apply.
+
+    load_state used to rewind the clock and clear _has_routed before any restore
+    guard ran, so the first attempt raised, the model was left half-loaded, and an
+    identical retry accepted exactly what had just been refused.
+    """
+    routed = _make_model(3600.0, _ExecutionPlanLike())
+    routed._has_routed = True
+    before_time = routed._time
+    before_rfc = routed._data_assimilation._reservoir_rfc_param_df.copy()
+    legacy = _no_da_state()
+    legacy.pop("reservoir_da_enabled", None)
+
+    for attempt in (1, 2):
+        with pytest.raises(ValueError, match="already routed"):
+            routed.load_state(legacy)
+        assert routed._has_routed is True, f"attempt {attempt} cleared _has_routed"
+        assert routed._time == before_time, f"attempt {attempt} moved the clock"
+        pd.testing.assert_frame_equal(
+            routed._data_assimilation._reservoir_rfc_param_df, before_rfc
+        )
 
 
 def test_a_legacy_checkpoint_still_rejects_a_routed_model():
@@ -606,3 +642,50 @@ def test_a_legacy_checkpoint_still_rejects_a_routed_model():
     legacy.pop("reservoir_da_enabled", None)
     with pytest.raises(ValueError, match="already routed"):
         routed.load_state(legacy)
+
+
+def test_a_nudging_off_run_does_not_launder_a_stale_lastobs():
+    """lastobs launders exactly as the reservoir frames did.
+
+    time_since_lastobs is a RELATIVE offset, so a nudging-off run that adopted the
+    checkpoint's frame, never refreshed it, and re-serialized it as its own would
+    hand the next nudging-on run day-old observations as if they were current.
+    """
+    on = _make_model(3600.0, _ExecutionPlanLike())
+    on._data_assimilation._last_obs_df = pd.DataFrame({"discharge": [42.0]})
+    state = _state_from(on)
+
+    off = _make_model(0.0, _ExecutionPlanLike(), nudging=False)
+    off._data_assimilation._last_obs_df = pd.DataFrame()
+    off.load_state(state)
+    assert off._data_assimilation._last_obs_df.empty, (
+        "a run with streamflow nudging off adopted the checkpoint's lastobs"
+    )
+    assert _state_from(off)["last_obs"].empty
+
+
+def test_the_enabled_flags_track_the_real_config_schema():
+    """The flag names are hardcoded; a rename in troute-config would silently make
+    every type read False, keep every live frame, and exit 0. Build the flags through
+    the real pydantic model so a rename fails HERE rather than in a quiet run."""
+    from troute.config.compute_parameters import DataAssimilationParameters
+
+    dumped = DataAssimilationParameters(
+        streamflow_da={"streamflow_nudging": True},
+        reservoir_da={
+            "reservoir_persistence_da": {
+                "reservoir_persistence_usgs": True,
+                "reservoir_persistence_usace": True,
+                "reservoir_persistence_usbr": True,
+                "reservoir_persistence_greatLake": True,
+            },
+            "reservoir_rfc_da": {"reservoir_rfc_forecasts": True},
+        },
+    ).model_dump()
+
+    model = Model.__new__(Model)
+    model._config = {"compute_parameters": {"data_assimilation_parameters": dumped}}
+    assert model._reservoir_da_enabled() == {
+        "usgs": True, "usace": True, "usbr": True, "rfc": True, "gl": True
+    }
+    assert model._streamflow_nudging_enabled() is True
