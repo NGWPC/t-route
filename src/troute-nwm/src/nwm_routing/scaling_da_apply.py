@@ -1104,12 +1104,26 @@ class ScalingDA:
         colpos = {int(c): i for i, c in enumerate(q_model.columns)}
         cand = {}  # site -> (seg, nudge) for gages with a non-zero applied delta
         halo_by_site: dict[str, NDArray[np.float64]] = {}
+        unresolvable: list[str] = []
+        mismatched: list[str] = []
         for site in self.trees:
             seg = self.gage_seg.get(site)
             if seg is None or seg not in nudge_by_seg or seg not in colpos:
                 continue
             nud = nudge_by_seg[seg]
             if nud.shape[0] != nt:
+                continue
+            # Every reason apply_scaling_da can refuse a site is settled here, before
+            # the nudge is subtracted: refused later, nothing adds it back and the gage
+            # is published with its own nudge removed.
+            if self.trees[site].gage_fp != seg:
+                mismatched.append(site)
+                continue
+            # Placed twice per window: apply_scaling_da rebuilds positions itself.
+            try:
+                self.trees[site].with_positions(colpos)
+            except KeyError:
+                unresolvable.append(site)
                 continue
             # NOTE: a site with an all-zero OWN innovation stays a candidate. Its
             # halo can still be nonzero, and the lag reads it at t inside THIS
@@ -1122,6 +1136,22 @@ class ScalingDA:
             # back to persistence.
             if halo is not None and seg in halo:
                 halo_by_site[site] = np.asarray(halo[seg], dtype=np.float64)
+        # Both skip only the UPSTREAM spread; the at-gage and downstream
+        # assimilation the kernel already applied still stand.
+        if unresolvable:
+            LOG.warning(
+                "scaling DA: in-kernel -- %d gage(s) have a tree segment or pruned "
+                "branch with no column in this window; upstream spread skipped: %s",
+                len(unresolvable),
+                unresolvable[:8],
+            )
+        if mismatched:
+            LOG.warning(
+                "scaling DA: in-kernel -- %d gage(s) have a tree root the crosswalk "
+                "disagrees with; upstream spread skipped every loop until fixed: %s",
+                len(mismatched),
+                mismatched[:8],
+            )
         if not cand:
             LOG.info("scaling DA: in-kernel -- no candidate gages this loop.")
             return
@@ -1316,8 +1346,8 @@ class ScalingDA:
             np.mean(list(per_site.values())),
             time.perf_counter() - _t,
         )
-        # Per-site breakdown, so arms can be A/B'd on a matched site set.
-        # ponytail: capped at 50 sites -- readable on Ohio, CONUS has thousands.
+        # Per-site breakdown, so arms can be A/B'd on a matched site set. Capped at
+        # 50 sites: readable on Ohio, and CONUS has thousands.
         if len(per_site) <= 50:
             LOG.info(
                 "scaling DA: per-site |innovation| %s",

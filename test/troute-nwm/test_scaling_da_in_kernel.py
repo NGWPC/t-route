@@ -480,3 +480,81 @@ def test_depth_is_left_alone_where_the_discharge_ratio_is_not_a_depth_signal():
     rr[0][1][:, 2::4] = 0.0    # no usable depth anywhere
     o.apply_in_kernel(rr, nts=2, dt=3600, t0="2000-01-01")
     np.testing.assert_allclose(rr[0][1][:, 2::4], 0.0)
+
+
+def _confluence_tree_with_stopped_lake():
+    """Gage 100 <- confluence 101 <- {102 kept, 103 stopped (a lake)}."""
+    rconn = {100: [101], 101: [102, 103], 102: [], 103: []}
+    area = {100: 30.0, 101: 20.0, 102: 10.0}  # 103 is a stop, so it needs no area
+    return build_gage_trees_from_mappings(
+        rconn, {"G": 100}, area, waterbody_segs={103}, theta_default=0.77
+    )
+
+
+def test_unresolvable_tree_does_not_strip_the_gage_nudge():
+    """A site the spread cannot serve must keep its analyzed value intact.
+
+    apply_in_kernel reconstructs the background by subtracting the RAW nudge from
+    the gage column before spreading, and the spread adds it back at the tree root.
+    If the tree is rejected in between -- here because the stopped lake 103 has no
+    column in this window's results, so its flow cannot enter the confluence
+    denominator -- nothing adds it back, and _scatter_back would publish the gage
+    with its own DA nudge silently removed.
+    """
+    trees = _confluence_tree_with_stopped_lake()
+    assert list(trees["G"].pruned_segs) == [103]
+    nts = 2
+    # Results carry 100/101/102 only: the stopped lake is NOT a column here.
+    arr = np.zeros((3, 4 * nts), dtype=np.float32)
+    arr[:, 0::4] = 5.0
+    arr[0, 0::4] = 12.0  # gage, analyzed (nudge already applied in the kernel)
+    nudge = np.zeros((1, nts + 1), dtype=np.float32)
+    nudge[0, 1:] = 2.0
+    rr = [[np.array([100, 101, 102]), arr, 0, (np.array([100]), np.zeros(1),
+           np.zeros(1)), 0, 0, 0, 0, np.zeros((3, nts), dtype=np.float32),
+           nudge]]
+    o = _bare(trees=trees, gage_seg={"G": 100}, min_flow=1e-6,
+              max_reach_km=1e9, innovation_spread_h=0.0, _dx=None,
+              da_decay_min=120.0)
+    o.apply_in_kernel(rr, nts=nts, dt=3600, t0="2000-01-01")
+
+    np.testing.assert_allclose(arr[0, 0::4], 12.0, rtol=1e-6,
+                               err_msg="the gage lost its own nudge")
+    np.testing.assert_allclose(arr[1, 0::4], 5.0, rtol=1e-6,
+                               err_msg="confluence corrected despite a rejected tree")
+    np.testing.assert_allclose(arr[2, 0::4], 5.0, rtol=1e-6,
+                               err_msg="branch corrected despite a rejected tree")
+
+
+def test_root_mismatch_does_not_strip_the_gage_nudge():
+    """A tree rooted somewhere other than the crosswalk's segment is rejected early.
+
+    Every id here HAS a column, so the positioning preflight passes; the refusal comes
+    from the ``gage_fp != gage_to_fp[site]`` check inside apply_scaling_da. Settling it
+    before the background subtraction is what keeps the gage coherent -- otherwise the
+    nudge comes off and no spread puts it back. Filtering happens before the candidate
+    set is built, so the chunked and seed_untimed branches inherit it.
+    """
+    trees = _linear_tree()  # rooted at 100
+    assert trees["G"].gage_fp == 100
+    nts = 2
+    arr = np.zeros((3, 4 * nts), dtype=np.float32)
+    arr[:, 0::4] = 5.0
+    arr[1, 0::4] = 12.0  # segment 101, where the crosswalk wrongly places the gage
+    nudge = np.zeros((1, nts + 1), dtype=np.float32)
+    nudge[0, 1:] = 2.0
+    rr = [[np.array([100, 101, 102]), arr, 0, (np.array([101]), np.zeros(1),
+           np.zeros(1)), 0, 0, 0, 0, np.zeros((3, nts), dtype=np.float32),
+           nudge]]
+    # Crosswalk says 101; the tree says 100.
+    o = _bare(trees=trees, gage_seg={"G": 101}, min_flow=1e-6,
+              max_reach_km=1e9, innovation_spread_h=0.0, _dx=None,
+              da_decay_min=120.0)
+    o.apply_in_kernel(rr, nts=nts, dt=3600, t0="2000-01-01")
+
+    np.testing.assert_allclose(arr[1, 0::4], 12.0, rtol=1e-6,
+                               err_msg="the gage lost its own nudge")
+    np.testing.assert_allclose(arr[0, 0::4], 5.0, rtol=1e-6,
+                               err_msg="corrected despite a rejected tree")
+    np.testing.assert_allclose(arr[2, 0::4], 5.0, rtol=1e-6,
+                               err_msg="corrected despite a rejected tree")

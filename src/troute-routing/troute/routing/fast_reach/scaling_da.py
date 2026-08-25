@@ -249,9 +249,13 @@ def _prepare_site_tree(
     -------
     GageTree or None
         The position-filled tree, or ``None`` to skip the site (unknown gage, no
-        usable observation/override, a ``gage_fp`` mismatch, or a tree segment
-        absent from ``q_model``). The mismatch and missing-segment cases are
-        logged as warnings.
+        usable observation/override, a ``gage_fp`` mismatch, or a tree segment or
+        pruned branch absent from ``q_model``). The mismatch and missing-segment
+        cases are logged as warnings.
+
+        Skipping the WHOLE site on a missing pruned branch is deliberate: that
+        branch's flow belongs in its confluence denominator, and without it the
+        surviving sibling takes a share Edge Case 1 leaves unallocated.
     """
     if site not in gage_to_fp:
         return None
@@ -270,7 +274,12 @@ def _prepare_site_tree(
     try:
         return tree.with_positions(fp_to_pos)
     except KeyError as e:
-        LOG.warning("Site %s: tree segment %s not in q_model columns; skipping", site, e)
+        LOG.warning(
+            "Site %s: tree segment or pruned branch %s not in q_model columns; "
+            "skipping the whole site",
+            site,
+            e,
+        )
         return None
 
 
