@@ -26,6 +26,15 @@ class Config(BaseModel):
     output_parameters: OutputParameters = Field(default_factory=OutputParameters)
     bmi_parameters: Optional[BMIParameters] = None
 
+    def model_dump(self, **kwargs) -> dict:
+        """Dump, with null data-assimilation sub-blocks normalized to dicts.
+
+        Every consumer reaches through those blocks with chained ``.get``; doing this
+        at each call site instead left two entry points crashing on a config that
+        merely omitted ``reservoir_da``.
+        """
+        return normalize_da_blocks(super().model_dump(**kwargs))
+
     # TODO: `reservoir_data_assimilation_parameters` missing from `v3_doc.yaml` and only included
     # test/BMI/bmi_reservoir_example.yaml
 
@@ -405,3 +414,32 @@ class Config(BaseModel):
             pass
 
         return values
+
+
+# Sub-blocks a user omits come back present-and-NULL from validation, and consumers
+# chain `.get(block, {}).get(flag, ...)` through them, which dies on NoneType.
+#
+# What consumers may rely on afterwards: every block is a dict, and every FLAG inside
+# it is absent, so the nested `.get(flag, False)` reads give the configured-off answer.
+# What they may NOT rely on: `reservoir_da` is filled with its two sub-blocks and is
+# therefore TRUTHY, unlike the None it replaces. Gate on the nested flags, never on
+# `if reservoir_da:`.
+_DA_BLOCKS = {
+    "streamflow_da": (),
+    "diversion_da": (),
+    "reservoir_da": ("reservoir_persistence_da", "reservoir_rfc_da"),
+}
+
+
+def normalize_da_blocks(config_dict: dict) -> dict:
+    """Replace null data-assimilation sub-blocks with empty dicts, in place."""
+    da = (config_dict.get("compute_parameters") or {}).get("data_assimilation_parameters")
+    if not isinstance(da, dict):
+        return config_dict
+    for block, nested in _DA_BLOCKS.items():
+        if da.get(block) is None:
+            da[block] = {}
+        for key in nested:
+            if isinstance(da[block], dict) and da[block].get(key) is None:
+                da[block][key] = {}
+    return config_dict
