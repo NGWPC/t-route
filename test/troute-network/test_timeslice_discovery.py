@@ -34,6 +34,47 @@ def test_finds_files_written_at_another_cadence(tmp_path, check) -> None:
     ]
 
 
+def test_substitutions_are_summarized_not_listed(tmp_path, check, caplog) -> None:
+    """A directory at another cadence substitutes every file, on every window, for
+    every arm. One line with a count, not one line per file."""
+    stamps = [f"2023-12-15_{h:02d}:00:00" for h in range(12)]
+    for s in stamps:
+        (tmp_path / f"{s}.60min.usgsTimeSlice.ncdf").touch()
+    wanted = [f"{s}.15min.usgsTimeSlice.ncdf" for s in stamps]
+    with caplog.at_level("INFO"):
+        assert len(check(wanted, tmp_path)) == len(stamps)
+    said = [r for r in caplog.records if "matched at a different cadence" in r.message]
+    assert len(said) == 1, f"expected one summary line, got {len(said)}"
+    # "12" alone also matches the date in a filename; pin the count itself.
+    assert f"{len(stamps)} file(s)" in said[0].getMessage()
+
+
+def test_a_mixed_cadence_directory_names_every_substitution(
+    tmp_path, check, caplog
+) -> None:
+    """A directory that changes product partway must not be summarized by one example.
+
+    Reporting only the first substitution let a run assimilate two cadences while the
+    operator saw one.
+    """
+    early = [f"2023-12-15_{h:02d}:00:00" for h in range(3)]
+    late = [f"2023-12-15_{h:02d}:00:00" for h in range(3, 6)]
+    for s in early:
+        (tmp_path / f"{s}.60min.usgsTimeSlice.ncdf").touch()
+    for s in late:
+        (tmp_path / f"{s}.05min.usgsTimeSlice.ncdf").touch()
+    wanted = [f"{s}.15min.usgsTimeSlice.ncdf" for s in early + late]
+
+    with caplog.at_level("INFO"):
+        assert len(check(wanted, tmp_path)) == len(early) + len(late)
+
+    said = [r for r in caplog.records if "matched at a different cadence" in r.message]
+    assert len(said) == 1, f"expected one summary line, got {len(said)}"
+    msg = said[0].getMessage()
+    assert "15min -> 60min" in msg, msg
+    assert "15min -> 05min" in msg, msg
+
+
 def test_exact_names_still_win(tmp_path, check) -> None:
     for s in _STAMPS:
         (tmp_path / f"{s}.15min.usgsTimeSlice.ncdf").touch()
