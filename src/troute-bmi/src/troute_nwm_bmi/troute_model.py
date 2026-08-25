@@ -1,6 +1,7 @@
 """Basic Model Interface backing model for NGEN t-route."""
 from __future__ import annotations
 import math
+from functools import partial
 from tempfile import NamedTemporaryFile
 import psutil
 import time
@@ -210,6 +211,7 @@ class Model:
         self._subnetwork = [None, None, None]
 
     def run(self, bmi_values: dict[str, NDArray]):
+        self._has_routed = True
         is_nhf = self._is_nhf()
         qts_subdivisions = self.qts_subdivisions
 
@@ -479,6 +481,9 @@ class Model:
             "usbr": self._data_assimilation._reservoir_usbr_param_df,
             "rfc": self._data_assimilation._reservoir_rfc_param_df,
             "gl": self._data_assimilation._great_lakes_param_df,
+            # Which reservoir DA types produced the frames above, so a later load
+            # can tell "off, so deliberately empty" from "on, but nothing yet".
+            "reservoir_da_enabled": self._reservoir_da_enabled(),
             # Result-determining state: without it a resumed run retraces from
             # its own first window and shifts corrections.
             "scaling_tau": (
@@ -488,7 +493,86 @@ class Model:
             ),
         }
 
+    def _reservoir_da_enabled(self) -> dict[str, bool]:
+        """Which reservoir DA types this run has switched on, read from its config.
+
+        Whether a frame is empty cannot answer this: a type that is ON but has seen
+        no observations yet is empty too. The flags are spelled here exactly as
+        DataAssimilation reads them, so the two cannot drift apart silently.
+        """
+        da = self.data_assimilation_parameters or {}
+        reservoir = da.get("reservoir_da") or {}
+        persistence = reservoir.get("reservoir_persistence_da") or {}
+        rfc = reservoir.get("reservoir_rfc_da") or {}
+        return {
+            "usgs": bool(persistence.get("reservoir_persistence_usgs", False)),
+            "usace": bool(persistence.get("reservoir_persistence_usace", False)),
+            "usbr": bool(persistence.get("reservoir_persistence_usbr", False)),
+            "rfc": bool(rfc.get("reservoir_rfc_forecasts", False)),
+            "gl": bool(persistence.get("reservoir_persistence_greatLake", False)),
+        }
+
+    @staticmethod
+    def _restore_da_frame(
+        saved: pd.DataFrame | None,
+        live: pd.DataFrame,
+        label: str,
+        *,
+        advanced: bool,
+        saved_on: bool | None = None,
+        live_on: bool | None = None,
+    ) -> pd.DataFrame:
+        """Install a saved DA frame unless it would erase live state.
+
+        A state written with this DA type off carries an empty frame; installing it
+        over a run that has the DA on leaves observations without parameters, or
+        drops the lastobs seed to open loop.
+
+        ``saved_on`` / ``live_on`` say whether the type was switched on when the
+        checkpoint was written and whether it is on now. Both are ``None`` for a
+        frame with no enabled flag of its own and for checkpoints written before the
+        flags were recorded, which leaves the emptiness rules below in charge.
+        """
+        if live_on is False:
+            # A type this run does not run must not adopt the checkpoint's rows.
+            # Adopting them lets a frame ride through a run that never updates it
+            # and be re-serialized as if this run had produced it, so the NEXT run
+            # to switch the type on inherits values that are stale by however long
+            # it stayed off.
+            if saved is not None and not saved.empty:
+                LOG.warning(
+                    "load_state: %s is switched off in this run, so the "
+                    "checkpoint's rows are dropped rather than carried through to "
+                    "the state this run writes.",
+                    label,
+                )
+            return live
+        if saved is not None and (not saved.empty or live.empty):
+            return saved
+        if advanced and saved_on is not False:
+            # Live state has moved past the checkpoint and the checkpoint cannot
+            # replace it, so neither frame describes the restored time. A checkpoint
+            # that recorded the type as OFF is exempt: its emptiness is deliberate
+            # rather than a gap, so there is nothing stale to inherit.
+            msg = (
+                f"load_state: the checkpoint carries no {label} but this model has "
+                "already routed, so its live state is past the checkpoint's time. "
+                "Restore into a fresh model, or use a checkpoint written with this "
+                "DA type on."
+            )
+            raise ValueError(msg)
+        LOG.warning(
+            "load_state: checkpoint carries no %s, so this run keeps what it "
+            "built; no DA state carries over.",
+            label,
+        )
+        return live
+
     def load_state(self, data: dict):
+        # Whether the live DA frames still describe the checkpoint's time. Not
+        # `self._time`, which load_state overwrites and reset_time zeroes.
+        advanced = bool(getattr(self, "_has_routed", False))
+        self._has_routed = False
         self._time = data["time"]
         # Install the warmstate this model will need: cycling background when it
         # will keep assimilating (seeded would debit the next innovation), seeded
@@ -503,15 +587,39 @@ class Model:
         # Model.run overwrites it every routed window, so it cannot go stale.
         self._seeded_q0 = seeded
         self._network._t0 = data["t0"]
-        self._data_assimilation._last_obs_df = data["last_obs"]
-        self._data_assimilation._reservoir_usgs_param_df = data["usgs"]
-        self._data_assimilation._reservoir_usace_param_df = data["usace"]
+        da = self._data_assimilation
+        restore = partial(self._restore_da_frame, advanced=advanced)
+        # Absent from checkpoints written before the flags were recorded, which
+        # leaves those restores on the emptiness rules alone.
+        saved_on = data.get("reservoir_da_enabled") or {}
+        live_on = self._reservoir_da_enabled()
+
+        def restore_reservoir(key: str, saved, live, label: str) -> pd.DataFrame:
+            return self._restore_da_frame(
+                saved, live, label, advanced=advanced,
+                saved_on=saved_on.get(key), live_on=live_on[key],
+            )
+        # An empty lastobs frame flips streamflow DA to open loop for any window
+        # with no observations, so it gets the same treatment as the reservoirs.
+        da._last_obs_df = restore(
+            data["last_obs"], da._last_obs_df, "last observations")
+        da._reservoir_usgs_param_df = restore_reservoir(
+            "usgs", data["usgs"], da._reservoir_usgs_param_df,
+            "USGS reservoir DA parameters")
+        da._reservoir_usace_param_df = restore_reservoir(
+            "usace", data["usace"], da._reservoir_usace_param_df,
+            "USACE reservoir DA parameters")
         # .get for backward compatibility with state files written before USBR
         # persistence state was included.
         if "usbr" in data:
-            self._data_assimilation._reservoir_usbr_param_df = data["usbr"]
-        self._data_assimilation._reservoir_rfc_param_df = data["rfc"]
-        self._data_assimilation._great_lakes_param_df = data["gl"]
+            da._reservoir_usbr_param_df = restore_reservoir(
+                "usbr", data["usbr"], da._reservoir_usbr_param_df,
+                "USBR reservoir DA parameters")
+        da._reservoir_rfc_param_df = restore_reservoir(
+            "rfc", data["rfc"], da._reservoir_rfc_param_df,
+            "RFC reservoir DA parameters")
+        da._great_lakes_param_df = restore_reservoir(
+            "gl", data["gl"], da._great_lakes_param_df, "Great Lakes DA parameters")
         if getattr(self, "_scaling_da", None) is not None:
             # Restore-or-invalidate, never keep: a stale own-trace surviving a
             # load is the divergence this entry exists to prevent.

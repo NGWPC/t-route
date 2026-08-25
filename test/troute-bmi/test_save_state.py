@@ -56,9 +56,36 @@ class _ScalingDAStub:
         self.restored_with = (ckpt, dt)
 
 
-def _make_model(time, subnetwork):
+def _da_config(**enabled):
+    """A config switching the named reservoir DA types on. Default: all of them.
+
+    ``_restore_da_frame`` now asks the run's own config which types it assimilates,
+    so a stub with no config would report every type OFF and the frames would never
+    be restored. These tests are about runs that DO use them.
+    """
+    flags = {"usgs": True, "usace": True, "usbr": True, "rfc": True, "gl": True}
+    flags.update(enabled)
+    return {
+        "compute_parameters": {
+            "data_assimilation_parameters": {
+                "reservoir_da": {
+                    "reservoir_persistence_da": {
+                        "reservoir_persistence_usgs": flags["usgs"],
+                        "reservoir_persistence_usace": flags["usace"],
+                        "reservoir_persistence_usbr": flags["usbr"],
+                        "reservoir_persistence_greatLake": flags["gl"],
+                    },
+                    "reservoir_rfc_da": {"reservoir_rfc_forecasts": flags["rfc"]},
+                }
+            }
+        }
+    }
+
+
+def _make_model(time, subnetwork, **enabled):
     model = Model.__new__(Model)  # skip __init__ (no config/network build)
     model._time = time
+    model._config = _da_config(**enabled)
     model._network = _NetworkStub()
     model._data_assimilation = _DataAssimilationStub()
     model._subnetwork = subnetwork
@@ -322,3 +349,260 @@ def test_cycling_warmstate_never_accumulates_the_correction():
     assert net._q0.loc[101, "qd0"] == pytest.approx(6.0, rel=1e-6)
     # ...while the hand-off warmstate carries it.
     assert seeded.loc[101, "qd0"] == pytest.approx(6.0 + 2.0 * (20.0 / 30.0) ** 0.77, rel=1e-5)
+
+
+def test_load_state_does_not_erase_live_reservoir_da_params():
+    """A state written with a DA type OFF must not blank a run that has it ON.
+
+    That combination is a legitimate handoff -- warm up without assimilation, then
+    forecast with it -- but installing the saved empty frame left the observation
+    frame populated and its parameters missing, and the run died on
+    ``KeyError: 'totalCounts'`` inside _prep_reservoir_da_dataframes.
+    """
+    model = _make_model(0.0, _ExecutionPlanLike())
+    live_rfc = model._data_assimilation._reservoir_rfc_param_df
+    assert not live_rfc.empty
+
+    # A checkpoint from a run with every reservoir DA type off.
+    no_da_state = {
+        "time": 0.0,
+        "q0": pd.DataFrame({"q": [1.0, 2.0]}),
+        "seeded_q0": None,
+        "t0": "2020-01-01_00:00:00",
+        "last_obs": pd.DataFrame(),
+        "usgs": pd.DataFrame(),
+        "usace": pd.DataFrame(),
+        "usbr": pd.DataFrame(),
+        "rfc": pd.DataFrame(),
+        "gl": pd.DataFrame(),
+        "scaling_tau": None,
+    }
+    model.load_state(no_da_state)
+
+    da = model._data_assimilation
+    for label, frame in [
+        # An empty lastobs frame drops streamflow DA to open loop on any window
+        # with no observations, so it is the same hazard as the reservoir frames.
+        ("last observations", da._last_obs_df),
+        ("USGS", da._reservoir_usgs_param_df),
+        ("USACE", da._reservoir_usace_param_df),
+        ("USBR", da._reservoir_usbr_param_df),
+        ("RFC", da._reservoir_rfc_param_df),
+        ("Great Lakes", da._great_lakes_param_df),
+    ]:
+        assert not frame.empty, f"{label} parameters erased by a no-DA state file"
+    pd.testing.assert_frame_equal(da._reservoir_rfc_param_df, live_rfc)
+
+
+def test_load_state_still_installs_real_reservoir_da_params():
+    """The guard must not block the ordinary case: a populated saved frame wins."""
+    model = _make_model(0.0, _ExecutionPlanLike())
+    saved_rfc = pd.DataFrame({"totalCounts": [99]})
+    state = {
+        "time": 0.0,
+        "q0": pd.DataFrame({"q": [1.0, 2.0]}),
+        "seeded_q0": None,
+        "t0": "2020-01-01_00:00:00",
+        "last_obs": pd.DataFrame(),
+        "usgs": pd.DataFrame({"a": [11]}),
+        "usace": pd.DataFrame({"b": [22]}),
+        "usbr": pd.DataFrame({"e": [77]}),
+        "rfc": saved_rfc,
+        "gl": pd.DataFrame({"d": [44]}),
+        "scaling_tau": None,
+    }
+    model.load_state(state)
+    pd.testing.assert_frame_equal(
+        model._data_assimilation._reservoir_rfc_param_df, saved_rfc
+    )
+
+
+def test_load_state_rejects_a_no_da_checkpoint_after_routing():
+    """Keeping live DA state is only right while it still describes the checkpoint.
+
+    Re-deserializing into a model that has already routed would otherwise rewind
+    time and q0 while retaining DA state that has moved past it, so a retry would
+    not reproduce the first attempt.
+    """
+    model = _make_model(3600.0, _ExecutionPlanLike())
+    model._has_routed = True
+    no_da_state = {
+        "time": 0.0,
+        "q0": pd.DataFrame({"q": [1.0, 2.0]}),
+        "seeded_q0": None,
+        "t0": "2020-01-01_00:00:00",
+        "last_obs": pd.DataFrame(),
+        "usgs": pd.DataFrame(),
+        "usace": pd.DataFrame(),
+        "usbr": pd.DataFrame(),
+        "rfc": pd.DataFrame(),
+        "gl": pd.DataFrame(),
+        "scaling_tau": None,
+    }
+    with pytest.raises(ValueError, match="already routed"):
+        model.load_state(no_da_state)
+
+
+def test_load_state_into_a_fresh_model_is_still_allowed():
+    """The workflow this exists for: warm up with DA off, forecast with it on."""
+    model = _make_model(0.0, _ExecutionPlanLike())
+    live_rfc = model._data_assimilation._reservoir_rfc_param_df
+    model.load_state({
+        "time": 0.0,
+        "q0": pd.DataFrame({"q": [1.0, 2.0]}),
+        "seeded_q0": None,
+        "t0": "2020-01-01_00:00:00",
+        "last_obs": pd.DataFrame(),
+        "usgs": pd.DataFrame(),
+        "usace": pd.DataFrame(),
+        "usbr": pd.DataFrame(),
+        "rfc": pd.DataFrame(),
+        "gl": pd.DataFrame(),
+        "scaling_tau": None,
+    })
+    pd.testing.assert_frame_equal(
+        model._data_assimilation._reservoir_rfc_param_df, live_rfc
+    )
+
+
+def _no_da_state():
+    return {
+        "time": 21600.0,  # a warm-up checkpoint is never at t=0
+        "q0": pd.DataFrame({"q": [1.0, 2.0]}),
+        "seeded_q0": None,
+        "t0": "2020-01-01_00:00:00",
+        "last_obs": pd.DataFrame(),
+        "usgs": pd.DataFrame(),
+        "usace": pd.DataFrame(),
+        "usbr": pd.DataFrame(),
+        "rfc": pd.DataFrame(),
+        "gl": pd.DataFrame(),
+        "scaling_tau": None,
+    }
+
+
+def test_reloading_the_same_checkpoint_without_routing_is_allowed():
+    """A harness that deserializes twice must not be told the model has routed.
+
+    load_state installs the checkpoint's own nonzero time, so keying "has this
+    model advanced" off self._time made the second identical load raise.
+    """
+    model = _make_model(0.0, _ExecutionPlanLike())
+    live_rfc = model._data_assimilation._reservoir_rfc_param_df
+    model.load_state(_no_da_state())
+    model.load_state(_no_da_state())  # nothing routed in between
+    pd.testing.assert_frame_equal(
+        model._data_assimilation._reservoir_rfc_param_df, live_rfc
+    )
+
+
+def test_reset_time_does_not_disguise_a_routed_model():
+    """reset_time zeroes the clock without rewinding DA state, so it must not make
+    an advanced model look fresh to the next restore."""
+    model = _make_model(3600.0, _ExecutionPlanLike())
+    model._has_routed = True
+    model._orig_t0 = "2020-01-01_00:00:00"
+    model.reset_time()
+    with pytest.raises(ValueError, match="already routed"):
+        model.load_state(_no_da_state())
+
+
+def _state_from(model):
+    """What ``model`` would serialize, round-tripped through pickle like the BMI does."""
+    return pickle.loads(pickle.dumps(model.create_state(), pickle.HIGHEST_PROTOCOL))
+
+
+def test_a_disabled_run_does_not_launder_stale_reservoir_params():
+    """RFC on -> off -> on must not carry the first run's parameters to the third.
+
+    Emptiness cannot say whether a type is switched on: an enabled type with no
+    observations yet is empty too. So a run with RFC DA OFF used to install the
+    checkpoint's populated frame over its own empty one, never update it (it runs no
+    RFC DA), and re-serialize it as if it had. The next run to switch RFC back on
+    then inherited `file`, `timeseries_idx` and `update_time` values stale by however
+    long RFC stayed off, and preferred them over the ones it had just built.
+    """
+    # Run A: RFC on, and it has assimilated.
+    run_a = _make_model(3600.0, _ExecutionPlanLike())
+    run_a._data_assimilation._reservoir_rfc_param_df = pd.DataFrame(
+        {"totalCounts": [12], "timeseries_idx": [7], "update_time": [3600]}
+    )
+    state_a = _state_from(run_a)
+
+    # Run B: RFC off. It must keep its own empty frame, not adopt A's.
+    run_b = _make_model(0.0, _ExecutionPlanLike(), rfc=False)
+    run_b._data_assimilation._reservoir_rfc_param_df = pd.DataFrame()
+    run_b.load_state(state_a)
+    assert run_b._data_assimilation._reservoir_rfc_param_df.empty, (
+        "a run with RFC DA off adopted the checkpoint's RFC parameters"
+    )
+
+    # ...so what B writes carries no RFC state to launder.
+    state_b = _state_from(run_b)
+    assert state_b["rfc"].empty
+    assert state_b["reservoir_da_enabled"]["rfc"] is False
+
+    # Run C: RFC on again. It keeps the parameters it built rather than A's stale ones.
+    run_c = _make_model(0.0, _ExecutionPlanLike())
+    fresh = pd.DataFrame({"totalCounts": [3], "timeseries_idx": [0], "update_time": [0]})
+    run_c._data_assimilation._reservoir_rfc_param_df = fresh
+    run_c.load_state(state_b)
+    pd.testing.assert_frame_equal(
+        run_c._data_assimilation._reservoir_rfc_param_df, fresh
+    )
+
+
+def test_an_enabled_run_with_no_observations_yet_still_takes_the_checkpoint():
+    """The symmetric case: empty live does NOT mean the type is off.
+
+    A run with RFC DA on that has not seen an observation in this window has an empty
+    live frame and legitimately needs the checkpoint's persistence. Distinguishing it
+    from the disabled run above is exactly what the recorded flags are for.
+    """
+    run_a = _make_model(3600.0, _ExecutionPlanLike())
+    saved = pd.DataFrame({"totalCounts": [12], "update_time": [3600]})
+    run_a._data_assimilation._reservoir_rfc_param_df = saved
+    state = _state_from(run_a)
+    assert state["reservoir_da_enabled"]["rfc"] is True
+
+    run_b = _make_model(0.0, _ExecutionPlanLike())  # RFC on
+    run_b._data_assimilation._reservoir_rfc_param_df = pd.DataFrame()  # nothing yet
+    run_b.load_state(state)
+    pd.testing.assert_frame_equal(
+        run_b._data_assimilation._reservoir_rfc_param_df, saved
+    )
+
+
+def test_a_deliberately_off_checkpoint_does_not_block_a_routed_model():
+    """An empty frame the checkpoint RECORDED as off is not a stale-state gap.
+
+    A routed model restoring a checkpoint that carries no frame is normally rejected,
+    because neither frame describes the restored time. When the checkpoint says the
+    type was switched off, its emptiness is deliberate and there is nothing stale to
+    inherit, so switching the type on mid-cycle must not kill the run.
+    """
+    off = _make_model(0.0, _ExecutionPlanLike(), rfc=False)
+    off._data_assimilation._reservoir_rfc_param_df = pd.DataFrame()
+    state = _state_from(off)
+    assert state["reservoir_da_enabled"]["rfc"] is False
+
+    routed = _make_model(3600.0, _ExecutionPlanLike())  # RFC on
+    routed._has_routed = True
+    live = routed._data_assimilation._reservoir_rfc_param_df
+    routed.load_state(state)  # must not raise
+    pd.testing.assert_frame_equal(
+        routed._data_assimilation._reservoir_rfc_param_df, live
+    )
+
+
+def test_a_legacy_checkpoint_still_rejects_a_routed_model():
+    """Without the flags there is no way to tell deliberate from stale, so reject.
+
+    Checkpoints written before the flags were recorded keep the old behavior.
+    """
+    routed = _make_model(3600.0, _ExecutionPlanLike())
+    routed._has_routed = True
+    legacy = _no_da_state()
+    legacy.pop("reservoir_da_enabled", None)
+    with pytest.raises(ValueError, match="already routed"):
+        routed.load_state(legacy)
