@@ -171,7 +171,7 @@ class TestRamCapIsAnErrorUnderActiveAssimilation:
         m._scaling_da = SimpleNamespace(  # a DA whose partition matters
             innovation_spread_h=12.0, travel_time_lag=False
         )
-        with pytest.raises(MemoryError, match="part of the result"):
+        with pytest.raises(MemoryError, match="machine load"):
             list(m._build_run_sets(_qlats(96)))
 
     def test_memory_split_without_config_raises(self, monkeypatch):
@@ -222,20 +222,29 @@ class TestRamCapIsAnErrorUnderActiveAssimilation:
         assert len(sets) > 1
         assert "caps the run window" in caplog.text
 
-    def test_a_zero_span_da_is_capped_rather_than_refused(self, monkeypatch, caplog):
-        """The other side of the class: with no span the partition is not part of
-        the result, so a RAM cap is a performance matter, not a correctness one.
+    def test_a_zero_span_da_still_refuses_a_ram_split(self, monkeypatch):
+        """Zero span exempts a SINGLE window, not a RAM-driven split.
 
-        Refusing here made the shipped NWM Standard AnA config unrunnable: 3 forcing
-        columns against a max_loop_size default of 24.
+        The kernel re-seeds its at-gage lastobs at every window boundary for a
+        scaling run (update_after_compute persists lastobs only for nudging), so a
+        gap in the observations makes even a zero-span partition reach the result.
         """
         self._pressure(monkeypatch)
         m = _model(nts_cols=96, max_loop_size=96)
         m._scaling_da = SimpleNamespace(innovation_spread_h=0.0, travel_time_lag=False)
-        with caplog.at_level("WARNING"):
-            sets = list(m._build_run_sets(_qlats(96)))
-        assert len(sets) > 1
-        assert "caps the run window" in caplog.text
+        with pytest.raises(MemoryError, match="re-seeds its at-gage state"):
+            list(m._build_run_sets(_qlats(96)))
+
+    def test_a_zero_span_da_serves_a_short_update(self, plenty_of_memory):
+        """The case the exemption exists for: one window, nothing partitioned.
+
+        Refusing here made the shipped NWM Standard AnA config unrunnable: 3 forcing
+        columns against a max_loop_size default of 24.
+        """
+        m = _model(nts_cols=3, max_loop_size=24)
+        m._scaling_da = SimpleNamespace(innovation_spread_h=0.0, travel_time_lag=False)
+        sets = list(m._build_run_sets(_qlats(3)))
+        assert len(sets) == 1
 
     def test_a_short_update_is_not_reported_as_a_memory_problem(self, plenty_of_memory):
         """The cap has two causes and they need different fixes.
@@ -261,5 +270,5 @@ class TestRamCapIsAnErrorUnderActiveAssimilation:
         m._scaling_da = SimpleNamespace(  # a DA whose partition matters
             innovation_spread_h=12.0, travel_time_lag=False
         )
-        with pytest.raises(MemoryError, match="part of the result"):
+        with pytest.raises(MemoryError, match="machine load"):
             list(m._build_run_sets(_qlats(96)))

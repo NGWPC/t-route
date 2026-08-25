@@ -787,11 +787,14 @@ class Model:
         # the DA it stays a warning.
         scaling_active = getattr(self, "_scaling_da", None) is not None
         cfg_loop = self.forcing_parameters.get("max_loop_size") or 0
-        # The DA's own time span, in forcing columns. ZERO is the case that
-        # matters most: with no forward average and no lag the spread is
-        # output-only and applied per timestep, so the partition cannot reach the
-        # result and the window may shrink freely. Measured, not assumed --
-        # test_the_partition_does_not_reach_the_result_at_zero_span.
+        # The DA's own time span, in forcing columns. At ZERO span the upstream
+        # spread is output-only and applied per timestep, so splitting a window
+        # leaves it unchanged (measured:
+        # test_the_partition_does_not_reach_the_result_at_zero_span). That is why a
+        # single-window update may be served below max_loop_size. It does NOT make
+        # windows generally interchangeable: the kernel re-seeds its at-gage lastobs
+        # per window, so a gage with an observation GAP is nudged differently across
+        # a boundary. Hence only the one-window case is exempted below.
         span_cols = 0
         if scaling_active:
             # The forward innovation window reads past the end of a window into
@@ -827,16 +830,28 @@ class Model:
         if cfg_loop > 0:
             loop_size = min(int(cfg_loop), mem_loop_size)
             if loop_size < int(cfg_loop):
+                # The two causes differ in whether the partition changes at all.
+                # mem_divisions <= 1 means the cap IS this update's own forcing, so
+                # the run is a single window and nothing is partitioned: safe to
+                # serve whenever the DA has no span. A RAM-driven split is MANY
+                # windows, and the kernel re-seeds lastobs per window for a scaling
+                # run (DataAssimilation.update_after_compute only persists it for
+                # nudging), so a gap in the observations makes even a zero-span
+                # partition reach the result. That stays fatal.
+                if mem_divisions > 1 and scaling_active:
+                    raise MemoryError(
+                        f"available memory caps the run window at {loop_size} forcing "
+                        f"timesteps, below the configured max_loop_size of "
+                        f"{int(cfg_loop)}. The scaling DA re-seeds its at-gage state "
+                        "at every window boundary, so a RAM-derived split would make "
+                        "discharge depend on current machine load. Free memory, or "
+                        "lower max_loop_size to a value that fits."
+                    )
                 if partition_matters:
-                    # Two very different causes land here and must not be
-                    # reported as one. mem_divisions == 1 means memory was never
-                    # the limit: the cap IS this update's own forcing, because
-                    # mem_loop_size is then just nts. A caller cannot fix that
-                    # with a bigger machine, only by feeding longer updates or
-                    # asking for a shorter span, so saying "free memory" sends
-                    # them to the wrong place entirely.
-                    if mem_divisions <= 1:
-                        raise ValueError(
+                    # Memory was never the limit here: the cap IS this update's own
+                    # forcing, so saying "free memory" sends the operator to the
+                    # wrong place entirely.
+                    raise ValueError(
                             f"this update supplies {nts} forcing timestep(s), but the "
                             f"scaling DA requires windows of {int(cfg_loop)} -- the "
                             "larger of the configured max_loop_size and the DA's own "
@@ -851,25 +866,25 @@ class Model:
                             "time. At innovation_spread_h 0 with the lag off the "
                             "span is zero and this constraint disappears entirely."
                         )
-                    raise MemoryError(
-                        f"available memory caps the run window at {loop_size} forcing "
-                        f"timesteps, below the configured max_loop_size of "
-                        f"{int(cfg_loop)}. The scaling DA's window boundaries are part "
-                        "of the result, so continuing would produce discharge that "
-                        "depends on current machine load. Free memory, or lower "
-                        "max_loop_size to a value that fits."
+                if mem_divisions > 1:
+                    LOG.warning(
+                        "available memory caps the run window at %d forcing "
+                        "timesteps, below the configured max_loop_size of %d",
+                        loop_size, int(cfg_loop),
                     )
-                LOG.warning(
-                    "memory or this update's length caps the run window at %d "
-                    "forcing timesteps, below the configured max_loop_size of %d. "
-                    "Nothing here depends on the partition: either no assimilation "
-                    "is active, or its span is zero.",
-                    loop_size, int(cfg_loop),
-                )
+                else:
+                    # Every short update logs this, so it is not a warning: the run
+                    # is one window and nothing is partitioned.
+                    LOG.info(
+                        "the run window is this update's own %d forcing timestep(s), "
+                        "below the configured max_loop_size of %d; nothing is "
+                        "partitioned.",
+                        loop_size, int(cfg_loop),
+                    )
         else:
             loop_size = mem_loop_size
             if mem_divisions > 1:
-                if partition_matters:
+                if scaling_active:
                     raise MemoryError(
                         f"no forcing_parameters.max_loop_size is configured and the "
                         f"run does not fit in available memory (would be split into "
