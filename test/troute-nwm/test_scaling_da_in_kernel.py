@@ -558,3 +558,55 @@ def test_root_mismatch_does_not_strip_the_gage_nudge():
                                err_msg="corrected despite a rejected tree")
     np.testing.assert_allclose(arr[2, 0::4], 5.0, rtol=1e-6,
                                err_msg="corrected despite a rejected tree")
+
+
+def _spread_over(nts, nudge, t0, spread_h):
+    """Run the in-kernel spread over one window and return the routed discharge."""
+    arr = np.zeros((3, 4 * nts), dtype=np.float32)
+    arr[:, 0::4] = 5.0
+    nud = np.zeros((1, nts + 1), dtype=np.float32)
+    nud[0, 1:] = nudge
+    rr = [[np.array([100, 101, 102]), arr, 0, (np.array([100]), np.zeros(1),
+           np.zeros(1)), 0, 0, 0, 0, np.zeros((3, nts), dtype=np.float32), nud]]
+    o = _bare(trees=_linear_tree(), gage_seg={"G": 100}, min_flow=1e-6,
+              max_reach_km=1e9, innovation_spread_h=spread_h, _dx=None,
+              da_decay_min=120.0)
+    o.apply_in_kernel(rr, nts=nts, dt=3600, t0=t0, seed_untimed=True)
+    return arr[:, 0::4].copy()
+
+
+_RAMP = np.array([1.0, 2.0, 3.0, 4.0])
+
+
+def test_the_partition_does_not_reach_the_result_at_zero_span():
+    """With no forward average and no lag the spread is output-only and applied
+    per timestep, so splitting a window cannot change the answer.
+
+    This is what lets _build_run_sets serve a short update instead of refusing it:
+    the NWM Standard AnA is 3 forcing columns against a max_loop_size default of
+    24, and without this the shipped operational config could not run the DA.
+    """
+    whole = _spread_over(4, _RAMP, "2000-01-01", 0.0)
+    split = np.concatenate(
+        [_spread_over(2, _RAMP[:2], "2000-01-01", 0.0),
+         _spread_over(2, _RAMP[2:], "2000-01-01 02:00", 0.0)], axis=1
+    )
+    np.testing.assert_array_equal(
+        whole, split,
+        err_msg="the window partition changed the result at zero span, so the "
+                "guard in _build_run_sets cannot be relaxed",
+    )
+
+
+def test_the_partition_does_reach_the_result_once_the_span_is_nonzero():
+    """The other half of the contract: a forward average reads across the window
+    boundary, so the partition IS part of the result and must stay guarded."""
+    whole = _spread_over(4, _RAMP, "2000-01-01", 2.0)
+    split = np.concatenate(
+        [_spread_over(2, _RAMP[:2], "2000-01-01", 2.0),
+         _spread_over(2, _RAMP[2:], "2000-01-01 02:00", 2.0)], axis=1
+    )
+    assert not np.allclose(whole, split), (
+        "a nonzero innovation_spread_h must make the partition matter; if this "
+        "passes, the hard error in _build_run_sets is guarding nothing"
+    )

@@ -787,7 +787,13 @@ class Model:
         # the DA it stays a warning.
         scaling_active = getattr(self, "_scaling_da", None) is not None
         cfg_loop = self.forcing_parameters.get("max_loop_size") or 0
-        if scaling_active and cfg_loop > 0:
+        # The DA's own time span, in forcing columns. ZERO is the case that
+        # matters most: with no forward average and no lag the spread is
+        # output-only and applied per timestep, so the partition cannot reach the
+        # result and the window may shrink freely. Measured, not assumed --
+        # test_the_partition_does_not_reach_the_result_at_zero_span.
+        span_cols = 0
+        if scaling_active:
             # The forward innovation window reads past the end of a window into
             # the next one's innovation, and that halo is exactly ONE window
             # deep, so a window shorter than innovation_spread_h leaves its own
@@ -805,18 +811,23 @@ class Model:
             # the tail of a window needs raw innovation out to tau_max + spread.
             if getattr(self._scaling_da, "travel_time_lag", False):
                 spread_h += float(getattr(self._scaling_da, "lag_window_h", 48.0))
-            need = max(int(cfg_loop), math.ceil(spread_h * 3600.0 / col_s))
-            if need > cfg_loop:
+            span_cols = math.ceil(spread_h * 3600.0 / col_s)
+            if cfg_loop > 0 and span_cols > cfg_loop:
                 LOG.info(
                     "scaling DA: max_loop_size enlarged %d -> %d forcing columns "
                     "so every non-final window covers innovation_spread_h.",
-                    int(cfg_loop), need,
+                    int(cfg_loop), span_cols,
                 )
-                cfg_loop = need
+                cfg_loop = span_cols
+        # Only a DA with a span makes the partition part of the result. Without
+        # one, a short update is served like any no-DA run: the NWM Standard AnA
+        # is 3 forcing columns against a max_loop_size default of 24, and erroring
+        # there would make the shipped operational config unrunnable.
+        partition_matters = scaling_active and span_cols > 0
         if cfg_loop > 0:
             loop_size = min(int(cfg_loop), mem_loop_size)
             if loop_size < int(cfg_loop):
-                if scaling_active:
+                if partition_matters:
                     # Two very different causes land here and must not be
                     # reported as one. mem_divisions == 1 means memory was never
                     # the limit: the cap IS this update's own forcing, because
@@ -837,7 +848,8 @@ class Model:
                             "to the update cadence, or reduce the DA span "
                             "(lag_window_h / innovation_spread_h); halving "
                             "lag_window_h also halves the longest resolvable travel "
-                            "time."
+                            "time. At innovation_spread_h 0 with the lag off the "
+                            "span is zero and this constraint disappears entirely."
                         )
                     raise MemoryError(
                         f"available memory caps the run window at {loop_size} forcing "
@@ -848,15 +860,16 @@ class Model:
                         "max_loop_size to a value that fits."
                     )
                 LOG.warning(
-                    "available memory caps the run window at %d forcing timesteps, "
-                    "below the configured max_loop_size of %d; results with "
-                    "assimilation active depend on the window partition",
+                    "memory or this update's length caps the run window at %d "
+                    "forcing timesteps, below the configured max_loop_size of %d. "
+                    "Nothing here depends on the partition: either no assimilation "
+                    "is active, or its span is zero.",
                     loop_size, int(cfg_loop),
                 )
         else:
             loop_size = mem_loop_size
             if mem_divisions > 1:
-                if scaling_active:
+                if partition_matters:
                     raise MemoryError(
                         f"no forcing_parameters.max_loop_size is configured and the "
                         f"run does not fit in available memory (would be split into "
@@ -866,9 +879,8 @@ class Model:
                     )
                 LOG.warning(
                     "no forcing_parameters.max_loop_size configured; splitting the "
-                    "run into %d windows sized by available memory. With "
-                    "assimilation active the results depend on this partition, so "
-                    "set max_loop_size for reproducible windows.", mem_divisions,
+                    "run into %d windows sized by available memory. Set "
+                    "max_loop_size for reproducible windows.", mem_divisions,
                 )
 
         if loop_size >= nts:
