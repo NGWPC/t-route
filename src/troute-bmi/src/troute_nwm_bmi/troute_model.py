@@ -4,6 +4,7 @@ import math
 from functools import partial
 from tempfile import NamedTemporaryFile
 import psutil
+from joblib import effective_n_jobs
 import time
 import typing
 from typing import Iterator, TypedDict
@@ -89,6 +90,44 @@ class RunSet(TypedDict):
     qlats: pd.DataFrame
     t0: datetime
     final_timestamp: datetime
+
+
+# Forcing columns per window when max_loop_size is 0 (automatic). The measured Tier A
+# sweep (benchmark/RESULTS.md) plateaus in wall time here while peak RSS keeps climbing
+# past it, so a larger window buys memory pressure and no speed. Was the schema default.
+AUTO_WINDOW = 24
+
+
+# Measured peak divided by declared arrays. benchmark/RESULTS.md's Tier A sweep is the
+# only run that isolates the slope (window varied, everything else fixed): 415 MB at one
+# forcing column to 8807 MB at 144, so 58.7 MB per column over 11,327 links at qts 12,
+# or 432 B per link-timestep where the arrays below declare 20. The difference is mask
+# copies, pandas frames and output assembly, which scale with the same product. Against
+# the sweep this reads 0.98-1.11 of measured for windows of 24 columns and up, which is
+# the range where memory decides anything; it dips to 0.84 at 8-12 columns, where the
+# absolute miss is ~200 MB. Fitted on Tier A, consistent with Tier C, one slope only.
+MEASURED_PEAK_RATIO = 24
+
+# What a worker pool adds on top of the main process, measured: CONUS tree PSS 27.8 GB
+# against 24.6 GB main-process at cpu_pool 8, Tier A at parity. Workers route their own
+# clusters and share the parent's pages, so this is flat in the pool size.
+POOL_OVERHEAD = 1.15
+
+
+def per_element_bytes(courant: bool, scaling: bool) -> int:
+    """Bytes per link-routing-step, calibrated to measured peak RSS.
+
+    flowveldepth is 4-wide float32 and upstream_array 1-wide, always; the Courant
+    block is 3-wide float32 only when returned; the scaling DA holds q_model, its
+    copy and the corrected frame in float64 only when active.
+
+    Only the base term is measured. The sweep behind MEASURED_PEAK_RATIO ran without
+    DA and without Courant, so those two carry the same ratio on the assumption their
+    derived copies scale alike -- unverified, and deliberately the conservative
+    direction: over-reading refuses with an actionable message, under-reading is an
+    OOM kill mid-run.
+    """
+    return (20 + (12 if courant else 0) + (24 if scaling else 0)) * MEASURED_PEAK_RATIO
 
 
 class Model:
@@ -814,13 +853,28 @@ class Model:
     def _build_run_sets(self, qlats: pd.DataFrame) -> Iterator[RunSet]:
         nts = len(qlats.columns)
         # Memory is a SAFETY CAP only, never the primary window control.
-        required_bytes = qlats.shape[0] \
-            * qlats.shape[1] \
-            * self.qts_subdivisions \
-            * 100  # bytes per link-timestep, measured: a 96 h single-window
-        # run over this 103,559-link domain peaks at 7.86 GB whole-process RSS
-        # (70.7 B per element); the old 200 blocked runs the machine performs,
-        # which is now fatal under active scaling DA (hard error, not shrink).
+        # Bytes per link-routing-step, from the arrays the kernel actually allocates
+        # rather than one flat constant: flowveldepth is 4-wide float32 (16 B) and
+        # upstream_array 1-wide (4 B) always; the Courant block adds 3-wide float32
+        # (12 B) only when it is returned; the scaling DA holds q_model, its copy and
+        # the corrected frame in float64 (24 B) only when it is active. Workers each
+        # hold their own job's arrays, so the pool multiplies the transient.
+        _scaling_now = getattr(self, "_scaling_da", None) is not None
+        _courant = bool(self.compute_parameters.get("return_courant", False)) or _scaling_now
+        per_element = per_element_bytes(_courant, _scaling_now)
+        # Workers hold per-CLUSTER payloads, not domain copies, so the pool is a small
+        # constant and not a multiplier: benchmark/RESULTS.md measures CONUS tree PSS at
+        # cpu_pool 8 as 27.8 GB against 24.6 GB main-process, and Tier A at parity. A
+        # linear factor sized VPU01 into 2-column windows. effective_n_jobs because
+        # joblib reads -1 as every core, so it is a pool and not serial.
+        workers = max(1, effective_n_jobs(self.compute_parameters.get("cpu_pool") or 1))
+        pool_overhead = POOL_OVERHEAD if workers > 1 else 1.0
+        required_bytes = int(
+            qlats.shape[0] * qlats.shape[1] * self.qts_subdivisions * per_element
+            * pool_overhead
+        )
+        # No intercept term: available_memory is read HERE, after the network, plan and
+        # forcing are already resident, so the baseline is excluded by construction.
         system_memory = psutil.virtual_memory()
         available_memory = system_memory.available * 0.9  # only account for 90% of the currently available memory
         mem_divisions = math.ceil(required_bytes / available_memory)
@@ -866,74 +920,78 @@ class Model:
                 cfg_loop = span_cols
         # Only a DA with a span makes the partition part of the result. Without
         # one, a short update is served like any no-DA run: the NWM Standard AnA
-        # is 3 forcing columns against a max_loop_size default of 24, and erroring
-        # there would make the shipped operational config unrunnable.
+        # is 3 forcing columns against a much longer window, and erroring there
+        # would make the shipped operational config unrunnable.
         partition_matters = scaling_active and span_cols > 0
-        if cfg_loop > 0:
-            loop_size = min(int(cfg_loop), mem_loop_size)
-            if loop_size < int(cfg_loop):
-                # mem_divisions <= 1 means the cap is this update's own forcing:
-                # one window, nothing partitioned. A RAM-driven split is many
-                # windows, and a partition set by machine load stays fatal.
-                if mem_divisions > 1 and scaling_active:
-                    raise MemoryError(
-                        f"available memory caps the run window at {loop_size} forcing "
-                        f"timesteps, below the configured max_loop_size of "
-                        f"{int(cfg_loop)}. A RAM-derived split would make the "
-                        "window partition, and so the discharge, depend on current "
-                        "machine load. Free memory, or lower max_loop_size to a "
-                        "value that fits."
-                    )
-                if partition_matters:
-                    # Memory was never the limit here: the cap IS this update's own
-                    # forcing, so saying "free memory" sends the operator to the
-                    # wrong place entirely.
-                    raise ValueError(
-                            f"this update supplies {nts} forcing timestep(s), but the "
-                            f"scaling DA requires windows of {int(cfg_loop)} -- the "
-                            "larger of the configured max_loop_size and the DA's own "
-                            "span (innovation_spread_h, plus lag_window_h when "
-                            "travel_time_lag is on). The window partition is part of "
-                            "the result under active assimilation, so it must not "
-                            "shrink silently to the update. Memory is NOT the limit "
-                            "here. Either drive longer updates, lower max_loop_size "
-                            "to the update cadence, or reduce the DA span "
-                            "(lag_window_h / innovation_spread_h); halving "
-                            "lag_window_h also halves the longest resolvable travel "
-                            "time. At innovation_spread_h 0 with the lag off the "
-                            "span is zero and this constraint disappears entirely."
-                        )
-                if mem_divisions > 1:
-                    LOG.warning(
-                        "available memory caps the run window at %d forcing "
-                        "timesteps, below the configured max_loop_size of %d",
-                        loop_size, int(cfg_loop),
-                    )
-                else:
-                    # Every short update logs this, so it is not a warning: the run
-                    # is one window and nothing is partitioned.
-                    LOG.info(
-                        "the run window is this update's own %d forcing timestep(s), "
-                        "below the configured max_loop_size of %d; nothing is "
-                        "partitioned.",
-                        loop_size, int(cfg_loop),
-                    )
-        else:
-            loop_size = mem_loop_size
-            if mem_divisions > 1:
-                if scaling_active:
-                    raise MemoryError(
-                        f"no forcing_parameters.max_loop_size is configured and the "
-                        f"run does not fit in available memory (would be split into "
-                        f"{mem_divisions} RAM-sized windows). The scaling DA's window "
-                        "boundaries are part of the result, so a RAM-derived "
-                        "partition is not reproducible. Set max_loop_size."
-                    )
-                LOG.warning(
-                    "no forcing_parameters.max_loop_size configured; splitting the "
-                    "run into %d windows sized by available memory. Set "
-                    "max_loop_size for reproducible windows.", mem_divisions,
+        auto = cfg_loop <= 0
+        if auto:
+            # AUTO_WINDOW, not a memory-derived size: the estimate is calibrated on one
+            # domain, so sizing up from it would trust it far past what was measured.
+            # Memory only ever caps, below. The span floor is the one term that may
+            # enlarge, because it is the only one that reaches the discharge.
+            cfg_loop = max(AUTO_WINDOW, span_cols)
+
+        loop_size = min(int(cfg_loop), mem_loop_size)
+        if loop_size < int(cfg_loop):
+            # mem_divisions <= 1 means the cap is this update's own forcing:
+            # one window, nothing partitioned. A RAM-driven split is many
+            # windows, and a partition set by machine load stays fatal.
+            # An explicit window is refused even at zero span: a partition set by
+            # machine load is not left to chance once someone pinned one. Auto is not,
+            # unless the partition is observable -- nobody chose a window, so there is
+            # nothing to tell them to lower.
+            if mem_divisions > 1 and scaling_active and (partition_matters or not auto):
+                remedy = (
+                    f"Free memory, or reduce the DA span ({span_cols} timesteps), which "
+                    "is what sets the floor under automatic sizing."
+                ) if auto else "Free memory, or lower max_loop_size to a value that fits."
+                raise MemoryError(
+                    f"available memory caps the run window at {loop_size} forcing "
+                    f"timesteps, below the {int(cfg_loop)} this run needs. A "
+                    "RAM-derived split would make the window partition, and so the "
+                    f"discharge, depend on current machine load. {remedy}"
                 )
+            if partition_matters:
+                # Memory was never the limit here: the cap IS this update's own
+                # forcing, so saying "free memory" sends the operator to the
+                # wrong place entirely.
+                raise ValueError(
+                        f"this update supplies {nts} forcing timestep(s), but the "
+                        f"scaling DA requires windows of {int(cfg_loop)} -- the "
+                        "larger of max_loop_size and the DA's own "
+                        "span (innovation_spread_h, plus lag_window_h when "
+                        "travel_time_lag is on). The window partition is part of "
+                        "the result under active assimilation, so it must not "
+                        "shrink silently to the update. Memory is NOT the limit "
+                        "here. Either drive longer updates, lower max_loop_size "
+                        "to the update cadence, or reduce the DA span "
+                        "(lag_window_h / innovation_spread_h); halving "
+                        "lag_window_h also halves the longest resolvable travel "
+                        "time. At innovation_spread_h 0 with the lag off the "
+                        "span is zero and this constraint disappears entirely."
+                    )
+            if mem_divisions > 1:
+                LOG.warning(
+                    "available memory caps the run window at %d forcing "
+                    "timesteps, below the %d requested",
+                    loop_size, int(cfg_loop),
+                )
+            else:
+                # Every short update logs this, so it is not a warning: the run
+                # is one window and nothing is partitioned.
+                LOG.info(
+                    "the run window is this update's own %d forcing timestep(s), "
+                    "below the %d requested; nothing is partitioned.",
+                    loop_size, int(cfg_loop),
+                )
+
+        if auto:
+            # AFTER the cap: the requested window is not the one that runs when memory
+            # narrows it, and the operator set no value to compare against.
+            LOG.info(
+                "max_loop_size not set; automatic sizing chose %d forcing timestep(s) "
+                "per window.", min(loop_size, nts),
+            )
 
         if loop_size >= nts:
             yield {
@@ -948,10 +1006,25 @@ class Model:
             }
         else:
             # construct run sets on the resolved window size
-            step = 0
-            while step < nts:
-                next_step = step + loop_size
-                times = qlats.columns[step:next_step]
+            bounds = [(i, min(i + loop_size, nts)) for i in range(0, nts, loop_size)]
+            # A final remainder shorter than the span is folded into the window before
+            # it, matching _fold_short_final_set on the -V5 side. The enlargement above
+            # exempts the final window, which is right for the forward halo (nothing
+            # follows it to read) and wrong for the travel-time lag: a short final
+            # window reads across a boundary it cannot supply. Measured on the Ohio
+            # subset with a 12 h lag, a 4-file remainder differed from an evenly
+            # divided run by 17.1 m3/s backward and 12.9 m3/s forward. Correctness wins
+            # over the memory cap here, exactly as it does on the CLI.
+            if span_cols > 0 and len(bounds) > 1 and bounds[-1][1] - bounds[-1][0] < span_cols:
+                tail = bounds.pop()
+                bounds[-1] = (bounds[-1][0], tail[1])
+                LOG.info(
+                    "scaling DA: final remainder of %d forcing column(s) folded into "
+                    "the window before it, which then holds %d.",
+                    tail[1] - tail[0], bounds[-1][1] - bounds[-1][0],
+                )
+            for start, stop in bounds:
+                times = qlats.columns[start:stop]
                 yield {
                     "nts": len(times) * self.qts_subdivisions,
                     "qlats": qlats[times],
@@ -960,7 +1033,6 @@ class Model:
                     "t0": datetime.strptime(times[0], "%Y%m%d%H%M"),
                     "final_timestamp": datetime.strptime(times[-1], "%Y%m%d%H%M")
                 }
-                step = next_step
 
     def _output_files(self, stream_params: dict) -> list[Path]:
         """This run's output parts, never another run's.

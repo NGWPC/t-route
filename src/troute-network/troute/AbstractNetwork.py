@@ -936,7 +936,16 @@ class AbstractNetwork(ABC):
         qlat_input_folder  = forcing_parameters.get("qlat_input_folder", None)
         et_input_folder   = forcing_parameters.get("et_input_folder", None)
         nts                = forcing_parameters.get("nts", None)
+        # 0 is the schema's "automatic". Only the BMI driver can size a window from
+        # memory, so here it means the historical default; the DA span still enlarges
+        # it below, which is the half that reaches the result.
         max_loop_size      = forcing_parameters.get("max_loop_size", 12)
+        if not max_loop_size:
+            max_loop_size = 24
+            LOG.info(
+                "max_loop_size not set; using %d forcing file(s) per window.",
+                max_loop_size,
+            )
         dt                 = forcing_parameters.get("dt", None)
 
         # Explicit sets must host the DA span or fail before anything routes.

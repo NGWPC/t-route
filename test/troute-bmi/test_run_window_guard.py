@@ -7,7 +7,7 @@ and the lag off, the spread is output-only and per timestep, so a shorter window
 is bit-identical (pinned in test/troute-nwm/test_scaling_da_in_kernel.py).
 
 The case that forced this: the NWM Standard AnA is 3 hours, so 3 forcing columns,
-against a ``max_loop_size`` default of 24. Refusing there made the operational
+against a much longer ``max_loop_size``. Refusing there made the operational
 config shipped in test/operational_configurations/ unable to run the DA at all.
 """
 
@@ -55,7 +55,7 @@ def _qlats() -> pd.DataFrame:
 
 
 def test_a_short_update_runs_when_the_da_has_no_span():
-    """Standard AnA shape: 3 columns against the max_loop_size default of 24."""
+    """Standard AnA shape: 3 columns against a max_loop_size of 24."""
     runs = list(_model(24, _ScalingDAStub(0.0))._build_run_sets(_qlats()))
     assert len(runs) == 1, f"expected one window over 3 columns, got {len(runs)}"
     assert runs[0]["nts"] == 3 * 12  # routing timesteps, not columns
@@ -70,10 +70,15 @@ def test_a_short_update_is_refused_once_the_span_is_nonzero():
 
 
 def test_a_span_that_fits_the_update_runs():
-    """The span is only a problem when the update cannot cover it."""
+    """The span is only a problem when the update cannot cover it.
+
+    3 columns at a window of 2 leaves a 1-column remainder, under the 2-column span,
+    so it folds into the window before it instead of being routed as a window that
+    reads across a boundary it cannot supply.
+    """
     runs = list(_model(2, _ScalingDAStub(2.0))._build_run_sets(_qlats()))
-    assert len(runs) == 2, f"expected windows of 2 and 1, got {len(runs)}"
-    assert [r["nts"] for r in runs] == [2 * 12, 1 * 12]
+    assert len(runs) == 1, f"expected the remainder folded in, got {len(runs)}"
+    assert [r["nts"] for r in runs] == [3 * 12]
 
 
 def test_no_assimilation_is_unaffected():

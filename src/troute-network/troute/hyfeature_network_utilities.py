@@ -324,6 +324,9 @@ def build_forcing_sets(
     nexus_input_folder = forcing_parameters.get("nexus_input_folder", None)
     nts                = forcing_parameters.get("nts", None)
     max_loop_size      = forcing_parameters.get("max_loop_size", 12)
+    if not max_loop_size:  # 0 is the schema's "automatic"
+        max_loop_size = 24
+        LOG.info("max_loop_size not set; using %d forcing file(s) per window.", max_loop_size)
     dt                 = forcing_parameters.get("dt", None)
 
     try:

@@ -785,10 +785,15 @@ class ForcingParameters(BaseModel):
     """
     Number of timesteps. This value, multiplied by 'dt', gives the total simulation time in seconds.
     """
-    max_loop_size: int = 24
+    max_loop_size: int = Field(0, ge=0)
     """
-    Value is in hours. To handle memory issues, t-route can divvy it's simulation time into chunks, reducing the amount 
+    Value is in hours. To handle memory issues, t-route can divvy it's simulation time into chunks, reducing the amount
     of forcing and data assimilation files it reads into memory at once. This is the size of those time loops.
+
+    0 (the default) sizes it automatically and conservatively from available memory,
+    never shorter than the DA's own span. Set a value to pin the partition instead:
+    that is only necessary when the DA has a span, since otherwise the partition does
+    not reach the result.
     """
     qlat_file_index_col: str = "feature_id"
     """

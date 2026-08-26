@@ -17,6 +17,9 @@ therefore TRUTHY, unlike the ``None`` it replaces, so nothing may gate on
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from troute.config.config import normalize_da_blocks
 
 
@@ -109,3 +112,20 @@ def test_nudging_is_off_by_default_and_scaling_needs_no_nudging_key():
     ).model_dump()["streamflow_da"]
     assert scaling_only["streamflow_scaling"] is True
     assert scaling_only["streamflow_nudging"] is False
+
+
+def test_max_loop_size_defaults_to_auto():
+    """0 is the sentinel for automatic sizing, and it is the default.
+
+    An operator has no way to compute a safe window by hand: it depends on the
+    machine's free memory and on the DA span. Making them pick one is how runs
+    ended up with a window shorter than the span.
+    """
+    from troute.config.compute_parameters import ForcingParameters
+
+    assert ForcingParameters(nts=288, dt=300, qlat_input_folder=".").max_loop_size == 0
+    assert ForcingParameters(
+        nts=288, dt=300, qlat_input_folder=".", max_loop_size=24
+    ).max_loop_size == 24
+    with pytest.raises(ValidationError):
+        ForcingParameters(nts=288, dt=300, qlat_input_folder=".", max_loop_size=-1)
