@@ -1088,11 +1088,10 @@ def _prep_da_positions_byreach(reach_list, gage_index):
 def _require_reservoir_da_params(
     param_df: pd.DataFrame, wbodies_sub: Sized, label: str
 ) -> None:
-    """Name the cause of an obs/params mismatch instead of dying on a bare KeyError.
+    """Name the cause of an obs/params mismatch instead of a bare KeyError.
 
-    Only when this job actually has waterbodies of this type: with none selected the
-    lookups below are `.loc[[]]`, which an empty-with-columns frame serves fine, and
-    that is the ordinary state after an observation-less window demotes them.
+    Only when the job has waterbodies of this type: with none selected the lookups
+    are `.loc[[]]`, which an empty frame serves.
     """
     if len(wbodies_sub) and param_df.empty:
         msg = (

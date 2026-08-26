@@ -29,9 +29,7 @@ class Config(BaseModel):
     def model_dump(self, **kwargs) -> dict:
         """Dump, with null data-assimilation sub-blocks normalized to dicts.
 
-        Every consumer reaches through those blocks with chained ``.get``; doing this
-        at each call site instead left two entry points crashing on a config that
-        merely omitted ``reservoir_da``.
+        One choke point: doing it per call site left two entry points crashing.
         """
         return normalize_da_blocks(super().model_dump(**kwargs))
 
@@ -416,14 +414,10 @@ class Config(BaseModel):
         return values
 
 
-# Sub-blocks a user omits come back present-and-NULL from validation, and consumers
-# chain `.get(block, {}).get(flag, ...)` through them, which dies on NoneType.
-#
-# What consumers may rely on afterwards: every block is a dict, and every FLAG inside
-# it is absent, so the nested `.get(flag, False)` reads give the configured-off answer.
-# What they may NOT rely on: `reservoir_da` is filled with its two sub-blocks and is
-# therefore TRUTHY, unlike the None it replaces. Gate on the nested flags, never on
-# `if reservoir_da:`.
+# An omitted sub-block comes back present-and-NULL, and consumers chain
+# `.get(block, {}).get(flag, ...)` through it, which dies on NoneType.
+# Afterwards every block is a dict with its flags absent, so nested reads answer
+# "configured off". Note reservoir_da is then TRUTHY: gate on the flags, not on it.
 _DA_BLOCKS = {
     "streamflow_da": (),
     "diversion_da": (),

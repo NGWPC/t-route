@@ -117,9 +117,8 @@ class Model:
             f.name
             for f in Path(_stream["stream_output_directory"]).glob("troute_output_*")
         ) if isinstance(_stream, dict) and _stream.get("stream_output_directory") else frozenset()
-        # Same for lake output: its merge replaces files[0] and deletes the rest, so
-        # a later AnA cycle sharing the directory would destroy the earlier cycle's
-        # published lake file exactly as it did the stream file.
+        # Same for lake output: its merge also replaces files[0] and deletes the
+        # rest, so a later AnA cycle would destroy the earlier cycle's lake file.
         _lake = (self.output_parameters or {}).get("lakeout_output")
         self._preexisting_lakeout: frozenset[str] = frozenset(
             f.name for f in Path(_lake).glob("troute_lakeout_*.nc")
@@ -270,11 +269,9 @@ class Model:
             if self._scaling_da is not None:
                 from nwm_routing.scaling_da_apply import merge_injected_obs
 
-                # One list spanning this UPDATE: t0 advances every update_until call,
-                # so the initialize-time list pinned to the original t0 stopped
-                # covering later windows (silent no-obs assimilation). Spanning the
-                # update rather than each window also keeps the injected observations
-                # independent of how max_loop_size partitions it.
+                # One list spanning this update: t0 advances every update_until
+                # call, and a per-window list would tie the observations to
+                # max_loop_size.
                 self._data_assimilation._usgs_df = merge_injected_obs(  # pyright: ignore[reportPrivateUsage]
                     self._scaling_da.build_usgs_df(
                         run["t0"], self.dt, run["nts"], scaling_da_run
@@ -537,13 +534,8 @@ class Model:
     def _compatible_lastobs(self, frame: pd.DataFrame) -> pd.DataFrame:
         """Drop lastobs rows this run does not assimilate.
 
-        The checkpoint records no producer mode, and the scaling arm's roster is a
-        strict SUBSET of nudging's: it excludes holdouts, reservoir-routed gages and
-        co-located duplicates. Installing a nudging checkpoint whole therefore hands
-        _prep_da_dataframes segments the current frames do not carry, which raises
-        "[...] not in index", or silently persists gages this run deliberately
-        excluded. Only the scaling roster is authoritative here; nudging keeps its
-        existing behavior.
+        Scaling's roster is a subset of nudging's, and the checkpoint records no
+        producer mode, so a nudging frame raises "not in index" downstream.
         """
         da = getattr(self, "_scaling_da", None)
         if da is None or frame is None or frame.empty:
@@ -565,11 +557,8 @@ class Model:
     def _owns_lastobs(self) -> bool:
         """Whether this run owns the lastobs frame, so a restore must keep it.
 
-        BOTH streamflow arms do: they drive the same nudging override, and
-        update_after_compute harvests the kernel's lastobs for either. Asking only
-        about nudging made a scaling run discard its own checkpointed frame on
-        restore, which threw away the cross-cycle decay continuity the harvest
-        exists to provide.
+        Both streamflow arms do; asking only about nudging made a scaling run
+        discard its own checkpoint.
         """
         sda = (self.data_assimilation_parameters or {}).get("streamflow_da") or {}
         return bool(sda.get("streamflow_nudging", False)
@@ -586,12 +575,9 @@ class Model:
     ) -> pd.DataFrame:
         """Install a saved DA frame unless it would erase live state.
 
-        A state written with this DA type off carries an empty frame; installing it
-        over a run that has the DA on leaves observations without parameters, or
-        drops the lastobs seed to open loop.
-
-        ``live_on`` says whether this run assimilates the type at all. ``None``
-        leaves the emptiness rules below in charge.
+        A state written with this type off carries an empty frame; installing it
+        over a live one leaves observations without parameters. ``live_on`` None
+        leaves the emptiness rules in charge.
         """
         if live_on is False:
             # A type this run does not run must not adopt the checkpoint's rows.
@@ -645,15 +631,10 @@ class Model:
             return self._restore_da_frame(
                 saved, live, label, advanced=advanced, live_on=live_on[key],
             )
-        # RESOLVE EVERY FRAME BEFORE MUTATING ANYTHING. A restore that raises has to
-        # leave the model exactly as it was: rewinding the clock first cleared
-        # _has_routed, so an identical retry saw a half-loaded model and accepted
-        # what it had just refused.
-        # An empty lastobs frame flips streamflow DA to open loop for any window
-        # with no observations, so it gets the same treatment as the reservoirs.
-        # time_since_lastobs is a RELATIVE offset, so a nudging-off run carrying a
-        # populated frame through would hand the next nudging-on run day-old
-        # observations as if they were current.
+        # Resolve every frame BEFORE mutating anything: a refused restore must
+        # leave the model as it was, or an identical retry accepts it.
+        # lastobs gets the reservoir treatment too: time_since_lastobs is relative,
+        # so carrying a stale frame hands the next run day-old obs as current.
         resolved = {
             "last_obs": restore(
                 data["last_obs"], da._last_obs_df, "last observations",
@@ -807,11 +788,9 @@ class Model:
         return int(self.dt * self.qts_subdivisions)
 
     def _update_da_run(self, run_sets: list[RunSet]) -> dict | None:
-        """The TimeSlice list spanning EVERY window of this update call.
+        """The TimeSlice list spanning every window of this update call.
 
-        Separate update calls still read different lists, which is real-time
-        semantics rather than a defect: a later cycle legitimately sees observations
-        an earlier one could not. See span_da_runs for why one window is not enough.
+        Separate update calls still differ: real-time semantics, not a defect.
         """
         from nwm_routing.scaling_da_apply import span_da_runs
 
@@ -855,14 +834,9 @@ class Model:
         # the DA it stays a warning.
         scaling_active = getattr(self, "_scaling_da", None) is not None
         cfg_loop = self.forcing_parameters.get("max_loop_size") or 0
-        # The DA's own time span, in forcing columns. At ZERO span the upstream
-        # spread is output-only and applied per timestep, so splitting a window
-        # leaves it unchanged (measured:
-        # test_the_partition_does_not_reach_the_result_at_zero_span). That is why a
-        # single-window update may be served below max_loop_size. Multi-window
-        # equivalence now measures 0.0 as well (lastobs is harvested for scaling, and
-        # every window reads one run-spanning observation list), but only the
-        # one-window case needs no measurement at all, so only it is exempted below.
+        # The DA's own span, in forcing columns. At zero span the spread is
+        # output-only and per timestep, so a single-window update may be served
+        # below max_loop_size without measurement.
         span_cols = 0
         if scaling_active:
             # The forward innovation window reads past the end of a window into
@@ -898,14 +872,9 @@ class Model:
         if cfg_loop > 0:
             loop_size = min(int(cfg_loop), mem_loop_size)
             if loop_size < int(cfg_loop):
-                # The two causes differ in whether the partition changes at all.
-                # mem_divisions <= 1 means the cap IS this update's own forcing, so
-                # the run is a single window and nothing is partitioned: safe to
-                # serve whenever the DA has no span, no measurement required. A
-                # RAM-driven split is MANY windows. Measured on VPU 01 at zero span,
-                # one window and ten are now bit-identical in nudge and discharge, so
-                # this is caution rather than a known defect: a partition chosen by
-                # machine load still is not something to leave to chance.
+                # mem_divisions <= 1 means the cap is this update's own forcing:
+                # one window, nothing partitioned. A RAM-driven split is many
+                # windows, and a partition set by machine load stays fatal.
                 if mem_divisions > 1 and scaling_active:
                     raise MemoryError(
                         f"available memory caps the run window at {loop_size} forcing "

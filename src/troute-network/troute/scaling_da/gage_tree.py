@@ -130,8 +130,8 @@ class GageTree:
             dtype=np.int64,
             count=self.n_segments,
         )
-        # Fails closed like a missing tree member: dropping the branch instead leaves
-        # the confluence denominator short and a sibling takes its share.
+        # Fails closed like a missing tree member: dropping it leaves the
+        # confluence denominator short and a sibling takes its share.
         ptr, cols = self.pruned_ptr, []
         new_ptr = np.zeros(self.n_segments + 1, dtype=np.int64)
         if ptr.size == self.n_segments + 1:

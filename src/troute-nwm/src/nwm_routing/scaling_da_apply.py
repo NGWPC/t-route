@@ -62,13 +62,8 @@ LOG = logging.getLogger("TROUTE")
 def span_da_runs(da_runs: "Iterable[Mapping[str, Any] | None]") -> dict | None:
     """One TimeSlice list covering every window, from the per-window lists.
 
-    The reader interpolates across gaps with ``limit_direction="both"``, which is
-    NON-LOCAL: the filled value at a timestamp depends on how much series was loaded.
-    Handing each window only its own files therefore made the injected observations,
-    and the routed discharge, depend on ``max_loop_size`` -- measured on VPU 01 as
-    52.1 cms in the injected frame and 76.6 cms in flow, and 0.0 once every window
-    reads this union. Nudging and reservoir persistence keep their per-window lists;
-    only the scaling injection reads this.
+    The reader's gap fill is non-local, so a per-window list makes the injected
+    observations depend on max_loop_size. Scaling only; nudging keeps its own.
     """
     seen: set[str] = set()
     files: list[str] = []
@@ -86,9 +81,7 @@ def span_da_runs(da_runs: "Iterable[Mapping[str, Any] | None]") -> dict | None:
     if first is None:
         return None
     spanning = dict(first)
-    # A PRESENT key stays present (build_da_sets chose no file); an ABSENT one stays
-    # absent, so _read_timeslices keeps its documented directory-glob fallback rather
-    # than silently seeing an empty list.
+    # Absent stays absent, so _read_timeslices keeps its directory-glob fallback.
     if any(d is not None and "usgs_timeslice_files" in d for d in seen_keys):
         spanning["usgs_timeslice_files"] = sorted(files)
     return spanning
