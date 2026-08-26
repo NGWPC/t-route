@@ -69,7 +69,7 @@ def _da_config(**enabled):
     return {
         "compute_parameters": {
             "data_assimilation_parameters": {
-                # lastobs belongs to streamflow nudging, and is dropped when it is off.
+                # lastobs belongs to the streamflow arms, and is dropped when both are off.
                 "streamflow_da": {"streamflow_nudging": flags["nudging"]},
                 "reservoir_da": {
                     "reservoir_persistence_da": {
@@ -688,4 +688,58 @@ def test_the_enabled_flags_track_the_real_config_schema():
     assert model._reservoir_da_enabled() == {
         "usgs": True, "usace": True, "usbr": True, "rfc": True, "gl": True
     }
-    assert model._streamflow_nudging_enabled() is True
+    assert model._owns_lastobs() is True
+
+
+def test_a_scaling_run_keeps_its_checkpointed_lastobs():
+    """Scaling harvests lastobs, so a restore must not treat the frame as unowned.
+
+    Asking only about streamflow_nudging made a scaling-only run drop the
+    checkpoint's lastobs and restart its decay history, which is exactly the
+    cross-cycle continuity the harvest exists to provide.
+    """
+    model = _make_model(0.0, _ExecutionPlanLike(), nudging=False)
+    model._config["compute_parameters"]["data_assimilation_parameters"][
+        "streamflow_da"]["streamflow_scaling"] = True
+    model._data_assimilation._last_obs_df = pd.DataFrame()  # nothing built yet
+    saved = pd.DataFrame({"discharge": [42.0], "time_since_lastobs": [-1800.0]})
+
+    state = _no_da_state()
+    state["last_obs"] = saved
+    model.load_state(state)
+
+    pd.testing.assert_frame_equal(model._data_assimilation._last_obs_df, saved)
+
+
+def test_a_wider_checkpoint_roster_is_trimmed_to_this_run():
+    """A nudging checkpoint carries gages the scaling arm deliberately excludes.
+
+    Scaling's roster is a strict subset of nudging's (holdouts, reservoir-routed and
+    co-located gages are dropped), and the checkpoint records no producer mode.
+    Installing it whole hands _prep_da_dataframes segments the current frames do not
+    carry, which raises "not in index", or silently persists excluded gages.
+    """
+    model = _make_model(0.0, _ExecutionPlanLike())
+    model.dt = 300
+    model._scaling_da = _ScalingDAStub()
+    model._scaling_da.gage_seg = {"A": 1}   # this run assimilates seg 1
+    model._data_assimilation._last_obs_df = pd.DataFrame()
+
+    state = _no_da_state()
+    state["last_obs"] = pd.DataFrame({"discharge": [5.0, 9.0]}, index=[1, 2])
+    model.load_state(state)
+
+    got = model._data_assimilation._last_obs_df
+    assert list(got.index) == [1], f"seg 2 is not in this run's roster: {list(got.index)}"
+
+
+def test_a_matching_roster_is_left_alone():
+    model = _make_model(0.0, _ExecutionPlanLike())
+    model.dt = 300
+    model._scaling_da = _ScalingDAStub()
+    model._scaling_da.gage_seg = {"A": 1, "B": 2}
+    model._data_assimilation._last_obs_df = pd.DataFrame()
+    saved = pd.DataFrame({"discharge": [5.0, 9.0]}, index=[1, 2])
+    state = _no_da_state(); state["last_obs"] = saved
+    model.load_state(state)
+    pd.testing.assert_frame_equal(model._data_assimilation._last_obs_df, saved)

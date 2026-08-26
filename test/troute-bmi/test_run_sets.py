@@ -225,9 +225,10 @@ class TestRamCapIsAnErrorUnderActiveAssimilation:
     def test_a_zero_span_da_still_refuses_a_ram_split(self, monkeypatch):
         """Zero span exempts a SINGLE window, not a RAM-driven split.
 
-        The kernel re-seeds its at-gage lastobs at every window boundary for a
-        scaling run (update_after_compute persists lastobs only for nudging), so a
-        gap in the observations makes even a zero-span partition reach the result.
+        Multi-window equivalence now measures 0.0 (lastobs is harvested for scaling,
+        and every window reads one run-spanning observation list), but a partition
+        chosen by machine load is still not something to leave to chance, and the
+        one-window case is the one that needs no measurement at all.
         """
         self._pressure(monkeypatch)
         m = _model(nts_cols=96, max_loop_size=96)
