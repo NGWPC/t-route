@@ -110,6 +110,13 @@ class Model:
         with open(config_file) as reader:
             data = yaml.load(reader, Loader=yaml.SafeLoader)
         self._config: dict = Config.with_strict_mode(**data).model_dump()
+        # Anything already in the output directory belongs to another run (an earlier
+        # AnA cycle, typically) and must survive this one's merge.
+        _stream = (self.output_parameters or {}).get("stream_output")
+        self._preexisting_output: frozenset[str] = frozenset(
+            f.name
+            for f in Path(_stream["stream_output_directory"]).glob("troute_output_*")
+        ) if isinstance(_stream, dict) and _stream.get("stream_output_directory") else frozenset()
 
         self.dt = int(self.forcing_parameters["dt"])
 
@@ -833,19 +840,19 @@ class Model:
                 # The two causes differ in whether the partition changes at all.
                 # mem_divisions <= 1 means the cap IS this update's own forcing, so
                 # the run is a single window and nothing is partitioned: safe to
-                # serve whenever the DA has no span. A RAM-driven split is MANY
-                # windows, and the kernel re-seeds lastobs per window for a scaling
-                # run (DataAssimilation.update_after_compute only persists it for
-                # nudging), so a gap in the observations makes even a zero-span
-                # partition reach the result. That stays fatal.
+                # serve whenever the DA has no span, no measurement required. A
+                # RAM-driven split is MANY windows; at-gage decay now carries across
+                # them (update_after_compute harvests lastobs for scaling runs too),
+                # but multi-window equivalence has not been measured, and a partition
+                # chosen by machine load is not something to leave unproven.
                 if mem_divisions > 1 and scaling_active:
                     raise MemoryError(
                         f"available memory caps the run window at {loop_size} forcing "
                         f"timesteps, below the configured max_loop_size of "
-                        f"{int(cfg_loop)}. The scaling DA re-seeds its at-gage state "
-                        "at every window boundary, so a RAM-derived split would make "
-                        "discharge depend on current machine load. Free memory, or "
-                        "lower max_loop_size to a value that fits."
+                        f"{int(cfg_loop)}. A RAM-derived split would make the "
+                        "window partition, and so the discharge, depend on current "
+                        "machine load. Free memory, or lower max_loop_size to a "
+                        "value that fits."
                     )
                 if partition_matters:
                     # Memory was never the limit here: the cap IS this update's own
@@ -925,16 +932,28 @@ class Model:
                 }
                 step = next_step
 
+    def _output_files(self, stream_params: dict) -> list[Path]:
+        """This run's output parts, never another run's.
+
+        The merge replaces files[0] and deletes the rest, so it must not reach files
+        it did not write. An AnA cycle is a separate model over the same output
+        directory: globbing the directory made each cycle swallow the previous
+        cycle's merged result, leaving one file of overlapping timestamps and no way
+        back. Anything already present when this model was built is off limits.
+        """
+        stream_type = stream_params.get("stream_output_type")
+        foreign = getattr(self, "_preexisting_output", frozenset())
+        return sorted(
+            (f for f in Path(stream_params["stream_output_directory"]).glob(
+                "troute_output_*" + stream_type) if f.name not in foreign),
+            key=lambda f: f.stem,
+        )
+
     def _merge_run_results(self):
         stream_params = self.output_parameters.get("stream_output")
         if isinstance(stream_params, dict):
             stream_type = stream_params.get("stream_output_type")
-            files = sorted(
-                Path(stream_params["stream_output_directory"]).glob(
-                    "troute_output_*" + stream_type
-                ),
-                key=lambda f: f.stem
-            )
+            files = self._output_files(stream_params)
             if len(files) > 1:
                 start_time = time.time()
 

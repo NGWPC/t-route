@@ -232,7 +232,7 @@ class TestRamCapIsAnErrorUnderActiveAssimilation:
         self._pressure(monkeypatch)
         m = _model(nts_cols=96, max_loop_size=96)
         m._scaling_da = SimpleNamespace(innovation_spread_h=0.0, travel_time_lag=False)
-        with pytest.raises(MemoryError, match="re-seeds its at-gage state"):
+        with pytest.raises(MemoryError, match="machine load"):
             list(m._build_run_sets(_qlats(96)))
 
     def test_a_zero_span_da_serves_a_short_update(self, plenty_of_memory):
