@@ -33,7 +33,7 @@ class _ScalingDAStub:
         self.lag_window_h = 48.0
 
 
-def _model(max_loop_size: int, scaling_da: _ScalingDAStub | None) -> Model:
+def _model(max_loop_size: int, scaling_da: _ScalingDAStub | None, cols: int = 3) -> Model:
     model = Model.__new__(Model)  # skip __init__ (no config/network build)
     model._config = {
         "compute_parameters": {
@@ -41,6 +41,7 @@ def _model(max_loop_size: int, scaling_da: _ScalingDAStub | None) -> Model:
                 "max_loop_size": max_loop_size,
                 "qts_subdivisions": 12,
                 "dt": 300,
+                "nts": cols * 12,
             }
         }
     }
@@ -50,8 +51,10 @@ def _model(max_loop_size: int, scaling_da: _ScalingDAStub | None) -> Model:
     return model
 
 
-def _qlats() -> pd.DataFrame:
-    return pd.DataFrame(1.0, index=[10, 20], columns=_COLUMNS)
+def _qlats(cols: int = 3) -> pd.DataFrame:
+    times = [(datetime(2020, 1, 1, 1, 0) + pd.Timedelta(hours=i)).strftime("%Y%m%d%H%M")
+             for i in range(cols)]
+    return pd.DataFrame(1.0, index=[10, 20], columns=times)
 
 
 def test_a_short_update_runs_when_the_da_has_no_span():
@@ -104,3 +107,33 @@ def test_the_update_da_run_spans_every_window():
 
     spanning = model._update_da_run(windows)
     assert spanning["usgs_timeslice_files"] == ["a.ncdf", "b.ncdf", "c.ncdf", "d.ncdf"]
+
+
+class TestAutoYieldsToTheUpdate:
+    """An explicit window is a promise the DA will operate at that width, so it refuses
+    to shrink. Automatic sizing promises nothing, so it must adapt to whatever the
+    driver supplies rather than fail a run that is correct as a single window.
+    """
+
+    def test_auto_serves_an_update_that_covers_the_span(self):
+        # 18 columns against a 12 h span: one window, span resolved, nothing to refuse.
+        # Demanding the 24-column preference here failed a correct run.
+        runs = list(_model(0, _ScalingDAStub(12.0), cols=18)._build_run_sets(_qlats(18)))
+        assert [r["nts"] for r in runs] == [18 * 12]
+
+    def test_auto_still_refuses_an_update_shorter_than_the_span(self):
+        model = _model(0, _ScalingDAStub(12.0), cols=6)
+        with pytest.raises(ValueError, match="span is 12"):
+            list(model._build_run_sets(_qlats(6)))
+
+    def test_auto_does_not_name_a_knob_nobody_set(self):
+        model = _model(0, _ScalingDAStub(12.0), cols=6)
+        with pytest.raises(ValueError) as excinfo:
+            list(model._build_run_sets(_qlats(6)))
+        assert "lower max_loop_size" not in str(excinfo.value)
+
+    def test_an_explicit_window_still_refuses_to_shrink(self):
+        """Unchanged: 18 columns against a configured 24 is still a silent shrink."""
+        model = _model(24, _ScalingDAStub(12.0), cols=18)
+        with pytest.raises(ValueError, match="max_loop_size"):
+            list(model._build_run_sets(_qlats(18)))

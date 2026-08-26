@@ -929,7 +929,11 @@ class Model:
             # domain, so sizing up from it would trust it far past what was measured.
             # Memory only ever caps, below. The span floor is the one term that may
             # enlarge, because it is the only one that reaches the discharge.
-            cfg_loop = max(AUTO_WINDOW, span_cols)
+            # AUTO_WINDOW is a preference and yields to the update; only span_cols is
+            # a floor. An explicit window is a promise about the DA's operating window
+            # and refuses to shrink, but nobody promised anything here, so demanding 24
+            # of an 18-column update would fail a run that is correct as one window.
+            cfg_loop = max(min(AUTO_WINDOW, nts), span_cols)
 
         loop_size = min(int(cfg_loop), mem_loop_size)
         if loop_size < int(cfg_loop):
@@ -954,22 +958,21 @@ class Model:
             if partition_matters:
                 # Memory was never the limit here: the cap IS this update's own
                 # forcing, so saying "free memory" sends the operator to the
-                # wrong place entirely.
+                # wrong place entirely. Under auto the span is the only term left,
+                # so naming max_loop_size would point at a knob nobody set.
                 raise ValueError(
-                        f"this update supplies {nts} forcing timestep(s), but the "
-                        f"scaling DA requires windows of {int(cfg_loop)} -- the "
-                        "larger of max_loop_size and the DA's own "
-                        "span (innovation_spread_h, plus lag_window_h when "
-                        "travel_time_lag is on). The window partition is part of "
-                        "the result under active assimilation, so it must not "
-                        "shrink silently to the update. Memory is NOT the limit "
-                        "here. Either drive longer updates, lower max_loop_size "
-                        "to the update cadence, or reduce the DA span "
-                        "(lag_window_h / innovation_spread_h); halving "
-                        "lag_window_h also halves the longest resolvable travel "
-                        "time. At innovation_spread_h 0 with the lag off the "
-                        "span is zero and this constraint disappears entirely."
-                    )
+                    f"this update supplies {nts} forcing timestep(s), but the scaling "
+                    f"DA needs windows of {int(cfg_loop)}"
+                    + ("" if auto else " (max_loop_size, or the DA's span if larger)")
+                    + f"; its span is {span_cols} (innovation_spread_h, plus "
+                    "lag_window_h when travel_time_lag is on). That span is part of "
+                    "the result, so it must not shrink silently to the update. Memory "
+                    "is NOT the limit here. Drive longer updates, "
+                    + ("" if auto else "lower max_loop_size to the update cadence, ")
+                    + "or reduce the DA span; halving lag_window_h also halves the "
+                    "longest resolvable travel time. At innovation_spread_h 0 with "
+                    "the lag off the span is zero and this constraint disappears."
+                )
             if mem_divisions > 1:
                 LOG.warning(
                     "available memory caps the run window at %d forcing "
