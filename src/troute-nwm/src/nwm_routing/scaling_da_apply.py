@@ -17,8 +17,8 @@ Everything here is in ``up_node_id`` space, and the gage crosswalk comes from
 injection always lands on a reach boundary.
 
 Observations come from the shared ``usgs_timeslices_folder`` through
-``nhd_io.get_obs_from_timeslices`` (same files, QC gate, and interpolation as
-nudging and reservoir persistence), or synthetically as ``synthetic_obs_factor``
+``nhd_io.get_obs_from_timeslices`` (same QC gate and interpolation as nudging and
+reservoir persistence, but over the run-spanning file list, not the per-window one), or synthetically as ``synthetic_obs_factor``
 times a frozen no-DA baseline.
 """
 
@@ -43,6 +43,7 @@ from troute.scaling_da import (
 from troute.scaling_da.preprocess import TIMESLICE_GLOB_SUFFIX as _TIMESLICE_GLOB_SUFFIX
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from collections.abc import Mapping, Sequence
 
     from numpy.typing import NDArray
@@ -56,6 +57,41 @@ if TYPE_CHECKING:
     RunResults = Sequence[RunResult]
 
 LOG = logging.getLogger("TROUTE")
+
+
+def span_da_runs(da_runs: "Iterable[Mapping[str, Any] | None]") -> dict | None:
+    """One TimeSlice list covering every window, from the per-window lists.
+
+    The reader interpolates across gaps with ``limit_direction="both"``, which is
+    NON-LOCAL: the filled value at a timestamp depends on how much series was loaded.
+    Handing each window only its own files therefore made the injected observations,
+    and the routed discharge, depend on ``max_loop_size`` -- measured on VPU 01 as
+    52.1 cms in the injected frame and 76.6 cms in flow, and 0.0 once every window
+    reads this union. Nudging and reservoir persistence keep their per-window lists;
+    only the scaling injection reads this.
+    """
+    seen: set[str] = set()
+    files: list[str] = []
+    first: Mapping[str, Any] | None = None
+    seen_keys: list[Mapping[str, Any] | None] = []
+    for da_run in da_runs:
+        if da_run is None:
+            continue
+        seen_keys.append(da_run)
+        first = first if first is not None else da_run
+        for f in da_run.get("usgs_timeslice_files", []):
+            if f not in seen:
+                seen.add(f)
+                files.append(f)
+    if first is None:
+        return None
+    spanning = dict(first)
+    # A PRESENT key stays present (build_da_sets chose no file); an ABSENT one stays
+    # absent, so _read_timeslices keeps its documented directory-glob fallback rather
+    # than silently seeing an empty list.
+    if any(d is not None and "usgs_timeslice_files" in d for d in seen_keys):
+        spanning["usgs_timeslice_files"] = sorted(files)
+    return spanning
 
 
 def merge_injected_obs(
@@ -927,8 +963,8 @@ class ScalingDA:
 
         ``get_obs_from_timeslices`` with an identity crosswalk gives site-keyed
         rows under the same QC and interpolation every other consumer uses. The
-        file list is ``build_da_sets``'s per-window list; a driver that never
-        built da_sets falls back to the whole directory.
+        drivers hand this the RUN-spanning union (see ``span_da_runs``); a driver
+        that never built da_sets falls back to the whole directory.
         """
         from troute import nhd_io
 

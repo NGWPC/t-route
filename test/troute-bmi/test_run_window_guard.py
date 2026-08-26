@@ -80,3 +80,22 @@ def test_no_assimilation_is_unaffected():
     """Without the DA a short update was always served; keep it that way."""
     runs = list(_model(24, None)._build_run_sets(_qlats()))
     assert len(runs) == 1
+
+
+def test_the_update_da_run_spans_every_window():
+    """The BMI driver must hand the scaling injection one run-spanning list.
+
+    A per-window list makes the injected observations depend on max_loop_size,
+    because the reader's gap fill is non-local. Pins the wiring, not just the helper.
+    """
+    model = _model(24, _ScalingDAStub(0.0))
+    windows = [{"n": 1}, {"n": 2}, {"n": 3}]
+    per_window = {
+        1: {"usgs_timeslice_files": ["a.ncdf", "b.ncdf"]},
+        2: {"usgs_timeslice_files": ["b.ncdf", "c.ncdf"]},
+        3: {"usgs_timeslice_files": ["c.ncdf", "d.ncdf"]},
+    }
+    model._window_da_run = lambda run: per_window[run["n"]]  # type: ignore[assignment]
+
+    spanning = model._update_da_run(windows)
+    assert spanning["usgs_timeslice_files"] == ["a.ncdf", "b.ncdf", "c.ncdf", "d.ncdf"]

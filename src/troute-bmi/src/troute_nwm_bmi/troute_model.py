@@ -117,6 +117,13 @@ class Model:
             f.name
             for f in Path(_stream["stream_output_directory"]).glob("troute_output_*")
         ) if isinstance(_stream, dict) and _stream.get("stream_output_directory") else frozenset()
+        # Same for lake output: its merge replaces files[0] and deletes the rest, so
+        # a later AnA cycle sharing the directory would destroy the earlier cycle's
+        # published lake file exactly as it did the stream file.
+        _lake = (self.output_parameters or {}).get("lakeout_output")
+        self._preexisting_lakeout: frozenset[str] = frozenset(
+            f.name for f in Path(_lake).glob("troute_lakeout_*.nc")
+        ) if isinstance(_lake, Path) else frozenset()
 
         self.dt = int(self.forcing_parameters["dt"])
 
@@ -238,6 +245,11 @@ class Model:
         # full_results = None
         # Materialized: the hand-off logic needs to know the window count.
         run_sets = list(self._build_run_sets(qlats))
+        # One TimeSlice list for the whole update: a per-window list makes the
+        # injected observations depend on how max_loop_size partitions it.
+        scaling_da_run = (
+            self._update_da_run(run_sets) if self._scaling_da is not None else None
+        )
         # The travel-time lag's deferral, WITHIN this update call only: a
         # non-final window's spread waits for the next window's innovation (its
         # halo). Local by construction, so nothing is ever pending across
@@ -258,12 +270,14 @@ class Model:
             if self._scaling_da is not None:
                 from nwm_routing.scaling_da_apply import merge_injected_obs
 
-                # da_run is built per WINDOW: t0 advances every update_until call,
-                # and the initialize-time list pinned to the original t0 stopped
-                # covering later windows (silent no-obs assimilation).
+                # One list spanning this UPDATE: t0 advances every update_until call,
+                # so the initialize-time list pinned to the original t0 stopped
+                # covering later windows (silent no-obs assimilation). Spanning the
+                # update rather than each window also keeps the injected observations
+                # independent of how max_loop_size partitions it.
                 self._data_assimilation._usgs_df = merge_injected_obs(  # pyright: ignore[reportPrivateUsage]
                     self._scaling_da.build_usgs_df(
-                        run["t0"], self.dt, run["nts"], self._window_da_run(run)
+                        run["t0"], self.dt, run["nts"], scaling_da_run
                     ),
                     self._data_assimilation.usgs_df,
                 )
@@ -520,10 +534,46 @@ class Model:
             "gl": bool(persistence.get("reservoir_persistence_greatLake", False)),
         }
 
-    def _streamflow_nudging_enabled(self) -> bool:
-        """Whether this run nudges streamflow, which is what owns the lastobs frame."""
-        da = self.data_assimilation_parameters or {}
-        return bool((da.get("streamflow_da") or {}).get("streamflow_nudging", False))
+    def _compatible_lastobs(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Drop lastobs rows this run does not assimilate.
+
+        The checkpoint records no producer mode, and the scaling arm's roster is a
+        strict SUBSET of nudging's: it excludes holdouts, reservoir-routed gages and
+        co-located duplicates. Installing a nudging checkpoint whole therefore hands
+        _prep_da_dataframes segments the current frames do not carry, which raises
+        "[...] not in index", or silently persists gages this run deliberately
+        excluded. Only the scaling roster is authoritative here; nudging keeps its
+        existing behavior.
+        """
+        da = getattr(self, "_scaling_da", None)
+        if da is None or frame is None or frame.empty:
+            return frame
+        roster = {int(seg) for seg in getattr(da, "gage_seg", {}).values()}
+        if not roster:
+            return frame
+        keep = frame.index.isin(roster)
+        if keep.all():
+            return frame
+        LOG.warning(
+            "load_state: dropped %d lastobs row(s) the scaling DA does not "
+            "assimilate (holdout, reservoir-routed or co-located gages); the "
+            "checkpoint was written by a run with a wider roster.",
+            int((~keep).sum()),
+        )
+        return frame[keep]
+
+    def _owns_lastobs(self) -> bool:
+        """Whether this run owns the lastobs frame, so a restore must keep it.
+
+        BOTH streamflow arms do: they drive the same nudging override, and
+        update_after_compute harvests the kernel's lastobs for either. Asking only
+        about nudging made a scaling run discard its own checkpointed frame on
+        restore, which threw away the cross-cycle decay continuity the harvest
+        exists to provide.
+        """
+        sda = (self.data_assimilation_parameters or {}).get("streamflow_da") or {}
+        return bool(sda.get("streamflow_nudging", False)
+                    or sda.get("streamflow_scaling", False))
 
     @staticmethod
     def _restore_da_frame(
@@ -607,7 +657,7 @@ class Model:
         resolved = {
             "last_obs": restore(
                 data["last_obs"], da._last_obs_df, "last observations",
-                live_on=self._streamflow_nudging_enabled()),
+                live_on=self._owns_lastobs()),
             "usgs": restore_reservoir(
                 "usgs", data["usgs"], da._reservoir_usgs_param_df,
                 "USGS reservoir DA parameters"),
@@ -644,7 +694,7 @@ class Model:
         # Model.run overwrites it every routed window, so it cannot go stale.
         self._seeded_q0 = seeded
         self._network._t0 = data["t0"]
-        da._last_obs_df = resolved["last_obs"]
+        da._last_obs_df = self._compatible_lastobs(resolved["last_obs"])
         da._reservoir_usgs_param_df = resolved["usgs"]
         da._reservoir_usace_param_df = resolved["usace"]
         if "usbr" in resolved:
@@ -756,6 +806,17 @@ class Model:
         # backup if NGEN's delta time was not explicitly set
         return int(self.dt * self.qts_subdivisions)
 
+    def _update_da_run(self, run_sets: list[RunSet]) -> dict | None:
+        """The TimeSlice list spanning EVERY window of this update call.
+
+        Separate update calls still read different lists, which is real-time
+        semantics rather than a defect: a later cycle legitimately sees observations
+        an earlier one could not. See span_da_runs for why one window is not enough.
+        """
+        from nwm_routing.scaling_da_apply import span_da_runs
+
+        return span_da_runs(self._window_da_run(run) for run in run_sets)
+
     def _window_da_run(self, run: RunSet) -> dict | None:
         """The TimeSlice file list covering one routing window.
 
@@ -798,10 +859,10 @@ class Model:
         # spread is output-only and applied per timestep, so splitting a window
         # leaves it unchanged (measured:
         # test_the_partition_does_not_reach_the_result_at_zero_span). That is why a
-        # single-window update may be served below max_loop_size. It does NOT make
-        # windows generally interchangeable: the kernel re-seeds its at-gage lastobs
-        # per window, so a gage with an observation GAP is nudged differently across
-        # a boundary. Hence only the one-window case is exempted below.
+        # single-window update may be served below max_loop_size. Multi-window
+        # equivalence now measures 0.0 as well (lastobs is harvested for scaling, and
+        # every window reads one run-spanning observation list), but only the
+        # one-window case needs no measurement at all, so only it is exempted below.
         span_cols = 0
         if scaling_active:
             # The forward innovation window reads past the end of a window into
@@ -841,10 +902,10 @@ class Model:
                 # mem_divisions <= 1 means the cap IS this update's own forcing, so
                 # the run is a single window and nothing is partitioned: safe to
                 # serve whenever the DA has no span, no measurement required. A
-                # RAM-driven split is MANY windows; at-gage decay now carries across
-                # them (update_after_compute harvests lastobs for scaling runs too),
-                # but multi-window equivalence has not been measured, and a partition
-                # chosen by machine load is not something to leave unproven.
+                # RAM-driven split is MANY windows. Measured on VPU 01 at zero span,
+                # one window and ten are now bit-identical in nudge and discharge, so
+                # this is caution rather than a known defect: a partition chosen by
+                # machine load still is not something to leave to chance.
                 if mem_divisions > 1 and scaling_active:
                     raise MemoryError(
                         f"available memory caps the run window at {loop_size} forcing "
@@ -979,8 +1040,10 @@ class Model:
                 self._timings["output_time"] = time.time() - start_time
         wbdy_dir = self.output_parameters.get("lakeout_output", None)
         if isinstance(wbdy_dir, Path):
+            foreign = getattr(self, "_preexisting_lakeout", frozenset())
             files = sorted(
-                Path(wbdy_dir).glob("troute_lakeout_*.nc"),
+                (f for f in Path(wbdy_dir).glob("troute_lakeout_*.nc")
+                 if f.name not in foreign),
                 key=lambda f: f.stem
             )
             if len(files) > 1:
