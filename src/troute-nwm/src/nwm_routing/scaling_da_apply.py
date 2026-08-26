@@ -6,8 +6,11 @@ the Muskingum-Cunge nudging override, carrying the correction DOWNSTREAM through
 routing. After routing, :meth:`ScalingDA.apply_in_kernel` reads the kernel-recorded
 innovation (``nudge``), reconstructs the gage background, and spreads the
 correction UPSTREAM (area-scaling along reaches, flow-ratio split at confluences).
-Stale-obs decay within a window follows ``da_decay_coefficient``; decay state is
-NOT carried across forcing windows.
+Stale-obs decay follows ``da_decay_coefficient`` and IS carried across forcing
+windows: ``DataAssimilation.update_after_compute`` harvests the kernel's lastobs for
+scaling runs, so a gage that falls silent keeps decaying rather than resetting at a
+boundary that ``max_loop_size`` happens to fall on. The frame rides in the BMI
+checkpoint, so the continuity spans cycles as well.
 
 Everything here is in ``up_node_id`` space, and the gage crosswalk comes from
 ``network.gages`` -- the same set the execution plan splits reaches at, so the

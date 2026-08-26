@@ -242,9 +242,8 @@ class StreamflowDA(BaseModel):
             raise ValueError(
                 "streamflow_da.streamflow_nudging and "
                 "streamflow_da.streamflow_scaling are mutually exclusive: both "
-                "drive the same Muskingum-Cunge nudging override, and nudging's "
-                "lastobs state would give the scaling arm cross-window decay "
-                "continuity it is documented not to have."
+                "drive the same Muskingum-Cunge nudging override, so enabling both "
+                "would apply two corrections to one gage."
             )
         return self
 

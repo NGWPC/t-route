@@ -278,7 +278,15 @@ class NudgingDA(AbstractDA):
         streamflow_da_parameters = self._data_assimilation_parameters.get('streamflow_da', None)
 
         if streamflow_da_parameters:
-            if streamflow_da_parameters.get('streamflow_nudging', False):
+            # The scaling arm drives the same Muskingum-Cunge nudging override, so the
+            # kernel records the same lastobs tuple. Harvesting it for scaling too is
+            # what carries stale-obs decay across a window boundary: without it the
+            # kernel re-seeds from each window's own t0 observation, and a gage that
+            # falls silent stops being corrected at a boundary chosen by max_loop_size.
+            if (
+                streamflow_da_parameters.get('streamflow_nudging', False)
+                or streamflow_da_parameters.get('streamflow_scaling', False)
+            ):
                 self._last_obs_df = new_lastobs(run_results, time_increment)
 
     def update_for_next_loop(self, network, da_run,):

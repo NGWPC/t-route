@@ -407,3 +407,41 @@ class TestThetaPerTree:
         with caplog.at_level(_logging.WARNING, logger="TROUTE"):
             self._resolve(per_tree={"BADID": 0.4}, known_sites={"03031500"})
         assert any("per_tree" in r.getMessage() for r in caplog.records)
+
+
+def test_the_lastobs_harvest_runs_for_a_scaling_run() -> None:
+    """Stale-obs decay has to survive a window boundary.
+
+    The kernel re-seeds lastobs from each window's own t0 observation when the frame
+    is empty, so without this harvest a gage that falls silent stops being corrected
+    at whatever boundary max_loop_size lands on, and a chunked AnA cycle differs from
+    an unchunked one. The scaling arm drives the same nudging override as legacy
+    nudging, so the kernel already records what the harvest reads.
+    """
+    import numpy as np
+    import pandas as pd
+    from troute.DataAssimilation import NudgingDA
+
+    class _DA(NudgingDA):
+        def __init__(self, params):
+            self._data_assimilation_parameters = params
+            self._last_obs_df = pd.DataFrame()
+
+    # r[3] is (gage segment ids, time since obs, last obs value), as the kernel emits.
+    run_results = [[
+        np.array([10]), np.zeros((1, 4)), 0,
+        (np.array([10]), np.array([300.0]), np.array([7.5])),
+        0, 0, 0, 0, np.zeros((1, 1)), np.zeros((1, 2)),
+    ]]
+
+    scaling = _DA({"streamflow_da": {"streamflow_scaling": True,
+                                     "streamflow_nudging": False}})
+    scaling.update_after_compute(run_results, 3600)
+    assert not scaling._last_obs_df.empty, (
+        "a scaling run must harvest lastobs, or decay resets at every window boundary"
+    )
+
+    off = _DA({"streamflow_da": {"streamflow_scaling": False,
+                                 "streamflow_nudging": False}})
+    off.update_after_compute(run_results, 3600)
+    assert off._last_obs_df.empty, "no streamflow DA means nothing to harvest"
