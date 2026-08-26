@@ -88,3 +88,24 @@ def test_the_nested_flags_read_as_configured_off() -> None:
 def test_a_config_without_the_section_is_untouched() -> None:
     assert normalize_da_blocks({"compute_parameters": {}}) == {"compute_parameters": {}}
     assert normalize_da_blocks({}) == {}
+
+
+def test_nudging_is_off_by_default_and_scaling_needs_no_nudging_key():
+    """Scaling must not depend on the nudging flag, so removing nudging stays seamless.
+
+    Both arms default off, and a scaling-only block never mentions nudging.
+    """
+    from troute.config.compute_parameters import DataAssimilationParameters
+
+    # An unwritten streamflow_da is null, which normalize_da_blocks turns into {},
+    # so both arms read off.
+    bare = _da(normalize_da_blocks(_dumped({"streamflow_da": None})))
+    assert bare["streamflow_da"].get("streamflow_nudging", False) is False
+    assert bare["streamflow_da"].get("streamflow_scaling", False) is False
+
+    scaling_only = DataAssimilationParameters(
+        usgs_timeslices_folder=".",
+        streamflow_da={"streamflow_scaling": True},   # no nudging key at all
+    ).model_dump()["streamflow_da"]
+    assert scaling_only["streamflow_scaling"] is True
+    assert scaling_only["streamflow_nudging"] is False
