@@ -79,6 +79,16 @@ lint.per-file-ignores."src/troute-network/troute/scaling_da/*.py" = [
   "C901",
   "TRY003", "EM101", "EM102",
 ]
+lint.per-file-ignores."src/troute-network/troute/job_memory.py" = [
+  # `troute` is a namespace package shared by every distribution in src/; an
+  # __init__.py here would shadow troute.config, troute.routing and the rest.
+  "INP001",
+]
+lint.per-file-ignores."src/troute-network/troute/window_plan.py" = [
+  # `troute` is a namespace package shared by every distribution in src/; an
+  # __init__.py here would shadow troute.config, troute.routing and the rest.
+  "INP001",
+]
 lint.per-file-ignores."src/troute-routing/troute/routing/fast_reach/scaling_da.py" = [
   "TRY003", "EM101", "EM102",
   "C901", "PLR0912", "PLR0915",
