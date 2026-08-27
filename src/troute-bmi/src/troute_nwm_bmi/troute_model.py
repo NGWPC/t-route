@@ -103,7 +103,7 @@ class RunSet(TypedDict):
 # with the domain. It dominates a small domain, which is why fitting Ohio alone
 # produced a per-element figure ~15x too high and made CONUS look like it needed
 # 152 GB a window.
-PER_COLUMN_BYTES = 52_000_000
+PER_COLUMN_BYTES = 60_000_000
 BASE_PER_ELEMENT_BYTES = 28
 
 # The scaling DA, swept the same way with the DA on: Ohio 125.1 MB/column and CONUS
@@ -960,18 +960,34 @@ class Model:
         workers = max(1, effective_n_jobs(self.compute_parameters.get("cpu_pool") or 1))
         pool_overhead = POOL_OVERHEAD if workers > 1 else 1.0
         # Two terms: one that scales with the domain and one that does not.
-        required_bytes = int(
-            qlats.shape[1]
-            * (per_column_bytes(_scaling_now)
-               + per_element * qlats.shape[0] * self.qts_subdivisions)
+        column_bytes = int(
+            (per_column_bytes(_scaling_now)
+             + per_element * qlats.shape[0] * self.qts_subdivisions)
             * pool_overhead
         )
+        required_bytes = column_bytes * qlats.shape[1]
         # No intercept term: available_memory is read HERE, after the network, plan and
         # forcing are already resident, so the baseline is excluded by construction.
         # only account for 90% of the memory this process may actually use
         available_memory = available_memory_bytes() * 0.9
-        mem_divisions = math.ceil(required_bytes / available_memory)
-        mem_loop_size = math.ceil(nts / mem_divisions)
+        if available_memory <= 0:
+            # A cgroup at or over its limit. Dividing by this gave ZeroDivisionError,
+            # and treating it as "one column fits" would be a guess about a budget the
+            # kernel has already refused.
+            raise MemoryError(
+                "this process has no memory budget left: its cgroup is at or over its "
+                "limit. Raise the job's memory reservation, or free memory inside it."
+            )
+        # FLOOR of the byte budget, not ceil(nts / ceil(required / available)). Two
+        # ceilings round the wrong way and hand back a window bigger than the budget:
+        # 10 columns against a budget of 3.4 columns gave 3 divisions and a 4-column
+        # window, 18% over, and the later widest-window check accepted it because the
+        # cap it compares against was that same 4.
+        # Clamped to the update as well: the old ceil form was bounded by nts as a side
+        # effect, and the rest of this function reads loop_size < cfg_loop as "the
+        # update is shorter than the window".
+        mem_loop_size = max(1, min(nts, int(available_memory // column_bytes)))
+        mem_divisions = math.ceil(nts / mem_loop_size)
 
         # max_loop_size is the PRIMARY control (as in the -V5 driver): every
         # per-window DA operation lands on this partition, so a RAM-derived split
@@ -1087,19 +1103,19 @@ class Model:
                     loop_size, int(cfg_loop),
                 )
 
-        if auto:
-            # AFTER the cap: the requested window is not the one that runs when memory
-            # narrows it, and the operator set no value to compare against.
-            LOG.info(
-                "max_loop_size not set; automatic sizing chose %d forcing timestep(s) "
-                "per window.", min(loop_size, nts),
-            )
-
         # One partition rule for both drivers: see troute.window_plan. Filling to
         # loop_size and folding a short remainder made this driver disagree with the
         # CLI on the same config, and pushed a window past the memory cap.
         bounds = plan_windows(nts, loop_size, span_cols)
         widest = max(stop - start for start, stop in bounds)
+        if auto:
+            # AFTER the cap AND the split: neither the requested window nor the capped
+            # one is what runs, since an even split lands at or below the cap, and the
+            # operator set no value of their own to compare against.
+            LOG.info(
+                "max_loop_size not set; automatic sizing chose %d forcing timestep(s) "
+                "per window.", widest,
+            )
         if widest > loop_size:
             # The single-window fallback, the one partition wider than was asked for.
             # An explicit max_loop_size is a promise about memory, so exceeding it is

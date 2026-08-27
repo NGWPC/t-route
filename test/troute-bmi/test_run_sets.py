@@ -638,3 +638,47 @@ class TestAutoTakesWhatFits:
         m._config["compute_parameters"]["forcing_parameters"]["max_loop_size"] = 24
         with pytest.raises(MemoryError):
             list(m._build_run_sets(_qlats(96)))
+
+
+class TestTheCapIsAByteBudgetNotTwoRoundings:
+    """Every emitted window must fit the modeled byte budget, on ANY budget.
+
+    The cap used to be ceil(nts / ceil(required / available)), and two ceilings round
+    the wrong way: 10 columns against a budget of 3.4 columns gave 3 divisions and a
+    4-column window, 18% over. The widest-window check could not catch it because the
+    cap it compares against was that same 4. Only a non-integral budget exposes this,
+    which is why the 100-over-4 cases in this file all passed.
+    """
+
+    def _budget(self, monkeypatch, cols, columns_affordable):
+        column_bytes = _required(1)
+        monkeypatch.setattr(
+            tm.psutil, "virtual_memory",
+            lambda: SimpleNamespace(
+                available=(column_bytes * columns_affordable) / 0.9),
+        )
+        return column_bytes
+
+    @pytest.mark.parametrize("affordable", [3.4, 2.6, 5.1, 7.9, 1.5])
+    def test_no_window_costs_more_than_the_budget(self, monkeypatch, affordable):
+        column_bytes = self._budget(monkeypatch, 10, affordable)
+        # No _scaling_da: the budget above is the no-DA column cost, and the model must
+        # be sized the same way or the comparison is against the wrong number.
+        sets = list(_model(nts_cols=10)._build_run_sets(_qlats(10)))
+        budget = column_bytes * affordable
+        for rs in sets:
+            cost = rs["qlats"].shape[1] * column_bytes
+            assert cost <= budget, (
+                f"a {rs['qlats'].shape[1]}-column window costs {cost / budget:.2f}x "
+                f"the budget of {affordable} columns"
+            )
+
+    def test_an_exhausted_cgroup_raises_rather_than_dividing_by_zero(self, monkeypatch):
+        """available_memory_bytes returns 0 for a cgroup at or over its limit.
+
+        That went straight into ceil(required / available). Guessing "one column fits"
+        would be a guess about a budget the kernel has already refused.
+        """
+        monkeypatch.setattr(tm, "available_memory_bytes", lambda *a, **k: 0)
+        with pytest.raises(MemoryError, match="no memory budget left"):
+            list(_model(nts_cols=10)._build_run_sets(_qlats(10)))
