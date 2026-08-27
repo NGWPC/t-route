@@ -2106,7 +2106,7 @@ def compute_nhd_routing_v02(
         # Donors are split points as well as gages. The kernel routes a whole reach
         # in one compute_reach_kernel call, chaining each segment's outflow into the
         # next, and only subtracts the diversion afterwards on copy-out. A donor in
-        # the middle of a reach therefore hands its neighbours undiverted flow, and
+        # the middle of a reach therefore hands its neighbors undiverted flow, and
         # the transfer never leaves the river. Splitting here makes the donor its own
         # single-segment reach, so the reduced value is what the next reach reads as
         # its upstream inflow.

@@ -148,17 +148,11 @@ def test_both_drivers_apply_the_same_three_inputs():
 
 
 class TestGivingUpTheCapMinimally:
-    """When the cap and the span cannot both hold, yield the CAP by as little as
-    possible rather than abandoning the split.
+    """Yield the CAP by as little as possible rather than abandoning the split.
 
-    Collapsing straight to one window turned a 2161-column run at span 60 into a
-    single 2161-column window, roughly 120 GB on Ohio and 900 GB on CONUS, while 36
-    windows of 60 and 61 hold the span. One column of run length was the difference
-    between those two outcomes, and the CLI has no memory cap to catch it.
-
-    The regime is `window == span`, which is what every travel-time-lag run gets:
-    resolve_window raises the window to the span whenever the span is larger, and a
-    lag span of 60 columns against an auto window of 24 does exactly that.
+    Collapsing to one window turned a 2161-column run at span 60 into a single
+    2161-column window, ~120 GB, where 36 windows of 60 and 61 hold the span. The
+    regime is window == span, which every travel-time-lag run gets.
     """
 
     @pytest.mark.parametrize("n", [100, 2161, 121, 7, 1000])

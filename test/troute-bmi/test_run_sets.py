@@ -479,7 +479,7 @@ class TestTheEstimateTracksBothMeasuredSweeps:
 class TestTheSplitStaysInsideTheCap:
     """Every emitted window must fit the memory cap AND cover the DA span.
 
-    Filling to loop_size and folding a short remainder into its neighbour satisfied
+    Filling to loop_size and folding a short remainder into its neighbor satisfied
     the span by breaking the cap: 47 columns at a cap of 23 came out as one window of
     47, and 100 columns at a cap of 25 ended [24, 24, 24, 28]. An even split cannot
     do that, because no window exceeds the ceiling of the average.
@@ -599,11 +599,9 @@ class TestAutoTakesWhatFits:
 class TestTheCapIsAByteBudgetNotTwoRoundings:
     """Every emitted window must fit the modeled byte budget, on ANY budget.
 
-    The cap used to be ceil(nts / ceil(required / available)), and two ceilings round
-    the wrong way: 10 columns against a budget of 3.4 columns gave 3 divisions and a
-    4-column window, 18% over. The widest-window check could not catch it because the
-    cap it compares against was that same 4. Only a non-integral budget exposes this,
-    which is why the 100-over-4 cases in this file all passed.
+    Two ceilings rounded the wrong way: 10 columns against a budget of 3.4 gave a
+    4-column window, 18% over. Only a non-integral budget exposes it, which is why
+    every divisible case in this file passed.
     """
 
     def _budget(self, monkeypatch, cols, columns_affordable):

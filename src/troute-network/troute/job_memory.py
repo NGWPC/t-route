@@ -1,25 +1,11 @@
-"""How much memory this process may actually use, under a scheduler or not.
+"""The memory budget this process may actually use, under a scheduler or not.
 
-``psutil.virtual_memory().available`` reads ``/proc/meminfo``, which is the HOST's
-memory. Under Slurm, PBS, Kubernetes or Docker the job is confined to far less, and a
-window sized from the host number is sized from memory the job will never be allowed to
-touch. The kill arrives at the job's limit, not the host's.
+psutil reads the HOST's free memory. A Slurm or PBS job cgroup is nested well below
+the cgroup mount root, so reading the root finds no limit and hands back the host's.
+Containers hide this: a private cgroup namespace puts the limit at the root.
 
-Three places state that limit, and the smallest of them wins:
-
-* the process's OWN cgroup and every ancestor, since a limit anywhere up the tree binds
-  it. Reading only the cgroup MOUNT ROOT is what containers make look correct: a private
-  cgroup namespace puts the container's limit right there. A Slurm step is nested under
-  ``slurmstepd.scope/job_N/step_M`` with nothing at the root, so the root read finds no
-  limit and silently hands back the host. PBS's cgroup hook nests the same way.
-* the scheduler's own statement of the allocation, for setups whose cgroup this process
-  cannot see. Slurm exports it; PBS generally does not, and relies on its cgroup hook.
-* the host, which still binds when it is the tightest of the three.
-
-Deliberately NOT consulted: ``RLIMIT_AS``. It caps address space, not resident memory,
-and this workload's virtual size runs far above its RSS (allocator arenas, memory-mapped
-files, one mapping set per worker). Subtracting VMS from it would refuse runs that fit.
-Linux does not enforce ``RLIMIT_RSS`` at all.
+RLIMIT_AS is deliberately not consulted. It caps address space, which runs far above
+this workload's RSS, so subtracting it would refuse runs that fit.
 """
 
 from __future__ import annotations
@@ -49,11 +35,10 @@ def _read_int(path: Path) -> int | None:
 
 
 def _reclaimable(stat_path: Path, key: str) -> int:
-    """Page cache the kernel would hand back rather than kill for.
+    """Page cache, which usage counts but the kernel reclaims rather than kill for.
 
-    Usage counts it, and this workload streams forcing and TimeSlice files through it,
-    so a long-lived job drifts toward usage == limit while holding gigabytes that are
-    free for the asking. Subtracting it is what the working-set readings do.
+    This workload streams forcing and TimeSlice files through it, so a long-lived job
+    drifts toward usage == limit while holding gigabytes that are free for the asking.
     """
     try:
         fields = stat_path.read_text().split()
@@ -63,11 +48,10 @@ def _reclaimable(stat_path: Path, key: str) -> int:
 
 
 def _own_cgroup(proc_cgroup: Path) -> tuple[str | None, str | None]:
-    """This process's v2 path and v1 memory path, from /proc/self/cgroup.
+    """This process's v2 and v1 memory paths, from /proc/self/cgroup.
 
-    v2 lines look like ``0::/system.slice/foo.scope``; v1 memory lines like
-    ``9:memory:/slurm/uid_0/job_42/step_0``, and the controller field may list several
-    controllers together, as in ``9:cpu,memory:/...``.
+    v2 lines are ``0::/path``; v1 memory lines are ``9:memory:/path``, and the
+    controller field may list several together, as in ``9:cpu,memory:/path``.
     """
     v2 = v1 = None
     try:
@@ -89,8 +73,7 @@ def _own_cgroup(proc_cgroup: Path) -> tuple[str | None, str | None]:
 def _tree_headroom(base: Path, rel: str, names: tuple[str, str, str, str]) -> int | None:
     """Smallest remaining budget over this cgroup and its ancestors, or None.
 
-    A limit at ANY level binds the process, so the effective headroom is the minimum,
-    not the one at the leaf.
+    A limit at ANY level binds, so the headroom is the minimum, not the leaf's.
     """
     limit_name, usage_name, stat_name, cache_key = names
     parts = [p for p in rel.strip("/").split("/") if p]
@@ -108,10 +91,10 @@ def _tree_headroom(base: Path, rel: str, names: tuple[str, str, str, str]) -> in
 
 
 def _scheduler_budget(environ: Mapping[str, str], resident: int) -> int | None:
-    """The allocation the scheduler says it gave this job, minus what is already used.
+    """The allocation Slurm says it gave this job, less what is already resident.
 
-    Slurm exports it in MB, per node or per CPU. PBS does not export a memory figure
-    reliably and enforces through its cgroup hook, which the cgroup walk above covers.
+    For setups whose cgroup this process cannot see. PBS exports no reliable figure and
+    enforces through its cgroup hook, which the tree walk covers.
     """
     total_mb: float | None = None
     per_node = environ.get("SLURM_MEM_PER_NODE")
@@ -137,18 +120,17 @@ def job_memory_headroom(
     proc_cgroup: Path = Path("/proc/self/cgroup"),
     environ: Mapping[str, str] | None = None,
 ) -> MemoryBudget:
-    """Bytes this process may use, and the name of whatever set that.
+    """Bytes this process may use, and which of host/cgroup/scheduler set that.
 
-    The name is for the log: an operator who sees a window sized smaller than they
-    expected needs to know whether it was the host, their cgroup, or their batch
-    allocation that decided it.
+    The name is for the log: an operator seeing a smaller window than expected needs
+    to know which constraint decided it.
     """
     env = os.environ if environ is None else environ
     budgets: list[tuple[int, str]] = [(max(0, host_available), "host")]
 
     v2_path, v1_path = _own_cgroup(proc_cgroup)
-    # Fall back to the mount root when /proc/self/cgroup is unreadable, which keeps a
-    # namespaced container working even without procfs.
+    # "/" when /proc/self/cgroup is unreadable: a namespaced container's limit sits
+    # at the mount root.
     for rel, base, names in (
         (v2_path if v2_path is not None else "/", cgroup_root, _V2),
         (v1_path if v1_path is not None else "/", cgroup_root / "memory", _V1),

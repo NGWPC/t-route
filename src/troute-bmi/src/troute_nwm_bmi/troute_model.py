@@ -94,42 +94,27 @@ class RunSet(TypedDict):
     final_timestamp: datetime
 
 
-# Peak RSS has TWO terms, and which one dominates depends on the domain. Measured by
-# sweeping max_loop_size on one machine over two domains (benchmark/RESULTS.md 5b):
-# Ohio at 11,327 links gives 55.5 MB per forcing column, CONUS at 1,102,154 gives
-# 414.6. Read as one per-element constant those are 409 B and 31 B, so a single
-# constant is off by 13x between them; solved as two terms they agree within 2% -- by
-# construction, since two domains fit two unknowns exactly. RESULTS.md 5b states what
-# that does and does not license.
-#
-# The per-column term is forcing I/O, frame assembly and output, which do not scale
-# with the domain. It dominates a small domain, which is why fitting Ohio alone
-# produced a per-element figure ~15x too high and made CONUS look like it needed
-# 152 GB a window.
+# Peak RSS has two terms, and which dominates depends on the domain. Swept on one
+# machine over two domains (benchmark/RESULTS.md 5b): read as ONE per-element constant
+# Ohio gives 409 B and CONUS 31 B, off by 13x. The per-column term is forcing I/O,
+# frame assembly and output, and it is 94% of a small domain's slope, which is why
+# fitting Ohio alone put CONUS at 152 GB a window.
 PER_COLUMN_BYTES = 52_000_000
 BASE_PER_ELEMENT_BYTES = 28
 
-# The scaling DA, swept the same way with the DA on: Ohio 125.1 MB/column and CONUS
-# 654.9, so the DA adds 67.8 MB per column and 13 B per element. Note where the cost
-# actually falls -- the code used to model the DA as +34 B/element and nothing per
-# column, which misses the term that dominates and overstates the one that does not.
-#
-# Measured with travel_time_lag OFF, which is what the sweep ran. That matters: the
-# drivers turn return_courant on only for the lag's trace, so no swept run allocated a
-# Courant block and this figure does NOT contain one.
+# Same sweep with the DA on. It lands mostly per COLUMN; the old model had it as
+# +34 B per element and nothing per column. Measured with travel_time_lag OFF, and the
+# drivers return Courant only for the lag's trace, so this carries no Courant block.
 SCALING_PER_COLUMN_BYTES = 68_000_000
 SCALING_PER_ELEMENT_DELTA = 13
 
-# Never swept, so both are declared widths. Courant is 3-wide float32 carried at the
-# ratio the base term turned out to have; the lag additionally holds _assemble_cn's
-# [nt, N_seg] float64 trace, and it is the lag that turns Courant on in the first
-# place. They land on the WIDEST window a run has, since the span sizes that window.
+# Never swept: declared widths. Courant is 3-wide float32, the lag adds _assemble_cn's
+# [nt, N_seg] float64 trace. They land on the widest window, since the span sizes it.
 COURANT_PER_ELEMENT_BYTES = 17
 LAG_TRACE_PER_ELEMENT_BYTES = 11
 
-# What a worker pool adds on top of the main process, measured: CONUS tree PSS 27.8 GB
-# against 24.6 GB main-process at cpu_pool 8, Tier A at parity. Workers route their own
-# clusters and share the parent's pages, so this is flat in the pool size.
+# Measured flat in the pool size: CONUS tree PSS 27.8 GB against 24.6 GB main-process
+# at cpu_pool 8. Workers route their own clusters and share the parent's pages.
 POOL_OVERHEAD = 1.15
 
 
@@ -296,13 +281,11 @@ class Model:
     def _warn_cross_update_cadence(self) -> None:
         """Say once that the caller's update cadence is part of the answer.
 
-        Every guard in _build_run_sets is about windows WITHIN one update. Nothing
-        crosses between update() calls: each closes its own final window and no halo
-        survives the return, so with a DA span the same forcing split into different
-        update lengths gives different discharge near every boundary. It cannot be
-        fixed here either -- carrying the halo would mean withholding an update's
-        output until the next arrives, which is not what update() means -- so the
-        honest thing is to say it, once, when the second update makes it true.
+        Every guard in _build_run_sets covers windows WITHIN one update. Nothing
+        crosses between update() calls, so with a DA span the same forcing split into
+        different update lengths differs near every boundary. Carrying the halo would
+        withhold an update's output until the next arrives, so this is disclosed
+        rather than fixed.
         """
         if getattr(self, "_warned_cadence", False) or not getattr(self, "_has_routed", False):
             return
@@ -938,10 +921,8 @@ class Model:
         # the corrected frame in float64 (24 B) only when it is active. Workers each
         # hold their own job's arrays, so the pool multiplies the transient.
         _scaling_now = getattr(self, "_scaling_da", None) is not None
-        # Scaling does NOT imply Courant: the drivers turn it on for the travel-time
-        # trace, so it follows the lag, not the DA. Treating the DA as implying it
-        # counted a block that lag-off runs never allocate, and missed the trace that
-        # lag-on runs do.
+        # Courant follows the LAG, not the DA: the drivers return it for the
+        # travel-time trace. Tying it to the DA missed the trace on lag-on runs.
         _lag = _scaling_now and bool(
             getattr(self._scaling_da, "travel_time_lag", False)
         )
@@ -968,29 +949,23 @@ class Model:
             int(psutil.Process().memory_info().rss),
         )
         if _budget_source != "host":
-            # Worth naming: an operator seeing a smaller window than they expected needs
-            # to know whether the host, their cgroup, or their batch allocation said so.
+            # Named because an operator seeing a small window needs to know which.
             LOG.info(
                 "memory budget taken from the %s: %.1f GB. The host reports more free "
                 "than this job may use.", _budget_source, _budget / 1e9,
             )
         available_memory = _budget * 0.9
         if available_memory <= 0:
-            # A cgroup at or over its limit. Dividing by this gave ZeroDivisionError,
-            # and treating it as "one column fits" would be a guess about a budget the
-            # kernel has already refused.
+            # A cgroup at or over its limit. This used to be a ZeroDivisionError, and
+            # "one column fits" would guess at a budget the kernel already refused.
             raise MemoryError(
                 "this process has no memory budget left: its cgroup is at or over its "
                 "limit. Raise the job's memory reservation, or free memory inside it."
             )
-        # FLOOR of the byte budget, not ceil(nts / ceil(required / available)). Two
-        # ceilings round the wrong way and hand back a window bigger than the budget:
-        # 10 columns against a budget of 3.4 columns gave 3 divisions and a 4-column
-        # window, 18% over, and the later widest-window check accepted it because the
-        # cap it compares against was that same 4.
-        # Clamped to the update as well: the old ceil form was bounded by nts as a side
-        # effect, and the rest of this function reads loop_size < cfg_loop as "the
-        # update is shorter than the window".
+        # FLOOR of the byte budget: ceil(nts / ceil(required / available)) rounds the
+        # wrong way, giving a 4-column window against a budget of 3.4, 18% over.
+        # Clamped to the update, which the old ceil form was as a side effect: below,
+        # loop_size < cfg_loop is read as "the update is shorter than the window".
         mem_loop_size = max(1, min(nts, int(available_memory // column_bytes)))
         mem_divisions = math.ceil(nts / mem_loop_size)
 
@@ -1019,14 +994,9 @@ class Model:
         # would make the shipped operational config unrunnable.
         partition_matters = scaling_active and span_cols > 0
         auto = cfg_loop <= 0
-        # The same call the CLI makes, so one config resolves to one window width on
-        # either driver. Only the memory cap below is left to this one, since only the
-        # BMI measures memory; never sized UP from that estimate, which is calibrated
-        # on one domain and would be trusted far past what was measured.
-        #
-        # The output cadence goes through the same call: the CLI enlarged for it and
-        # this driver did not, so stream_output_time 48 routed 48-column windows there
-        # and 24 here, which under a nonzero span is a difference in discharge.
+        # The same call the CLI makes, output cadence included, so one config gives
+        # one width on either driver. Only the memory cap below is this driver's own,
+        # and it never sizes UP: the estimate is calibrated on one domain.
         _stream = self.output_parameters.get("stream_output") or {}
         _sot_h = _stream.get("stream_output_time") if isinstance(_stream, dict) else None
         _out_cols = (
@@ -1037,9 +1007,8 @@ class Model:
         cfg_loop = resolve_window(cfg_loop, span_cols, _out_cols)
 
         if partition_matters and nts < span_cols:
-            # Checked BEFORE the memory guard: no amount of freed memory lets a
-            # 24-column update cover a 48-column span, and the memory message would
-            # send the operator chasing one.
+            # BEFORE the memory guard: freeing memory cannot make a 24-column update
+            # cover a 48-column span, and that message would send them chasing it.
             raise ValueError(
                 f"this update supplies {nts} forcing timestep(s), fewer than the "
                 f"scaling DA's span of {span_cols} (innovation_spread_h, plus "
@@ -1055,11 +1024,8 @@ class Model:
             # mem_divisions <= 1 means the cap is this update's own forcing:
             # one window, nothing partitioned. A RAM-driven split is many
             # windows, and a partition set by machine load stays fatal.
-            # An explicit window is refused even at zero span: a partition set by
-            # machine load is not left to chance once someone pinned one. Auto chose
-            # nothing, so a narrower window is simply what it would have chosen; it
-            # refuses only when the cap falls under the span, which is the one width
-            # that is not free to move.
+            # An explicit window is refused even at zero span, since someone pinned
+            # it. Auto pinned nothing, so it refuses only below the span.
             if mem_divisions > 1 and scaling_active and (
                 not auto or loop_size < span_cols
             ):
@@ -1073,15 +1039,11 @@ class Model:
                     "RAM-derived split would make the window partition, and so the "
                     f"discharge, depend on current machine load. {remedy}"
                 )
-            # A configured window longer than the update cannot constrain memory: the
-            # update length already caps it. So it is inert, and refusing over it stops
-            # a run that auto would serve. Say what actually ran and carry on; the wall
-            # below is the one no window choice escapes.
+            # A window longer than the update cannot bound memory, so refusing over it
+            # stops a run for nothing. The wall below is the one that cannot be dodged.
             if partition_matters and loop_size >= span_cols and mem_divisions == 1:
-                # mem_divisions == 1 pins the cause: the cap IS this update's own
-                # forcing. Without that guard this fired on a memory-capped run too
-                # and blamed the update length, while the very next warning said
-                # machine load. Both cannot be the reason.
+                # mem_divisions == 1 pins the cause to the update. Without it this
+                # blamed update length on memory-capped runs too.
                 LOG.warning(
                     "%s is %d but this update supplies %d forcing timestep(s), so the "
                     "scaling DA operates over %d. Discharge depends on the update "
@@ -1091,9 +1053,8 @@ class Model:
                     int(cfg_loop), nts, loop_size,
                 )
             elif partition_matters and loop_size >= span_cols:
-                # Auto accepts a machine-load-derived partition here (an explicit
-                # window refuses). Say so plainly: on this path memory is no longer
-                # only a safety cap, it is in the result.
+                # Auto accepts a machine-load partition where an explicit window
+                # refuses, so on this path memory IS in the result.
                 LOG.warning(
                     "available memory, not the configuration, set this run's window to "
                     "%d forcing timestep(s) under an active DA span. The partition is "
@@ -1134,23 +1095,20 @@ class Model:
                     loop_size, int(cfg_loop),
                 )
 
-        # One partition rule for both drivers: see troute.window_plan. Filling to
-        # loop_size and folding a short remainder made this driver disagree with the
-        # CLI on the same config, and pushed a window past the memory cap.
+        # One partition rule for both drivers, see troute.window_plan. Filling and
+        # folding disagreed with the CLI and pushed a window past the memory cap.
         bounds = plan_windows(nts, loop_size, span_cols)
         widest = max(stop - start for start, stop in bounds)
         if auto:
-            # AFTER the cap AND the split: neither the requested window nor the capped
-            # one is what runs, since an even split lands at or below the cap, and the
-            # operator set no value of their own to compare against.
+            # After the cap AND the split: an even split lands at or below the cap, so
+            # neither the requested nor the capped width is what runs.
             LOG.info(
                 "max_loop_size not set; automatic sizing chose %d forcing timestep(s) "
                 "per window.", widest,
             )
         if widest > loop_size:
-            # The single-window fallback, the one partition wider than was asked for.
-            # An explicit max_loop_size is a promise about memory, so exceeding it is
-            # not something to mention at INFO.
+            # The one partition wider than was asked for, and max_loop_size is a
+            # promise about memory, so not something to mention at INFO.
             LOG.warning(
                 "no split holds every window at the scaling DA's span of %d forcing "
                 "timestep(s), so all %d run as one window, wider than the %d asked "
