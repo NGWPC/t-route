@@ -21,6 +21,7 @@ from troute.NHF import NHF
 from troute.DataAssimilation import DataAssimilation
 
 import troute.hyfeature_network_utilities as hnu
+from troute.job_memory import job_memory_headroom
 from troute.window_plan import plan_windows, resolve_window
 
 import nwm_routing.nwm_route as nwm_routing
@@ -158,46 +159,6 @@ def per_element_bytes(courant: bool, scaling: bool, lag: bool = False) -> int:
     if lag:
         total += LAG_TRACE_PER_ELEMENT_BYTES
     return total
-
-
-def available_memory_bytes(cgroup_root: Path = Path("/sys/fs/cgroup")) -> int:
-    """Memory this process may actually use, which is not what the host reports.
-
-    psutil reads /proc/meminfo, and that is the HOST's memory even inside a container:
-    under Docker, Kubernetes or a cgroup-backed Slurm allocation it shows headroom the
-    job will never be allowed to touch, while the OOM killer arrives at the cgroup
-    limit. Sizing a window from the larger number is how a "safety cap" gets a run
-    killed. Take the smaller of the two, and fall back to the host reading wherever
-    cgroups are absent, which includes macOS.
-    """
-    host = int(psutil.virtual_memory().available)
-    for limit_name, usage_name, stat_name, cache_key in (
-        ("memory.max", "memory.current", "memory.stat", "inactive_file"),
-        ("memory/memory.limit_in_bytes", "memory/memory.usage_in_bytes",
-         "memory/memory.stat", "total_inactive_file"),
-    ):
-        try:
-            limit = int((cgroup_root / limit_name).read_text().strip())
-            used = int((cgroup_root / usage_name).read_text().strip())
-        except (OSError, ValueError):
-            # No cgroup here, or v2's unlimited, which is the word "max".
-            continue
-        # v1 reports a sentinel near 2**63 rather than a word when unlimited.
-        if limit >= 2**62:
-            continue
-        # Usage COUNTS page cache, and this workload streams forcing and TimeSlice
-        # files through it, so a long-lived container drifts toward used == limit while
-        # holding gigabytes the kernel would hand straight back. Subtracting the
-        # reclaimable half is what the working-set readings do. Note the asymmetry this
-        # repairs: psutil's host figure is already cache-aware, so leaving this one
-        # naive made min() systematically prefer a number that was wrong.
-        try:
-            stat = (cgroup_root / stat_name).read_text().split()
-            used -= int(stat[stat.index(cache_key) + 1])
-        except (OSError, ValueError, IndexError):
-            pass
-        return min(host, max(0, limit - used))
-    return host
 
 
 class Model:
@@ -1002,7 +963,18 @@ class Model:
         # No intercept term: available_memory is read HERE, after the network, plan and
         # forcing are already resident, so the baseline is excluded by construction.
         # only account for 90% of the memory this process may actually use
-        available_memory = available_memory_bytes() * 0.9
+        _budget, _budget_source = job_memory_headroom(
+            int(psutil.virtual_memory().available),
+            int(psutil.Process().memory_info().rss),
+        )
+        if _budget_source != "host":
+            # Worth naming: an operator seeing a smaller window than they expected needs
+            # to know whether the host, their cgroup, or their batch allocation said so.
+            LOG.info(
+                "memory budget taken from the %s: %.1f GB. The host reports more free "
+                "than this job may use.", _budget_source, _budget / 1e9,
+            )
+        available_memory = _budget * 0.9
         if available_memory <= 0:
             # A cgroup at or over its limit. Dividing by this gave ZeroDivisionError,
             # and treating it as "one column fits" would be a guess about a budget the

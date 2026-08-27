@@ -559,69 +559,6 @@ class TestTheScalingCostLandsWhereItWasMeasured:
         added = tm.per_element_bytes(True, False) - tm.per_element_bytes(False, False)
         assert added == tm.COURANT_PER_ELEMENT_BYTES == 17
 
-
-class TestMemoryIsWhatThisProcessMayUse:
-    """psutil reports the HOST's free memory, which is not the job's budget.
-
-    In a container or a cgroup-backed batch allocation the host reading shows headroom
-    the job may never touch, and the OOM killer arrives at the cgroup limit. Sizing a
-    window from the larger number is how a safety cap gets a run killed.
-    """
-
-    def _host(self, monkeypatch, gb):
-        monkeypatch.setattr(
-            tm.psutil, "virtual_memory",
-            lambda: SimpleNamespace(available=int(gb * 1024**3)),
-        )
-
-    def test_no_cgroup_falls_back_to_the_host(self, monkeypatch, tmp_path):
-        self._host(monkeypatch, 16)
-        assert tm.available_memory_bytes(tmp_path) == 16 * 1024**3
-
-    def test_a_v2_limit_wins_when_it_is_smaller(self, monkeypatch, tmp_path):
-        self._host(monkeypatch, 64)
-        (tmp_path / "memory.max").write_text(str(8 * 1024**3))
-        (tmp_path / "memory.current").write_text(str(2 * 1024**3))
-        assert tm.available_memory_bytes(tmp_path) == 6 * 1024**3
-
-    def test_the_host_wins_when_the_cgroup_is_larger(self, monkeypatch, tmp_path):
-        self._host(monkeypatch, 4)
-        (tmp_path / "memory.max").write_text(str(64 * 1024**3))
-        (tmp_path / "memory.current").write_text("0")
-        assert tm.available_memory_bytes(tmp_path) == 4 * 1024**3
-
-    def test_an_unlimited_v2_cgroup_is_not_read_as_zero(self, monkeypatch, tmp_path):
-        self._host(monkeypatch, 16)
-        (tmp_path / "memory.max").write_text("max")
-        (tmp_path / "memory.current").write_text("0")
-        assert tm.available_memory_bytes(tmp_path) == 16 * 1024**3
-
-    def test_a_v1_limit_is_read_too(self, monkeypatch, tmp_path):
-        self._host(monkeypatch, 64)
-        v1 = tmp_path / "memory"
-        v1.mkdir()
-        (v1 / "memory.limit_in_bytes").write_text(str(10 * 1024**3))
-        (v1 / "memory.usage_in_bytes").write_text(str(1 * 1024**3))
-        assert tm.available_memory_bytes(tmp_path) == 9 * 1024**3
-
-    def test_the_v1_unlimited_sentinel_is_ignored(self, monkeypatch, tmp_path):
-        # v1 writes a number near 2**63 rather than a word.
-        self._host(monkeypatch, 16)
-        v1 = tmp_path / "memory"
-        v1.mkdir()
-        (v1 / "memory.limit_in_bytes").write_text(str(2**63 - 4096))
-        (v1 / "memory.usage_in_bytes").write_text("0")
-        assert tm.available_memory_bytes(tmp_path) == 16 * 1024**3
-
-    def test_a_cgroup_already_over_its_limit_reads_as_zero_not_negative(
-        self, monkeypatch, tmp_path
-    ):
-        self._host(monkeypatch, 64)
-        (tmp_path / "memory.max").write_text(str(4 * 1024**3))
-        (tmp_path / "memory.current").write_text(str(6 * 1024**3))
-        assert tm.available_memory_bytes(tmp_path) == 0
-
-
 class TestAutoTakesWhatFits:
     """Auto chose no window, so a narrower one is simply what it would have chosen.
 
@@ -693,12 +630,12 @@ class TestTheCapIsAByteBudgetNotTwoRoundings:
             )
 
     def test_an_exhausted_cgroup_raises_rather_than_dividing_by_zero(self, monkeypatch):
-        """available_memory_bytes returns 0 for a cgroup at or over its limit.
+        """A cgroup at or over its limit leaves no budget at all.
 
         That went straight into ceil(required / available). Guessing "one column fits"
         would be a guess about a budget the kernel has already refused.
         """
-        monkeypatch.setattr(tm, "available_memory_bytes", lambda *a, **k: 0)
+        monkeypatch.setattr(tm, "job_memory_headroom", lambda *a, **k: (0, "cgroup"))
         with pytest.raises(MemoryError, match="no memory budget left"):
             list(_model(nts_cols=10)._build_run_sets(_qlats(10)))
 
@@ -765,48 +702,6 @@ class TestTheEstimatorReadsTheLag:
             f"lag off gave {off_widths}, lag on {on_widths}: the lag's Courant block "
             "and trace did not reach the sizing"
         )
-
-
-class TestReclaimableCacheIsNotCountedAsUsed:
-    """A cgroup's usage counts page cache, and this workload streams files through it.
-
-    A long-lived container therefore drifts toward used == limit while holding
-    gigabytes the kernel would hand straight back on demand. Reading that as no
-    headroom collapses the window and then fails the run outright, on a box with
-    plenty free. psutil's host figure is already cache-aware; leaving the cgroup side
-    naive made min() systematically prefer the wrong number.
-    """
-
-    def _host(self, monkeypatch, gb):
-        monkeypatch.setattr(
-            tm.psutil, "virtual_memory",
-            lambda: SimpleNamespace(available=int(gb * 1024**3)),
-        )
-
-    def test_v2_reclaimable_cache_is_given_back(self, monkeypatch, tmp_path):
-        self._host(monkeypatch, 64)
-        (tmp_path / "memory.max").write_text(str(8 * 1024**3))
-        (tmp_path / "memory.current").write_text(str(8 * 1024**3))   # looks full
-        (tmp_path / "memory.stat").write_text(
-            f"anon 1073741824\ninactive_file {6 * 1024**3}\nslab 0\n"
-        )
-        assert tm.available_memory_bytes(tmp_path) == 6 * 1024**3
-
-    def test_v1_reclaimable_cache_is_given_back(self, monkeypatch, tmp_path):
-        self._host(monkeypatch, 64)
-        v1 = tmp_path / "memory"
-        v1.mkdir()
-        (v1 / "memory.limit_in_bytes").write_text(str(8 * 1024**3))
-        (v1 / "memory.usage_in_bytes").write_text(str(8 * 1024**3))
-        (v1 / "memory.stat").write_text(f"total_inactive_file {5 * 1024**3}\n")
-        assert tm.available_memory_bytes(tmp_path) == 5 * 1024**3
-
-    def test_a_missing_stat_file_is_not_fatal(self, monkeypatch, tmp_path):
-        self._host(monkeypatch, 64)
-        (tmp_path / "memory.max").write_text(str(8 * 1024**3))
-        (tmp_path / "memory.current").write_text(str(2 * 1024**3))
-        assert tm.available_memory_bytes(tmp_path) == 6 * 1024**3
-
 
 class TestTheWarningNamesTheRightCause:
     """Two different things narrow a window, and they need different warnings.
