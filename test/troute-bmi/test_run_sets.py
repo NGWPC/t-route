@@ -41,6 +41,18 @@ def _qlats(n_cols, t0=datetime(2019, 5, 29, 0, 0)):
     return pd.DataFrame(0.5, index=pd.Index([101, 102], name="feature_id"), columns=cols)
 
 
+def _required(cols, *, links=2, qts=12, courant=False, scaling=False, pool=1):
+    """The model's own budget for a test domain, so a fixture can sit either side of it.
+
+    Mirrors _build_run_sets deliberately: these fixtures exercise the CAP LOGIC, and
+    what the constants themselves should be is pinned separately against the measured
+    sweeps in TestTheEstimateTracksBothMeasuredSweeps.
+    """
+    per_element = tm.per_element_bytes(courant, scaling)
+    overhead = tm.POOL_OVERHEAD if pool > 1 else 1.0
+    return int(cols * (tm.PER_COLUMN_BYTES + per_element * links * qts) * overhead)
+
+
 @pytest.fixture
 def plenty_of_memory(monkeypatch):
     """Memory never constrains: the partition must come from the config alone."""
@@ -99,7 +111,7 @@ class TestMemoryIsOnlyACap:
         """A configured window that cannot fit is capped, with a warning."""
         # available*0.9 sized so the memory loop is ~1/4 of the run
         m = _model(nts_cols=96, max_loop_size=96)
-        required = 2 * 96 * 12 * tm.per_element_bytes(False, False)
+        required = _required(96)
         monkeypatch.setattr(
             tm.psutil, "virtual_memory",
             lambda: SimpleNamespace(available=(required / 4) / 0.9),
@@ -117,7 +129,7 @@ class TestMemoryIsOnlyACap:
         rather than a warning: there is nothing for the operator to fix.
         """
         m = _model(nts_cols=96)
-        required = 2 * 96 * 12 * tm.per_element_bytes(False, False)
+        required = _required(96)
         monkeypatch.setattr(
             tm.psutil, "virtual_memory",
             lambda: SimpleNamespace(available=(required / 4) / 0.9),
@@ -170,7 +182,7 @@ class TestRamCapIsAnErrorUnderActiveAssimilation:
     """
 
     def _pressure(self, monkeypatch, nts_cols=96):
-        required = 2 * nts_cols * 12 * tm.per_element_bytes(True, True)
+        required = _required(nts_cols, courant=True, scaling=True)
         monkeypatch.setattr(
             tm.psutil, "virtual_memory",
             lambda: SimpleNamespace(available=(required / 4) / 0.9),
@@ -338,7 +350,7 @@ def test_the_pool_costs_a_constant_not_a_multiple(monkeypatch):
     def windows(pool, headroom):
         m = _model(nts_cols=96, max_loop_size=96)
         m._config["compute_parameters"]["cpu_pool"] = pool
-        one_worker = 2 * 96 * 12 * tm.per_element_bytes(False, False)
+        one_worker = _required(96)
         monkeypatch.setattr(tm.psutil, "virtual_memory",
                             lambda: SimpleNamespace(available=one_worker * headroom / 0.9))
         return len(list(m._build_run_sets(_qlats(96))))
@@ -370,7 +382,7 @@ class TestAutoNeverSizesUpFromTheEstimate:
         assert [rs["qlats"].shape[1] for rs in sets] == [AUTO_WINDOW] * 4
 
     def test_memory_still_caps_the_auto_window(self, monkeypatch):
-        required = 2 * 96 * 12 * tm.per_element_bytes(True, True)
+        required = _required(96, courant=True, scaling=True)
         monkeypatch.setattr(
             tm.psutil, "virtual_memory",
             lambda: SimpleNamespace(available=(required / 8) / 0.9),
@@ -387,59 +399,72 @@ class TestAutoNeverSizesUpFromTheEstimate:
         assert [rs["qlats"].shape[1] for rs in sets] == [48, 48]
 
 
-# Measured Tier A sweep, benchmark/RESULTS.md: 11,327 flowpaths, qts 12, cpu_pool 1,
-# no DA, MALLOC_ARENA_MAX=2. Forcing columns -> whole-process peak RSS in MB.
-TIER_A_SWEEP = {1: 415, 2: 498, 4: 694, 8: 1058, 12: 1420,
-                24: 2027, 48: 3407, 72: 4623, 144: 8807}
-TIER_A_LINKS, TIER_A_QTS = 11327, 12
+# Measured on ONE machine, both domains, cpu_pool 8, 8 forcing columns total, main
+# process only (benchmark/results/{ohio,conus}_mls_sweep*.json). Window columns -> peak
+# RSS in MB. Held here so the estimator is checked against numbers that do not come
+# from the estimator.
+SWEEPS = {
+    "ohio": (11327, {1: 620.7, 2: 733.9, 4: 876.6, 8: 1027.9}),
+    "conus": (1102154, {1: 10206.8, 2: 11087.4, 4: 11602.7, 8: 13292.0}),
+}
+QTS = 12
 
 
-def test_the_estimate_tracks_the_measured_sweep():
-    """The one test whose budget does NOT come from per_element_bytes.
-
-    Every other memory test derives its threshold from the same helper it is testing,
-    so all of them stay green no matter how wrong the constant is -- which is how the
-    estimate came to read 21x under measured without a single failure. This one holds
-    the published numbers and fails if the calibration drifts off them.
-    """
-    baseline = TIER_A_SWEEP[1]  # network, plan and one column: not window-scaled
-    for cols in (24, 48, 72, 144):
-        measured = TIER_A_SWEEP[cols] - baseline
-        est = (TIER_A_LINKS * cols * TIER_A_QTS
-               * tm.per_element_bytes(False, False) / 1e6)
-        assert 0.95 <= est / measured <= 1.20, (
-            f"{cols} columns: estimate {est:.0f} MB against {measured} MB measured "
-            f"({est / measured:.2f}x). Reading low is the direction that OOMs."
-        )
+def _measured_slope(points):
+    """Least-squares MB per forcing column. The intercept is the domain's baseline."""
+    n = len(points)
+    mx = sum(points) / n
+    my = sum(points.values()) / n
+    num = sum((w - mx) * (r - my) for w, r in points.items())
+    return num / sum((w - mx) ** 2 for w in points)
 
 
-class TestAutoSaysWhatItChose:
-    """An operator who set no window has no other way to learn what ran.
+class TestTheEstimateTracksBothMeasuredSweeps:
+    """The tests whose budget does NOT come from per_element_bytes.
 
-    The value must be the one AFTER the memory cap: announcing the request and then
-    silently running something smaller is worse than not announcing it at all.
+    Every other memory test derives its threshold from the helper it is testing, so all
+    of them stay green however wrong the constants are. That is how the estimate came
+    to read 21x under on one domain and 13x over on the other without a failure.
     """
 
-    def test_auto_logs_the_window(self, plenty_of_memory, caplog):
-        with caplog.at_level("INFO"):
-            list(_model(nts_cols=96)._build_run_sets(_qlats(96)))
-        assert f"chose {AUTO_WINDOW} forcing timestep(s)" in caplog.text
+    def test_the_model_matches_each_domain(self):
+        for name, (links, points) in SWEEPS.items():
+            predicted = (tm.PER_COLUMN_BYTES
+                         + tm.per_element_bytes(False, False) * links * QTS) / 1e6
+            measured = _measured_slope(points)
+            assert 0.85 <= predicted / measured <= 1.20, (
+                f"{name}: model {predicted:.0f} MB/column against {measured:.0f} "
+                f"measured ({predicted / measured:.2f}x)"
+            )
 
-    def test_auto_logs_the_capped_window_not_the_request(self, monkeypatch, caplog):
-        required = 2 * 96 * 12 * tm.per_element_bytes(True, True)
-        monkeypatch.setattr(tm.psutil, "virtual_memory",
-                            lambda: SimpleNamespace(available=(required / 8) / 0.9))
-        m = _model(nts_cols=96)
-        m._scaling_da = SimpleNamespace(innovation_spread_h=0.0, travel_time_lag=False)
-        with caplog.at_level("INFO"):
-            sets = list(m._build_run_sets(_qlats(96)))
-        assert f"chose {sets[0]['qlats'].shape[1]} forcing timestep(s)" in caplog.text
-        assert f"chose {AUTO_WINDOW} forcing" not in caplog.text
+    def test_one_per_element_constant_cannot_serve_both(self):
+        """The measurement that forced the second term, kept as a regression guard.
 
-    def test_an_explicit_window_is_not_announced(self, plenty_of_memory, caplog):
-        with caplog.at_level("INFO"):
-            list(_model(nts_cols=96, max_loop_size=24)._build_run_sets(_qlats(96)))
-        assert "max_loop_size not set" not in caplog.text
+        Read as a single per-element constant the two domains give 409 B and 31 B. Any
+        future collapse back to one constant has to fail here, not in production on
+        whichever domain was not fitted.
+        """
+        implied = {
+            name: _measured_slope(points) * 1e6 / (links * QTS)
+            for name, (links, points) in SWEEPS.items()
+        }
+        assert implied["ohio"] / implied["conus"] > 5, implied
+
+    def test_the_per_column_term_dominates_a_small_domain(self):
+        """Why fitting Ohio alone went wrong: at 11k links almost all of that 55 MB
+        per column is the domain-independent term, not the per-element one."""
+        links, _ = SWEEPS["ohio"]
+        per_element_share = (tm.per_element_bytes(False, False) * links * QTS
+                             / (tm.PER_COLUMN_BYTES
+                                + tm.per_element_bytes(False, False) * links * QTS))
+        assert per_element_share < 0.15
+
+    def test_the_per_element_term_dominates_conus(self):
+        links, _ = SWEEPS["conus"]
+        per_element_share = (tm.per_element_bytes(False, False) * links * QTS
+                             / (tm.PER_COLUMN_BYTES
+                                + tm.per_element_bytes(False, False) * links * QTS))
+        assert per_element_share > 0.80
 
 
 class TestTheSplitStaysInsideTheCap:
@@ -452,7 +477,7 @@ class TestTheSplitStaysInsideTheCap:
     """
 
     def _cap(self, monkeypatch, cols, divisions):
-        required = 2 * cols * 12 * tm.per_element_bytes(True, True)
+        required = _required(cols, courant=True, scaling=True)
         monkeypatch.setattr(
             tm.psutil, "virtual_memory",
             lambda: SimpleNamespace(available=(required / divisions) / 0.9),
@@ -476,7 +501,7 @@ class TestTheSplitStaysInsideTheCap:
         # 47 columns against a 24 column span: any two windows leave one at 23, and
         # the single window that would work is twice what memory allows.
         self._cap(monkeypatch, 47, 2)
-        with pytest.raises(MemoryError, match="one window"):
+        with pytest.raises(MemoryError, match="reduce the DA span"):
             list(self._model_with_span(47, 24.0)._build_run_sets(_qlats(47)))
 
     def test_an_unsplittable_update_within_the_cap_runs(self, plenty_of_memory):
@@ -496,15 +521,15 @@ class TestTheModeIncrementsAreNotFree:
     def test_courant_adds_its_three_float32_columns(self):
         # flowveldepth 4-wide + upstream 1-wide = 20 B; Courant adds 3-wide float32.
         assert (tm.per_element_bytes(True, False)
-                - tm.per_element_bytes(False, False)) == 12 * tm.MEASURED_PEAK_RATIO
+                - tm.per_element_bytes(False, False)) == int(32 * tm.DECLARED_ARRAY_FACTOR) - int(20 * tm.DECLARED_ARRAY_FACTOR)
 
     def test_scaling_adds_its_three_float64_frames(self):
         # q_model, its copy and the corrected frame, float64.
         assert (tm.per_element_bytes(False, True)
-                - tm.per_element_bytes(False, False)) == 24 * tm.MEASURED_PEAK_RATIO
+                - tm.per_element_bytes(False, False)) == int(44 * tm.DECLARED_ARRAY_FACTOR) - int(20 * tm.DECLARED_ARRAY_FACTOR)
 
     def test_the_modes_compose(self):
-        assert tm.per_element_bytes(True, True) == (20 + 12 + 24) * tm.MEASURED_PEAK_RATIO
+        assert tm.per_element_bytes(True, True) == int((20 + 12 + 24) * tm.DECLARED_ARRAY_FACTOR)
 
     def test_the_pool_overhead_matches_the_measured_tree(self):
         """CONUS tree PSS 27.8 GB against 24.6 GB main-process, so 1.13x.
@@ -575,3 +600,40 @@ class TestMemoryIsWhatThisProcessMayUse:
         (tmp_path / "memory.max").write_text(str(4 * 1024**3))
         (tmp_path / "memory.current").write_text(str(6 * 1024**3))
         assert tm.available_memory_bytes(tmp_path) == 0
+
+
+class TestAutoTakesWhatFits:
+    """Auto chose no window, so a narrower one is simply what it would have chosen.
+
+    Refusing when memory capped it below AUTO_WINDOW but still above the span made the
+    default arm fail on a run it could have served: a 20 column window against a 12
+    column span is valid, and auto was raising on it.
+    """
+
+    def _model(self, cols, span_h, divisions, monkeypatch):
+        m = _model(nts_cols=cols)
+        m._scaling_da = SimpleNamespace(innovation_spread_h=span_h, travel_time_lag=False)
+        required = _required(cols, courant=True, scaling=True)
+        monkeypatch.setattr(
+            tm.psutil, "virtual_memory",
+            lambda: SimpleNamespace(available=(required / divisions) / 0.9),
+        )
+        return m
+
+    def test_a_cap_above_the_span_is_used_not_refused(self, monkeypatch):
+        sets = list(self._model(96, 12.0, 4, monkeypatch)._build_run_sets(_qlats(96)))
+        widths = [rs["qlats"].shape[1] for rs in sets]
+        assert len(widths) > 1
+        assert min(widths) >= 12, widths
+        assert max(widths) < AUTO_WINDOW, f"{widths}: memory should have narrowed it"
+
+    def test_a_cap_below_the_span_still_refuses(self, monkeypatch):
+        with pytest.raises(MemoryError):
+            list(self._model(96, 48.0, 8, monkeypatch)._build_run_sets(_qlats(96)))
+
+    def test_an_explicit_window_still_refuses_a_ram_split(self, monkeypatch):
+        """Unchanged: pinning a value is a promise the partition is not machine load."""
+        m = self._model(96, 12.0, 4, monkeypatch)
+        m._config["compute_parameters"]["forcing_parameters"]["max_loop_size"] = 24
+        with pytest.raises(MemoryError):
+            list(m._build_run_sets(_qlats(96)))

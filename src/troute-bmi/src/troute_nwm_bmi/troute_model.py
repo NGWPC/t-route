@@ -93,27 +93,40 @@ class RunSet(TypedDict):
     final_timestamp: datetime
 
 
-# Measured peak divided by declared arrays. benchmark/RESULTS.md's Tier A sweep is the
-# only run that isolates the slope (window varied, everything else fixed): 415 MB at one
-# forcing column to 8807 MB at 144, so 58.7 MB per column over 11,327 links at qts 12,
-# or 432 B per link-timestep where the arrays below declare 20. The difference is mask
-# copies, pandas frames and output assembly, which scale with the same product. Against
-# that sweep it reads 0.97-1.12 of measured for windows of 24 columns and up, and
-# 0.78-0.94 at 4-12 columns, where the absolute miss is ~200 MB.
+# Peak RSS has TWO terms, and which one dominates depends on the domain. Measured by
+# sweeping max_loop_size on one machine over two domains (benchmark/RESULTS.md 5b):
+# Ohio at 11,327 links gives 55.5 MB per forcing column, CONUS at 1,102,154
+# gives 414.6. Read as one per-element constant those are 409 B and 31 B, so a single
+# constant is off by 13x between them; solved as two terms they agree within 2%.
 #
-# It does NOT transfer to a larger domain, and the failure is a false refusal. One
-# 24-column window at CONUS scale would be 1.1e6 x 24 x 12 x 480 = 152 GB by this
-# model, while RESULTS.md measures the whole Tier C run peaking at 24.6 GB, most of it
-# graph construction rather than routing. So the true per-element slope falls with
-# domain size and this over-reads it by something like 6x at CONUS, where a false
-# MemoryError on a scaling run costs more than the OOM it is guarding. Fitting the
-# per-column and per-link terms apart needs a sweep on a second domain.
-MEASURED_PEAK_RATIO = 24
+# The per-column term is forcing I/O, frame assembly and output, which do not scale with
+# the domain. It dominates a small domain, which is why fitting Ohio alone produced a
+# per-element figure ~15x too high and made CONUS look like it needed 152 GB a window.
+PER_COLUMN_BYTES = 52_000_000
+
+# And what is left per link-timestep is close to the arrays below as declared: 27.4 B
+# measured against 20 B of flowveldepth and upstream_array. 1.4 carries the difference.
+DECLARED_ARRAY_FACTOR = 1.4
 
 # What a worker pool adds on top of the main process, measured: CONUS tree PSS 27.8 GB
 # against 24.6 GB main-process at cpu_pool 8, Tier A at parity. Workers route their own
 # clusters and share the parent's pages, so this is flat in the pool size.
 POOL_OVERHEAD = 1.15
+
+
+def per_element_bytes(courant: bool, scaling: bool) -> int:
+    """Bytes per link-timestep. Only the term that scales with the DOMAIN.
+
+    flowveldepth is 4-wide float32 and upstream_array 1-wide, always; the Courant
+    block is 3-wide float32 only when returned; the scaling DA holds q_model, its copy
+    and the corrected frame in float64 only when active. Add PER_COLUMN_BYTES per
+    forcing column for the part that does not scale with the domain.
+
+    The base term is measured. The two flag terms are declared widths carrying the same
+    factor, since neither sweep ran with DA or Courant on.
+    """
+    declared = 20 + (12 if courant else 0) + (24 if scaling else 0)
+    return int(declared * DECLARED_ARRAY_FACTOR)
 
 
 def available_memory_bytes(cgroup_root: Path = Path("/sys/fs/cgroup")) -> int:
@@ -141,22 +154,6 @@ def available_memory_bytes(cgroup_root: Path = Path("/sys/fs/cgroup")) -> int:
         if limit < 2**62:
             return min(host, max(0, limit - used))
     return host
-
-
-def per_element_bytes(courant: bool, scaling: bool) -> int:
-    """Bytes per link-routing-step, calibrated to measured peak RSS.
-
-    flowveldepth is 4-wide float32 and upstream_array 1-wide, always; the Courant
-    block is 3-wide float32 only when returned; the scaling DA holds q_model, its
-    copy and the corrected frame in float64 only when active.
-
-    Only the base term is measured. The sweep behind MEASURED_PEAK_RATIO ran without
-    DA and without Courant, so those two carry the same ratio on the assumption their
-    derived copies scale alike -- unverified, and deliberately the conservative
-    direction: over-reading refuses with an actionable message, under-reading is an
-    OOM kill mid-run.
-    """
-    return (20 + (12 if courant else 0) + (24 if scaling else 0)) * MEASURED_PEAK_RATIO
 
 
 class Model:
@@ -945,8 +942,10 @@ class Model:
         # joblib reads -1 as every core, so it is a pool and not serial.
         workers = max(1, effective_n_jobs(self.compute_parameters.get("cpu_pool") or 1))
         pool_overhead = POOL_OVERHEAD if workers > 1 else 1.0
+        # Two terms: one that scales with the domain and one that does not.
         required_bytes = int(
-            qlats.shape[0] * qlats.shape[1] * self.qts_subdivisions * per_element
+            qlats.shape[1]
+            * (PER_COLUMN_BYTES + per_element * qlats.shape[0] * self.qts_subdivisions)
             * pool_overhead
         )
         # No intercept term: available_memory is read HERE, after the network, plan and
@@ -1007,10 +1006,13 @@ class Model:
             # one window, nothing partitioned. A RAM-driven split is many
             # windows, and a partition set by machine load stays fatal.
             # An explicit window is refused even at zero span: a partition set by
-            # machine load is not left to chance once someone pinned one. Auto is not,
-            # unless the partition is observable -- nobody chose a window, so there is
-            # nothing to tell them to lower.
-            if mem_divisions > 1 and scaling_active and (partition_matters or not auto):
+            # machine load is not left to chance once someone pinned one. Auto chose
+            # nothing, so a narrower window is simply what it would have chosen; it
+            # refuses only when the cap falls under the span, which is the one width
+            # that is not free to move.
+            if mem_divisions > 1 and scaling_active and (
+                not auto or loop_size < span_cols
+            ):
                 remedy = (
                     f"Free memory, or reduce the DA span ({span_cols} timesteps), which "
                     "is what sets the floor under automatic sizing."

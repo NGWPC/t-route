@@ -706,6 +706,66 @@ docker run --rm \
   python /t-route/benchmark/scripts/plot_max_loop_size.py
 ```
 
+### 5b. Memory model: two terms, not one
+
+The "scaling caveat" above turns out to understate the problem.
+Peak RSS does **not** scale with `links x columns` alone, and
+fitting the Tier A sweep as though it does produces a
+per-element constant roughly 15x too high, which then predicts
+that a 24-column CONUS window needs 152 GB.
+
+Both domains were re-swept on one machine (macOS arm64, Apple
+silicon, `cpu_pool = 8`, 8 forcing columns total, main-process
+peak RSS via `wait4`/`ru_maxrss`) so the slopes are comparable:
+
+| Window (columns) | Ohio, 11,327 fp | CONUS, 1,102,154 fp |
+|---:|---:|---:|
+| 1 | 620.7 MB | 10,206.8 MB |
+| 2 | 733.9 MB | 11,087.4 MB |
+| 4 | 876.6 MB | 11,602.7 MB |
+| 8 | 1,027.9 MB | 13,292.0 MB |
+| **slope** | **55.5 MB/col** | **414.6 MB/col** |
+| implied single per-element constant | 409 B | 31 B |
+
+Ohio's 409 B here against the 432 B implied by the Linux Tier A
+sweep says the two machines agree; the old number was never
+wrong, it was just misattributed. Read as one per-element
+constant the two domains differ by **13x**. Solved as two terms
+they agree within 2%:
+
+```
+peak_rss(w) = baseline + w * (52 MB + 28 B * links * qts_subdivisions)
+```
+
+- The **per-column** term (~52 MB) is forcing I/O, frame
+  assembly and output. It does not scale with the domain, and it
+  is ~94% of Ohio's slope. That is why fitting a small domain
+  alone attributes it to the wrong variable.
+- The **per-element** term (~28 B) is close to the arrays as
+  declared: `flowveldepth` 4-wide float32 plus `upstream_array`
+  1-wide is 20 B. It is ~87% of CONUS's slope.
+
+Consequence for `max_loop_size: 0` (automatic): the BMI driver
+sizes its memory cap from this model, so a CONUS scaling run is
+no longer refused for want of memory it never needed.
+
+Caveats. Two domains fit two unknowns exactly, so the 2%
+agreement on slope is arithmetic, not validation; what IS
+independently checked is linearity in window size, 4 points per
+domain, residuals under 5%. Neither sweep ran with the DA or
+Courant arrays on, so those terms in `per_element_bytes` remain
+declared widths. A third domain (VPU 01, ~180 k flowpaths) would
+give the model a degree of freedom to fail against.
+
+Reproduce with:
+
+```bash
+pixi r python benchmark/scripts/sweep_max_loop_size.py \
+  --config conus.yaml --forcing ../data/conus/channel_forcing_retro \
+  --start "2019-05-29 00:00:00" --nts 96 --cpu-pool 8 \
+  --sweep 1 2 4 8 --runs 1 --warmup 0 --label conus_mls_sweep
+```
+
 ### 6. `LD_PRELOAD=libjemalloc.so`
 
 We did not test `jemalloc` end-to-end on t-route. It is the
