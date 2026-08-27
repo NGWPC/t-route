@@ -199,13 +199,25 @@ class TestRamCapIsAnErrorUnderActiveAssimilation:
         """The one thing auto must not do is pick a window shorter than the DA span.
 
         A window below the span makes the partition reach the result, so when memory
-        cannot hold the span there is nothing safe to choose.
+        cannot hold the span there is nothing safe to choose. MemoryError specifically:
+        accepting either exception hid which of the two diagnoses the operator gets.
         """
         self._pressure(monkeypatch)
         m = _model(nts_cols=96)                       # auto
         m._scaling_da = SimpleNamespace(innovation_spread_h=96.0, travel_time_lag=False)
-        with pytest.raises((MemoryError, ValueError)):
+        with pytest.raises(MemoryError):
             list(m._build_run_sets(_qlats(96)))
+
+    def test_a_span_longer_than_the_update_is_not_blamed_on_memory(self, monkeypatch):
+        """Freeing memory cannot make a 24-column update cover a 48-column span.
+
+        The memory guard used to fire first here and send the operator chasing RAM.
+        """
+        self._pressure(monkeypatch, nts_cols=24)
+        m = _model(nts_cols=24)
+        m._scaling_da = SimpleNamespace(innovation_spread_h=48.0, travel_time_lag=False)
+        with pytest.raises(ValueError, match="Memory is NOT the limit"):
+            list(m._build_run_sets(_qlats(24)))
 
     def test_an_explicit_zero_is_auto_not_an_error(self, monkeypatch):
         """0 is the way to ask for auto, so it must behave as auto, not as a window."""
@@ -468,3 +480,34 @@ class TestTheSplitStaysInsideTheCap:
     def test_an_unsplittable_update_within_the_cap_runs(self, plenty_of_memory):
         sets = list(self._model_with_span(47, 24.0)._build_run_sets(_qlats(47)))
         assert [rs["qlats"].shape[1] for rs in sets] == [47]
+
+
+class TestTheModeIncrementsAreNotFree:
+    """Pinned against literal widths, not against per_element_bytes itself.
+
+    Every pressure test in this file derives its budget from the helper it is
+    testing, so deleting the Courant and scaling increments outright left the whole
+    suite green. These assert the declared array widths directly, which is the only
+    thing about those two terms that was ever measured.
+    """
+
+    def test_courant_adds_its_three_float32_columns(self):
+        # flowveldepth 4-wide + upstream 1-wide = 20 B; Courant adds 3-wide float32.
+        assert (tm.per_element_bytes(True, False)
+                - tm.per_element_bytes(False, False)) == 12 * tm.MEASURED_PEAK_RATIO
+
+    def test_scaling_adds_its_three_float64_frames(self):
+        # q_model, its copy and the corrected frame, float64.
+        assert (tm.per_element_bytes(False, True)
+                - tm.per_element_bytes(False, False)) == 24 * tm.MEASURED_PEAK_RATIO
+
+    def test_the_modes_compose(self):
+        assert tm.per_element_bytes(True, True) == (20 + 12 + 24) * tm.MEASURED_PEAK_RATIO
+
+    def test_the_pool_overhead_matches_the_measured_tree(self):
+        """CONUS tree PSS 27.8 GB against 24.6 GB main-process, so 1.13x.
+
+        Pinning the value, not just its flatness: the split test derives its budget
+        from POOL_OVERHEAD, so it passed at 1.01 and at 3.0 alike.
+        """
+        assert tm.POOL_OVERHEAD == pytest.approx(27.8 / 24.6, abs=0.03)

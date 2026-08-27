@@ -21,6 +21,7 @@ from troute.NHF import NHF
 from troute.DataAssimilation import DataAssimilation
 
 import troute.hyfeature_network_utilities as hnu
+from troute.window_plan import AUTO_WINDOW, plan_windows, resolve_window
 
 import nwm_routing.nwm_route as nwm_routing
 from nwm_routing.output import nwm_output_generator
@@ -92,20 +93,21 @@ class RunSet(TypedDict):
     final_timestamp: datetime
 
 
-# Forcing columns per window when max_loop_size is 0 (automatic). The measured Tier A
-# sweep (benchmark/RESULTS.md) plateaus in wall time here while peak RSS keeps climbing
-# past it, so a larger window buys memory pressure and no speed. Was the schema default.
-AUTO_WINDOW = 24
-
-
 # Measured peak divided by declared arrays. benchmark/RESULTS.md's Tier A sweep is the
 # only run that isolates the slope (window varied, everything else fixed): 415 MB at one
 # forcing column to 8807 MB at 144, so 58.7 MB per column over 11,327 links at qts 12,
 # or 432 B per link-timestep where the arrays below declare 20. The difference is mask
 # copies, pandas frames and output assembly, which scale with the same product. Against
-# the sweep this reads 0.98-1.11 of measured for windows of 24 columns and up, which is
-# the range where memory decides anything; it dips to 0.84 at 8-12 columns, where the
-# absolute miss is ~200 MB. Fitted on Tier A, consistent with Tier C, one slope only.
+# that sweep it reads 0.97-1.12 of measured for windows of 24 columns and up, and
+# 0.78-0.94 at 4-12 columns, where the absolute miss is ~200 MB.
+#
+# It does NOT transfer to a larger domain, and the failure is a false refusal. One
+# 24-column window at CONUS scale would be 1.1e6 x 24 x 12 x 480 = 152 GB by this
+# model, while RESULTS.md measures the whole Tier C run peaking at 24.6 GB, most of it
+# graph construction rather than routing. So the true per-element slope falls with
+# domain size and this over-reads it by something like 6x at CONUS, where a false
+# MemoryError on a scaling run costs more than the OOM it is guarding. Fitting the
+# per-column and per-link terms apart needs a sweep on a second domain.
 MEASURED_PEAK_RATIO = 24
 
 # What a worker pool adds on top of the main process, measured: CONUS tree PSS 27.8 GB
@@ -917,23 +919,31 @@ class Model:
                     "so every non-final window covers innovation_spread_h.",
                     int(cfg_loop), span_cols,
                 )
-                cfg_loop = span_cols
         # Only a DA with a span makes the partition part of the result. Without
         # one, a short update is served like any no-DA run: the NWM Standard AnA
         # is 3 forcing columns against a much longer window, and erroring there
         # would make the shipped operational config unrunnable.
         partition_matters = scaling_active and span_cols > 0
         auto = cfg_loop <= 0
-        if auto:
-            # AUTO_WINDOW, not a memory-derived size: the estimate is calibrated on one
-            # domain, so sizing up from it would trust it far past what was measured.
-            # Memory only ever caps, below. The span floor is the one term that may
-            # enlarge, because it is the only one that reaches the discharge.
-            # AUTO_WINDOW is a preference and yields to the update; only span_cols is
-            # a floor. An explicit window is a promise about the DA's operating window
-            # and refuses to shrink, but nobody promised anything here, so demanding 24
-            # of an 18-column update would fail a run that is correct as one window.
-            cfg_loop = max(min(AUTO_WINDOW, nts), span_cols)
+        # The same call the CLI makes, so one config resolves to one window width on
+        # either driver. Each narrows it its own way after: memory here, the output
+        # cadence there. Never sized UP from the memory estimate, which is calibrated
+        # on one domain and would be trusted far past what was measured.
+        cfg_loop = resolve_window(cfg_loop, span_cols)
+
+        if partition_matters and nts < span_cols:
+            # Checked BEFORE the memory guard: no amount of freed memory lets a
+            # 24-column update cover a 48-column span, and the memory message would
+            # send the operator chasing one.
+            raise ValueError(
+                f"this update supplies {nts} forcing timestep(s), fewer than the "
+                f"scaling DA's span of {span_cols} (innovation_spread_h, plus "
+                "lag_window_h when travel_time_lag is on). No window covers the span, "
+                "so the DA's reach would be set by the update cadence. Memory is NOT "
+                "the limit. Drive longer updates, or reduce the DA span; at "
+                "innovation_spread_h 0 with the lag off the span is zero and this "
+                "constraint disappears."
+            )
 
         loop_size = min(int(cfg_loop), mem_loop_size)
         if loop_size < int(cfg_loop):
@@ -961,9 +971,11 @@ class Model:
             # below is the one no window choice escapes.
             if partition_matters and loop_size >= span_cols:
                 LOG.warning(
-                    "max_loop_size is %d but this update supplies %d forcing "
-                    "timestep(s), so the scaling DA operates over %d. Discharge "
-                    "depends on the update length, not on the configured value.",
+                    "%s is %d but this update supplies %d forcing timestep(s), so the "
+                    "scaling DA operates over %d. Discharge depends on the update "
+                    "length, not on the window: the same run split into different "
+                    "updates differs near every boundary.",
+                    "automatic max_loop_size" if auto else "max_loop_size",
                     int(cfg_loop), nts, loop_size,
                 )
             if partition_matters and loop_size < span_cols:
@@ -1007,7 +1019,32 @@ class Model:
                 "per window.", min(loop_size, nts),
             )
 
-        if loop_size >= nts:
+        # One partition rule for both drivers: see troute.window_plan. Filling to
+        # loop_size and folding a short remainder made this driver disagree with the
+        # CLI on the same config, and pushed a window past the memory cap.
+        bounds = plan_windows(nts, loop_size, span_cols)
+        widest = max(stop - start for start, stop in bounds)
+        if widest > loop_size:
+            # The single-window fallback, the one partition wider than was asked for.
+            # An explicit max_loop_size is a promise about memory, so exceeding it is
+            # not something to mention at INFO.
+            LOG.warning(
+                "no split holds every window at the scaling DA's span of %d forcing "
+                "timestep(s), so all %d run as one window, wider than the %d asked "
+                "for. Reduce the DA span to partition this update.",
+                span_cols, nts, loop_size,
+            )
+        if widest > mem_loop_size:
+            # Only reachable on the single-window fallback: no split holds every
+            # window at the span, and the one window that does will not fit.
+            raise MemoryError(
+                f"covering the scaling DA's span of {span_cols} forcing timesteps "
+                f"needs this {nts}-timestep update in one window, but available "
+                f"memory caps it at {mem_loop_size}. Splitting would leave a window "
+                "under the span, which changes discharge. Free memory, or reduce the "
+                "DA span."
+            )
+        if len(bounds) == 1:
             yield {
                 "nts": nts * self.qts_subdivisions,
                 "qlats": qlats,
@@ -1019,36 +1056,6 @@ class Model:
                 "final_timestamp": datetime.strptime(str(qlats.columns[-1]), "%Y%m%d%H%M")
             }
         else:
-            # Spread the update EVENLY over as few windows as the cap allows, rather
-            # than filling to loop_size and folding a short remainder into its
-            # neighbour: that fold ran after the memory cap and could push a window
-            # clean past it (47 columns at a cap of 23 became one window of 47).
-            # An even split keeps every window inside the cap by construction, and
-            # above the DA span whenever any split can be.
-            n = math.ceil(nts / loop_size)
-            if span_cols > 0 and n > 1 and nts // n < span_cols:
-                # No split of this update keeps every window over the span, so the
-                # tail would read across a boundary it cannot supply. One window
-                # does, if memory holds it.
-                if nts > mem_loop_size:
-                    raise MemoryError(
-                        f"covering the scaling DA's span of {span_cols} forcing "
-                        f"timesteps needs this {nts}-timestep update in one window, "
-                        f"but available memory caps it at {mem_loop_size}. Splitting "
-                        "would leave a window under the span, which changes discharge. "
-                        "Free memory, or reduce the DA span."
-                    )
-                LOG.info(
-                    "scaling DA: %d forcing timestep(s) routed as one window; no split "
-                    "keeps every window over the span of %d.", nts, span_cols,
-                )
-                n = 1
-            base, extra = divmod(nts, n)
-            bounds, step = [], 0
-            for i in range(n):
-                stop = step + base + (1 if i < extra else 0)
-                bounds.append((step, stop))
-                step = stop
             for start, stop in bounds:
                 times = qlats.columns[start:stop]
                 yield {

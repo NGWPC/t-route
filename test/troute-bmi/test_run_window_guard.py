@@ -127,9 +127,21 @@ class TestAutoYieldsToTheUpdate:
         runs = list(_model(0, _ScalingDAStub(12.0), cols=18)._build_run_sets(_qlats(18)))
         assert [r["nts"] for r in runs] == [18 * 12]
 
+    def test_auto_discloses_the_cadence_like_an_explicit_value(self, caplog):
+        """The disclosed fact is equally true under auto, so it must be said there.
+
+        Each update closes its own final window, so the same run split into 18 hour
+        updates differs from one split into 96 hour updates near every boundary. The
+        default arm must not be the quiet one.
+        """
+        with caplog.at_level("WARNING"):
+            list(_model(0, _ScalingDAStub(12.0), cols=18)._build_run_sets(_qlats(18)))
+        assert "automatic max_loop_size" in caplog.text
+        assert "operates over 18" in caplog.text
+
     def test_auto_still_refuses_an_update_shorter_than_the_span(self):
         model = _model(0, _ScalingDAStub(12.0), cols=6)
-        with pytest.raises(ValueError, match="span is 12"):
+        with pytest.raises(ValueError, match="span of 12"):
             list(model._build_run_sets(_qlats(6)))
 
     def test_auto_does_not_name_a_knob_nobody_set(self):
@@ -152,5 +164,5 @@ class TestAutoYieldsToTheUpdate:
 
     def test_an_explicit_window_still_hits_the_span_wall(self):
         model = _model(24, _ScalingDAStub(12.0), cols=6)
-        with pytest.raises(ValueError, match="span is 12"):
+        with pytest.raises(ValueError, match="span of 12"):
             list(model._build_run_sets(_qlats(6)))

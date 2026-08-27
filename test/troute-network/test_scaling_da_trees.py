@@ -327,36 +327,35 @@ class TestShortFinalWindowIsFoldedIn:
     12.9 m3/s (forward) against an evenly divided run.
     """
 
-    def _sets(self, *sizes):
-        return [
-            {"qlat_files": [f"f{i}_{k}" for k in range(n)], "nts": n * 12,
-             "final_timestamp": f"t{i}"}
-            for i, n in enumerate(sizes)
-        ]
+    def _widths(self, n_columns, window, span=12):
+        from troute.window_plan import plan_windows
 
-    def test_a_short_remainder_is_merged_into_the_window_before_it(self):
-        from troute.AbstractNetwork import _fold_short_final_set
+        return [stop - start for start, stop in plan_windows(n_columns, window, span)]
 
-        sets = self._sets(46, 46, 4)
-        _fold_short_final_set(sets, 12)
-        assert len(sets) == 2
-        assert len(sets[-1]["qlat_files"]) == 50
-        assert sets[-1]["nts"] == 50 * 12
-        assert sets[-1]["final_timestamp"] == "t2"
+    def test_no_window_is_left_under_the_span(self):
+        # 96 columns at a window of 46 would fill to [46, 46, 4]; the 4 is under the
+        # 12 column span, so the split evens out instead of leaving it.
+        widths = self._widths(96, 46)
+        assert sum(widths) == 96
+        assert min(widths) >= 12
 
-    def test_a_remainder_at_least_as_long_as_the_span_is_left_alone(self):
-        from troute.AbstractNetwork import _fold_short_final_set
+    def test_windows_never_exceed_the_requested_width(self):
+        """The fold this replaced merged the remainder into its neighbor, which put
+        that window over the width the caller sized memory for."""
+        widths = self._widths(96, 46)
+        assert max(widths) <= 46
 
-        sets = self._sets(46, 46, 12)
-        _fold_short_final_set(sets, 12)
-        assert [len(s["qlat_files"]) for s in sets] == [46, 46, 12]
+    def test_the_split_evens_out_rather_than_leaving_a_remainder(self):
+        # 104 columns at a width of 46 needs 3 windows; they come out within one
+        # column of each other instead of [46, 46, 12].
+        assert self._widths(104, 46) == [35, 35, 34]
 
-    def test_a_single_short_window_has_nowhere_to_fold(self):
-        from troute.AbstractNetwork import _fold_short_final_set
+    def test_a_run_shorter_than_the_span_is_one_window(self):
+        assert self._widths(4, 46) == [4]
 
-        sets = self._sets(4)
-        _fold_short_final_set(sets, 12)
-        assert [len(s["qlat_files"]) for s in sets] == [4]
+    def test_an_unsplittable_run_goes_in_one_window(self):
+        # 47 columns against a 24 column span: any two windows leave one at 23.
+        assert self._widths(47, 24, span=24) == [47]
 
 
 class TestThetaPerTree:
