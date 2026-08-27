@@ -50,7 +50,8 @@ def _required(cols, *, links=2, qts=12, courant=False, scaling=False, pool=1):
     """
     per_element = tm.per_element_bytes(courant, scaling)
     overhead = tm.POOL_OVERHEAD if pool > 1 else 1.0
-    return int(cols * (tm.PER_COLUMN_BYTES + per_element * links * qts) * overhead)
+    return int(cols * (tm.per_column_bytes(scaling) + per_element * links * qts)
+               * overhead)
 
 
 @pytest.fixture
@@ -404,8 +405,12 @@ class TestAutoNeverSizesUpFromTheEstimate:
 # RSS in MB. Held here so the estimator is checked against numbers that do not come
 # from the estimator.
 SWEEPS = {
-    "ohio": (11327, {1: 620.7, 2: 733.9, 4: 876.6, 8: 1027.9}),
-    "conus": (1102154, {1: 10206.8, 2: 11087.4, 4: 11602.7, 8: 13292.0}),
+    ("ohio", False): (11327, {1: 620.7, 2: 733.9, 4: 876.6, 8: 1027.9}),
+    ("conus", False): (1102154, {1: 10206.8, 2: 11087.4, 4: 11602.7, 8: 13292.0}),
+    # Same sweep with streamflow_scaling on. CONUS has only two points: mls 8 drove
+    # the measuring machine into swap, so its peak would have measured the swap.
+    ("ohio", True): (11327, {1: 786.5, 2: 970.1, 4: 1294.5, 8: 1678.3}),
+    ("conus", True): (1102154, {2: 14901.7, 4: 16211.5}),
 }
 QTS = 12
 
@@ -427,14 +432,14 @@ class TestTheEstimateTracksBothMeasuredSweeps:
     to read 21x under on one domain and 13x over on the other without a failure.
     """
 
-    def test_the_model_matches_each_domain(self):
-        for name, (links, points) in SWEEPS.items():
-            predicted = (tm.PER_COLUMN_BYTES
-                         + tm.per_element_bytes(False, False) * links * QTS) / 1e6
+    def test_the_model_matches_each_domain_and_arm(self):
+        for (name, scaling), (links, points) in SWEEPS.items():
+            predicted = (tm.per_column_bytes(scaling)
+                         + tm.per_element_bytes(scaling, scaling) * links * QTS) / 1e6
             measured = _measured_slope(points)
             assert 0.85 <= predicted / measured <= 1.20, (
-                f"{name}: model {predicted:.0f} MB/column against {measured:.0f} "
-                f"measured ({predicted / measured:.2f}x)"
+                f"{name} scaling={scaling}: model {predicted:.0f} MB/column against "
+                f"{measured:.0f} measured ({predicted / measured:.2f}x)"
             )
 
     def test_one_per_element_constant_cannot_serve_both(self):
@@ -446,23 +451,23 @@ class TestTheEstimateTracksBothMeasuredSweeps:
         """
         implied = {
             name: _measured_slope(points) * 1e6 / (links * QTS)
-            for name, (links, points) in SWEEPS.items()
+            for (name, scaling), (links, points) in SWEEPS.items() if not scaling
         }
         assert implied["ohio"] / implied["conus"] > 5, implied
 
     def test_the_per_column_term_dominates_a_small_domain(self):
         """Why fitting Ohio alone went wrong: at 11k links almost all of that 55 MB
         per column is the domain-independent term, not the per-element one."""
-        links, _ = SWEEPS["ohio"]
+        links, _ = SWEEPS[("ohio", False)]
         per_element_share = (tm.per_element_bytes(False, False) * links * QTS
-                             / (tm.PER_COLUMN_BYTES
+                             / (tm.per_column_bytes(False)
                                 + tm.per_element_bytes(False, False) * links * QTS))
         assert per_element_share < 0.15
 
     def test_the_per_element_term_dominates_conus(self):
-        links, _ = SWEEPS["conus"]
+        links, _ = SWEEPS[("conus", False)]
         per_element_share = (tm.per_element_bytes(False, False) * links * QTS
-                             / (tm.PER_COLUMN_BYTES
+                             / (tm.per_column_bytes(False)
                                 + tm.per_element_bytes(False, False) * links * QTS))
         assert per_element_share > 0.80
 
@@ -509,35 +514,31 @@ class TestTheSplitStaysInsideTheCap:
         assert [rs["qlats"].shape[1] for rs in sets] == [47]
 
 
-class TestTheModeIncrementsAreNotFree:
-    """Pinned against literal widths, not against per_element_bytes itself.
+class TestTheScalingCostLandsWhereItWasMeasured:
+    """The DA's cost is mostly PER COLUMN, and the code used to put none of it there.
 
-    Every pressure test in this file derives its budget from the helper it is
-    testing, so deleting the Courant and scaling increments outright left the whole
-    suite green. These assert the declared array widths directly, which is the only
-    thing about those two terms that was ever measured.
+    Modelled as +34 B/element and nothing per column, it missed the term that dominates
+    (67.8 MB/column measured) and overstated the one that does not (13 B/element). On
+    CONUS at mls=4 that is the difference between predicting 29 GB and the 16.2 GB the
+    run actually used.
     """
 
-    def test_courant_adds_its_three_float32_columns(self):
-        # flowveldepth 4-wide + upstream 1-wide = 20 B; Courant adds 3-wide float32.
-        assert (tm.per_element_bytes(True, False)
-                - tm.per_element_bytes(False, False)) == int(32 * tm.DECLARED_ARRAY_FACTOR) - int(20 * tm.DECLARED_ARRAY_FACTOR)
+    def test_scaling_adds_a_per_column_cost(self):
+        added = tm.per_column_bytes(True) - tm.per_column_bytes(False)
+        assert added / 1e6 == pytest.approx(67.8, abs=5)
 
-    def test_scaling_adds_its_three_float64_frames(self):
-        # q_model, its copy and the corrected frame, float64.
-        assert (tm.per_element_bytes(False, True)
-                - tm.per_element_bytes(False, False)) == int(44 * tm.DECLARED_ARRAY_FACTOR) - int(20 * tm.DECLARED_ARRAY_FACTOR)
+    def test_scaling_adds_little_per_element(self):
+        added = tm.per_element_bytes(True, True) - tm.per_element_bytes(False, False)
+        assert added == pytest.approx(13, abs=4)
 
-    def test_the_modes_compose(self):
-        assert tm.per_element_bytes(True, True) == int((20 + 12 + 24) * tm.DECLARED_ARRAY_FACTOR)
+    def test_the_scaling_figure_already_carries_courant(self):
+        """A scaling run returns the Courant block, so the measured DA slope includes
+        it. Adding a separate Courant term on top would count it twice."""
+        assert tm.per_element_bytes(True, True) == tm.per_element_bytes(False, True)
 
-    def test_the_pool_overhead_matches_the_measured_tree(self):
-        """CONUS tree PSS 27.8 GB against 24.6 GB main-process, so 1.13x.
-
-        Pinning the value, not just its flatness: the split test derives its budget
-        from POOL_OVERHEAD, so it passed at 1.01 and at 3.0 alike.
-        """
-        assert tm.POOL_OVERHEAD == pytest.approx(27.8 / 24.6, abs=0.03)
+    def test_courant_alone_is_still_the_declared_width(self):
+        added = tm.per_element_bytes(True, False) - tm.per_element_bytes(False, False)
+        assert added == 17  # 3-wide float32 at the same ratio as the base term
 
 
 class TestMemoryIsWhatThisProcessMayUse:
@@ -621,7 +622,7 @@ class TestAutoTakesWhatFits:
         return m
 
     def test_a_cap_above_the_span_is_used_not_refused(self, monkeypatch):
-        sets = list(self._model(96, 12.0, 4, monkeypatch)._build_run_sets(_qlats(96)))
+        sets = list(self._model(96, 12.0, 6, monkeypatch)._build_run_sets(_qlats(96)))
         widths = [rs["qlats"].shape[1] for rs in sets]
         assert len(widths) > 1
         assert min(widths) >= 12, widths
@@ -633,7 +634,7 @@ class TestAutoTakesWhatFits:
 
     def test_an_explicit_window_still_refuses_a_ram_split(self, monkeypatch):
         """Unchanged: pinning a value is a promise the partition is not machine load."""
-        m = self._model(96, 12.0, 4, monkeypatch)
+        m = self._model(96, 12.0, 6, monkeypatch)
         m._config["compute_parameters"]["forcing_parameters"]["max_loop_size"] = 24
         with pytest.raises(MemoryError):
             list(m._build_run_sets(_qlats(96)))

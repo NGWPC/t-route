@@ -95,18 +95,28 @@ class RunSet(TypedDict):
 
 # Peak RSS has TWO terms, and which one dominates depends on the domain. Measured by
 # sweeping max_loop_size on one machine over two domains (benchmark/RESULTS.md 5b):
-# Ohio at 11,327 links gives 55.5 MB per forcing column, CONUS at 1,102,154
-# gives 414.6. Read as one per-element constant those are 409 B and 31 B, so a single
+# Ohio at 11,327 links gives 55.5 MB per forcing column, CONUS at 1,102,154 gives
+# 414.6. Read as one per-element constant those are 409 B and 31 B, so a single
 # constant is off by 13x between them; solved as two terms they agree within 2%.
 #
-# The per-column term is forcing I/O, frame assembly and output, which do not scale with
-# the domain. It dominates a small domain, which is why fitting Ohio alone produced a
-# per-element figure ~15x too high and made CONUS look like it needed 152 GB a window.
+# The per-column term is forcing I/O, frame assembly and output, which do not scale
+# with the domain. It dominates a small domain, which is why fitting Ohio alone
+# produced a per-element figure ~15x too high and made CONUS look like it needed
+# 152 GB a window.
 PER_COLUMN_BYTES = 52_000_000
+BASE_PER_ELEMENT_BYTES = 28
 
-# And what is left per link-timestep is close to the arrays below as declared: 27.4 B
-# measured against 20 B of flowveldepth and upstream_array. 1.4 carries the difference.
-DECLARED_ARRAY_FACTOR = 1.4
+# The scaling DA, swept the same way with the DA on: Ohio 125.1 MB/column and CONUS
+# 654.9, so the DA adds 67.8 MB per column and 13 B per element. Note where the cost
+# actually falls -- the code used to model the DA as +34 B/element and nothing per
+# column, which misses the term that dominates and overstates the one that does not.
+# These already include the Courant arrays, since a scaling run returns them.
+SCALING_PER_COLUMN_BYTES = 68_000_000
+SCALING_PER_ELEMENT_BYTES = BASE_PER_ELEMENT_BYTES + 13
+
+# Courant WITHOUT the DA was never swept, so this one is the declared width carried at
+# the same ratio the base term turned out to have: 3-wide float32.
+COURANT_PER_ELEMENT_BYTES = BASE_PER_ELEMENT_BYTES + 17
 
 # What a worker pool adds on top of the main process, measured: CONUS tree PSS 27.8 GB
 # against 24.6 GB main-process at cpu_pool 8, Tier A at parity. Workers route their own
@@ -114,19 +124,26 @@ DECLARED_ARRAY_FACTOR = 1.4
 POOL_OVERHEAD = 1.15
 
 
-def per_element_bytes(courant: bool, scaling: bool) -> int:
-    """Bytes per link-timestep. Only the term that scales with the DOMAIN.
+def per_column_bytes(scaling: bool) -> int:
+    """Bytes per forcing column that do NOT scale with the domain.
 
-    flowveldepth is 4-wide float32 and upstream_array 1-wide, always; the Courant
-    block is 3-wide float32 only when returned; the scaling DA holds q_model, its copy
-    and the corrected frame in float64 only when active. Add PER_COLUMN_BYTES per
-    forcing column for the part that does not scale with the domain.
-
-    The base term is measured. The two flag terms are declared widths carrying the same
-    factor, since neither sweep ran with DA or Courant on.
+    Forcing I/O, frame assembly and output, plus the DA's observation handling when it
+    is on. This is ~94% of a small domain's slope and ~13% of CONUS's, which is exactly
+    why a model fitted on one domain cannot be trusted on the other.
     """
-    declared = 20 + (12 if courant else 0) + (24 if scaling else 0)
-    return int(declared * DECLARED_ARRAY_FACTOR)
+    return PER_COLUMN_BYTES + (SCALING_PER_COLUMN_BYTES if scaling else 0)
+
+
+def per_element_bytes(courant: bool, scaling: bool) -> int:
+    """Bytes per link-timestep, the term that DOES scale with the domain.
+
+    flowveldepth is 4-wide float32 and upstream_array 1-wide, so 20 B declared against
+    28 B measured. The scaling figure is measured too and already carries Courant,
+    because a scaling run returns it; only Courant on its own is a declared width.
+    """
+    if scaling:
+        return SCALING_PER_ELEMENT_BYTES
+    return COURANT_PER_ELEMENT_BYTES if courant else BASE_PER_ELEMENT_BYTES
 
 
 def available_memory_bytes(cgroup_root: Path = Path("/sys/fs/cgroup")) -> int:
@@ -945,7 +962,8 @@ class Model:
         # Two terms: one that scales with the domain and one that does not.
         required_bytes = int(
             qlats.shape[1]
-            * (PER_COLUMN_BYTES + per_element * qlats.shape[0] * self.qts_subdivisions)
+            * (per_column_bytes(_scaling_now)
+               + per_element * qlats.shape[0] * self.qts_subdivisions)
             * pool_overhead
         )
         # No intercept term: available_memory is read HERE, after the network, plan and

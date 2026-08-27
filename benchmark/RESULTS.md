@@ -749,6 +749,41 @@ Consequence for `max_loop_size: 0` (automatic): the BMI driver
 sizes its memory cap from this model, so a CONUS scaling run is
 no longer refused for want of memory it never needed.
 
+**With the DA on.** The cluster runs assimilate, so the same
+sweep was repeated with `streamflow_scaling: true` against the
+`usgs_timeslices` folders:
+
+| Window | Ohio DA on | CONUS DA on |
+|---:|---:|---:|
+| 1 | 786.5 MB | -- |
+| 2 | 970.1 MB | 14,901.7 MB |
+| 4 | 1,294.5 MB | 16,211.5 MB |
+| 8 | 1,678.3 MB | -- |
+| **slope** | **125.1 MB/col** | **654.9 MB/col** |
+
+Solved the same way, the DA adds **67.8 MB per forcing column
+and 13 B per link-timestep**. That is the opposite shape to what
+the code assumed: it modelled the DA as `+34 B/element` and
+nothing per column, missing the term that dominates and
+overstating the one that does not. On CONUS at `mls = 4` the
+per-element reading predicts 29 GB against the 16.2 GB the run
+actually used.
+
+Part of why the DA's domain-scaled cost stays modest is that it
+bounds itself: `_resolve_spread_chunk` caps the upstream-spread
+transient at `_SPREAD_CHUNK_BUDGET_ELEMS` (64 M float64, 512 MB)
+and chunks above it, bit-identically. CONUS is over that budget
+at every window; Ohio only reaches it near `mls = 8`. So the two
+domains' DA slopes are not measuring quite the same regime, and
+the per-element DA figure is the softest number here.
+
+CONUS DA has only two points. `mls = 8` drove the measuring
+machine (32 GB) into swap with loky workers dying, so its peak
+would have measured the swap rather than the model, and it was
+discarded rather than reported. CONUS with the DA also costs
+1,261 s at `mls = 2` against 270 s without, a 4.7x wall cost
+that is worth knowing separately from the memory.
+
 Caveats. Two domains fit two unknowns exactly, so the 2%
 agreement on slope is arithmetic, not validation; what IS
 independently checked is linearity in window size, 4 points per
