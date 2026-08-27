@@ -64,12 +64,18 @@ def test_a_short_update_runs_when_the_da_has_no_span():
     assert runs[0]["nts"] == 3 * 12  # routing timesteps, not columns
 
 
-def test_a_short_update_is_refused_once_the_span_is_nonzero():
-    """With a forward average the partition reaches the result, so shrinking the
-    window silently would change discharge. That still has to fail loudly."""
+def test_a_short_update_is_reported_not_refused(caplog):
+    """With a forward average the update length reaches the result, so an operator
+    who configured a longer window is told what actually ran.
+
+    Not an error: a window longer than the update cannot constrain memory either, so
+    refusing stopped a run over a setting that was doing nothing.
+    """
     model = _model(24, _ScalingDAStub(2.0))
-    with pytest.raises(ValueError, match="forcing timestep"):
-        list(model._build_run_sets(_qlats()))
+    with caplog.at_level("WARNING"):
+        runs = list(model._build_run_sets(_qlats()))
+    assert [r["nts"] for r in runs] == [3 * 12]
+    assert "operates over 3" in caplog.text
 
 
 def test_a_span_that_fits_the_update_runs():
@@ -132,8 +138,19 @@ class TestAutoYieldsToTheUpdate:
             list(model._build_run_sets(_qlats(6)))
         assert "lower max_loop_size" not in str(excinfo.value)
 
-    def test_an_explicit_window_still_refuses_to_shrink(self):
-        """Unchanged: 18 columns against a configured 24 is still a silent shrink."""
+    def test_an_explicit_window_runs_and_says_what_it_ran(self, caplog):
+        """An explicit value longer than the update is inert, so it warns, not raises.
+
+        The hard error is reserved for the wall auto has too: an update that cannot
+        cover the span at all, which no choice of window escapes.
+        """
         model = _model(24, _ScalingDAStub(12.0), cols=18)
-        with pytest.raises(ValueError, match="max_loop_size"):
-            list(model._build_run_sets(_qlats(18)))
+        with caplog.at_level("WARNING"):
+            runs = list(model._build_run_sets(_qlats(18)))
+        assert [r["nts"] for r in runs] == [18 * 12]
+        assert "max_loop_size is 24" in caplog.text
+
+    def test_an_explicit_window_still_hits_the_span_wall(self):
+        model = _model(24, _ScalingDAStub(12.0), cols=6)
+        with pytest.raises(ValueError, match="span is 12"):
+            list(model._build_run_sets(_qlats(6)))

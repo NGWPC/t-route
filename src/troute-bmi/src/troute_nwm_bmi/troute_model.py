@@ -955,7 +955,18 @@ class Model:
                     "RAM-derived split would make the window partition, and so the "
                     f"discharge, depend on current machine load. {remedy}"
                 )
-            if partition_matters:
+            # A configured window longer than the update cannot constrain memory: the
+            # update length already caps it. So it is inert, and refusing over it stops
+            # a run that auto would serve. Say what actually ran and carry on; the wall
+            # below is the one no window choice escapes.
+            if partition_matters and loop_size >= span_cols:
+                LOG.warning(
+                    "max_loop_size is %d but this update supplies %d forcing "
+                    "timestep(s), so the scaling DA operates over %d. Discharge "
+                    "depends on the update length, not on the configured value.",
+                    int(cfg_loop), nts, loop_size,
+                )
+            if partition_matters and loop_size < span_cols:
                 # Memory was never the limit here: the cap IS this update's own
                 # forcing, so saying "free memory" sends the operator to the
                 # wrong place entirely. Under auto the span is the only term left,
