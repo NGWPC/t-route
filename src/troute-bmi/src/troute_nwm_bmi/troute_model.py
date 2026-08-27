@@ -21,7 +21,7 @@ from troute.NHF import NHF
 from troute.DataAssimilation import DataAssimilation
 
 import troute.hyfeature_network_utilities as hnu
-from troute.window_plan import AUTO_WINDOW, plan_windows, resolve_window
+from troute.window_plan import plan_windows, resolve_window
 
 import nwm_routing.nwm_route as nwm_routing
 from nwm_routing.output import nwm_output_generator
@@ -114,6 +114,33 @@ MEASURED_PEAK_RATIO = 24
 # against 24.6 GB main-process at cpu_pool 8, Tier A at parity. Workers route their own
 # clusters and share the parent's pages, so this is flat in the pool size.
 POOL_OVERHEAD = 1.15
+
+
+def available_memory_bytes(cgroup_root: Path = Path("/sys/fs/cgroup")) -> int:
+    """Memory this process may actually use, which is not what the host reports.
+
+    psutil reads /proc/meminfo, and that is the HOST's memory even inside a container:
+    under Docker, Kubernetes or a cgroup-backed Slurm allocation it shows headroom the
+    job will never be allowed to touch, while the OOM killer arrives at the cgroup
+    limit. Sizing a window from the larger number is how a "safety cap" gets a run
+    killed. Take the smaller of the two, and fall back to the host reading wherever
+    cgroups are absent, which includes macOS.
+    """
+    host = int(psutil.virtual_memory().available)
+    for limit_name, usage_name in (
+        ("memory.max", "memory.current"),                          # cgroup v2
+        ("memory/memory.limit_in_bytes", "memory/memory.usage_in_bytes"),  # v1
+    ):
+        try:
+            limit = int((cgroup_root / limit_name).read_text().strip())
+            used = int((cgroup_root / usage_name).read_text().strip())
+        except (OSError, ValueError):
+            # No cgroup here, or v2's unlimited, which is the word "max".
+            continue
+        # v1 reports a sentinel near 2**63 rather than a word when unlimited.
+        if limit < 2**62:
+            return min(host, max(0, limit - used))
+    return host
 
 
 def per_element_bytes(courant: bool, scaling: bool) -> int:
@@ -264,7 +291,32 @@ class Model:
         # to function from inital loop.
         self._subnetwork = [None, None, None]
 
+    def _warn_cross_update_cadence(self) -> None:
+        """Say once that the caller's update cadence is part of the answer.
+
+        Every guard in _build_run_sets is about windows WITHIN one update. Nothing
+        crosses between update() calls: each closes its own final window and no halo
+        survives the return, so with a DA span the same forcing split into different
+        update lengths gives different discharge near every boundary. It cannot be
+        fixed here either -- carrying the halo would mean withholding an update's
+        output until the next arrives, which is not what update() means -- so the
+        honest thing is to say it, once, when the second update makes it true.
+        """
+        if getattr(self, "_warned_cadence", False) or not getattr(self, "_has_routed", False):
+            return
+        if getattr(self, "_scaling_da", None) is None or not self._span_columns():
+            return
+        self._warned_cadence = True
+        LOG.warning(
+            "more than one update in a scaling DA run with a span of %d forcing "
+            "timestep(s): each update closes its own final window, so the same forcing "
+            "split into different update lengths gives different discharge near every "
+            "boundary. Keep the cadence fixed across runs you mean to compare.",
+            self._span_columns(),
+        )
+
     def run(self, bmi_values: dict[str, NDArray]):
+        self._warn_cross_update_cadence()
         self._has_routed = True
         is_nhf = self._is_nhf()
         qts_subdivisions = self.qts_subdivisions
@@ -852,6 +904,28 @@ class Model:
         )
         return da_sets[0] if da_sets else None
 
+    def _span_columns(self) -> int:
+        """The DA's own horizon, in forcing columns. Zero when no span is active.
+
+        The forward innovation window reads past the end of a window into the next
+        one's innovation, and that halo is exactly ONE window deep, so a window
+        shorter than this leaves its own tail uncovered and the result starts
+        depending on the partition. getattr with the ScalingDA class defaults,
+        since tests stub _scaling_da.
+        """
+        scaling_da = getattr(self, "_scaling_da", None)
+        if scaling_da is None:
+            return 0
+        spread_h = float(getattr(scaling_da, "innovation_spread_h", 0.0))
+        # SUM, not max: the lag reads the SMOOTHED innovation at t + tau, so the tail
+        # of a window needs raw innovation out to tau_max + spread. The lag is measured
+        # over a fixed span taken from the first window, so that window must hold it,
+        # or the span follows max_loop_size and a memory knob changes discharge.
+        if getattr(scaling_da, "travel_time_lag", False):
+            spread_h += float(getattr(scaling_da, "lag_window_h", 48.0))
+        col_s = float(self.qts_subdivisions) * float(self.dt)
+        return math.ceil(spread_h * 3600.0 / col_s)
+
     def _build_run_sets(self, qlats: pd.DataFrame) -> Iterator[RunSet]:
         nts = len(qlats.columns)
         # Memory is a SAFETY CAP only, never the primary window control.
@@ -877,8 +951,8 @@ class Model:
         )
         # No intercept term: available_memory is read HERE, after the network, plan and
         # forcing are already resident, so the baseline is excluded by construction.
-        system_memory = psutil.virtual_memory()
-        available_memory = system_memory.available * 0.9  # only account for 90% of the currently available memory
+        # only account for 90% of the memory this process may actually use
+        available_memory = available_memory_bytes() * 0.9
         mem_divisions = math.ceil(required_bytes / available_memory)
         mem_loop_size = math.ceil(nts / mem_divisions)
 
@@ -893,26 +967,8 @@ class Model:
         # The DA's own span, in forcing columns. At zero span the spread is
         # output-only and per timestep, so a single-window update may be served
         # below max_loop_size without measurement.
-        span_cols = 0
+        span_cols = self._span_columns()
         if scaling_active:
-            # The forward innovation window reads past the end of a window into
-            # the next one's innovation, and that halo is exactly ONE window
-            # deep, so a window shorter than innovation_spread_h leaves its own
-            # tail uncovered and the result starts depending on the partition.
-            # max_loop_size counts qlat COLUMNS here, so convert via the column
-            # cadence and enlarge. The final window of each update is exempt
-            # (edge closure). getattr with the ScalingDA class default: tests
-            # stub _scaling_da.
-            col_s = float(self.qts_subdivisions) * float(self.dt)
-            spread_h = float(getattr(self._scaling_da, "innovation_spread_h", 0.0))
-            # The travel-time lag is measured over a fixed span taken from the
-            # first window, so that window has to contain it. Otherwise the span
-            # follows max_loop_size and a memory knob changes discharge.
-            # SUM, not max: the lag reads the SMOOTHED innovation at t + tau, so
-            # the tail of a window needs raw innovation out to tau_max + spread.
-            if getattr(self._scaling_da, "travel_time_lag", False):
-                spread_h += float(getattr(self._scaling_da, "lag_window_h", 48.0))
-            span_cols = math.ceil(spread_h * 3600.0 / col_s)
             if cfg_loop > 0 and span_cols > cfg_loop:
                 LOG.info(
                     "scaling DA: max_loop_size enlarged %d -> %d forcing columns "

@@ -792,7 +792,8 @@ class ForcingParameters(BaseModel):
 
     0 (the default) sizes it automatically, and both drivers log what they chose.
     Under BMI that means 24 forcing columns, never shorter than the DA's own span and
-    capped by available memory. The CLI has no memory estimator, so there it means a
+    capped by the memory this process may actually use, which inside a container is
+    the cgroup's remaining budget rather than the host's free memory. The CLI has no memory estimator, so there it means a
     flat 24, still enlarged to cover the DA span.
 
     Setting a value pins the window. It only changes results when the DA has a span,

@@ -19,6 +19,8 @@ import pytest
 import troute_nwm_bmi.troute_model as tm
 from joblib import effective_n_jobs
 
+from troute.window_plan import AUTO_WINDOW
+
 
 def _model(nts_cols=96, max_loop_size=None, dt=300, qts=12):
     """A Model with just enough state for _build_run_sets."""
@@ -69,7 +71,7 @@ class TestConfiguredWindowIsPrimary:
         from it picks a window the machine may not hold. Memory only caps.
         """
         sets = list(_model(nts_cols=96)._build_run_sets(_qlats(96)))
-        assert [rs["qlats"].shape[1] for rs in sets] == [tm.AUTO_WINDOW] * 4
+        assert [rs["qlats"].shape[1] for rs in sets] == [AUTO_WINDOW] * 4
 
     def test_nts_scales_by_qts_subdivisions(self, plenty_of_memory):
         m = _model(nts_cols=48, max_loop_size=24)
@@ -365,7 +367,7 @@ class TestAutoNeverSizesUpFromTheEstimate:
 
     def test_comfortable_memory_gives_the_auto_window(self, plenty_of_memory):
         sets = list(_model(nts_cols=96)._build_run_sets(_qlats(96)))
-        assert [rs["qlats"].shape[1] for rs in sets] == [tm.AUTO_WINDOW] * 4
+        assert [rs["qlats"].shape[1] for rs in sets] == [AUTO_WINDOW] * 4
 
     def test_memory_still_caps_the_auto_window(self, monkeypatch):
         required = 2 * 96 * 12 * tm.per_element_bytes(True, True)
@@ -376,7 +378,7 @@ class TestAutoNeverSizesUpFromTheEstimate:
         m = _model(nts_cols=96)
         m._scaling_da = SimpleNamespace(innovation_spread_h=0.0, travel_time_lag=False)
         sets = list(m._build_run_sets(_qlats(96)))
-        assert all(rs["qlats"].shape[1] < tm.AUTO_WINDOW for rs in sets)
+        assert all(rs["qlats"].shape[1] < AUTO_WINDOW for rs in sets)
 
     def test_the_span_is_the_only_term_that_enlarges(self, plenty_of_memory):
         m = _model(nts_cols=96)
@@ -421,7 +423,7 @@ class TestAutoSaysWhatItChose:
     def test_auto_logs_the_window(self, plenty_of_memory, caplog):
         with caplog.at_level("INFO"):
             list(_model(nts_cols=96)._build_run_sets(_qlats(96)))
-        assert f"chose {tm.AUTO_WINDOW} forcing timestep(s)" in caplog.text
+        assert f"chose {AUTO_WINDOW} forcing timestep(s)" in caplog.text
 
     def test_auto_logs_the_capped_window_not_the_request(self, monkeypatch, caplog):
         required = 2 * 96 * 12 * tm.per_element_bytes(True, True)
@@ -432,7 +434,7 @@ class TestAutoSaysWhatItChose:
         with caplog.at_level("INFO"):
             sets = list(m._build_run_sets(_qlats(96)))
         assert f"chose {sets[0]['qlats'].shape[1]} forcing timestep(s)" in caplog.text
-        assert f"chose {tm.AUTO_WINDOW} forcing" not in caplog.text
+        assert f"chose {AUTO_WINDOW} forcing" not in caplog.text
 
     def test_an_explicit_window_is_not_announced(self, plenty_of_memory, caplog):
         with caplog.at_level("INFO"):
@@ -511,3 +513,65 @@ class TestTheModeIncrementsAreNotFree:
         from POOL_OVERHEAD, so it passed at 1.01 and at 3.0 alike.
         """
         assert tm.POOL_OVERHEAD == pytest.approx(27.8 / 24.6, abs=0.03)
+
+
+class TestMemoryIsWhatThisProcessMayUse:
+    """psutil reports the HOST's free memory, which is not the job's budget.
+
+    In a container or a cgroup-backed batch allocation the host reading shows headroom
+    the job may never touch, and the OOM killer arrives at the cgroup limit. Sizing a
+    window from the larger number is how a safety cap gets a run killed.
+    """
+
+    def _host(self, monkeypatch, gb):
+        monkeypatch.setattr(
+            tm.psutil, "virtual_memory",
+            lambda: SimpleNamespace(available=int(gb * 1024**3)),
+        )
+
+    def test_no_cgroup_falls_back_to_the_host(self, monkeypatch, tmp_path):
+        self._host(monkeypatch, 16)
+        assert tm.available_memory_bytes(tmp_path) == 16 * 1024**3
+
+    def test_a_v2_limit_wins_when_it_is_smaller(self, monkeypatch, tmp_path):
+        self._host(monkeypatch, 64)
+        (tmp_path / "memory.max").write_text(str(8 * 1024**3))
+        (tmp_path / "memory.current").write_text(str(2 * 1024**3))
+        assert tm.available_memory_bytes(tmp_path) == 6 * 1024**3
+
+    def test_the_host_wins_when_the_cgroup_is_larger(self, monkeypatch, tmp_path):
+        self._host(monkeypatch, 4)
+        (tmp_path / "memory.max").write_text(str(64 * 1024**3))
+        (tmp_path / "memory.current").write_text("0")
+        assert tm.available_memory_bytes(tmp_path) == 4 * 1024**3
+
+    def test_an_unlimited_v2_cgroup_is_not_read_as_zero(self, monkeypatch, tmp_path):
+        self._host(monkeypatch, 16)
+        (tmp_path / "memory.max").write_text("max")
+        (tmp_path / "memory.current").write_text("0")
+        assert tm.available_memory_bytes(tmp_path) == 16 * 1024**3
+
+    def test_a_v1_limit_is_read_too(self, monkeypatch, tmp_path):
+        self._host(monkeypatch, 64)
+        v1 = tmp_path / "memory"
+        v1.mkdir()
+        (v1 / "memory.limit_in_bytes").write_text(str(10 * 1024**3))
+        (v1 / "memory.usage_in_bytes").write_text(str(1 * 1024**3))
+        assert tm.available_memory_bytes(tmp_path) == 9 * 1024**3
+
+    def test_the_v1_unlimited_sentinel_is_ignored(self, monkeypatch, tmp_path):
+        # v1 writes a number near 2**63 rather than a word.
+        self._host(monkeypatch, 16)
+        v1 = tmp_path / "memory"
+        v1.mkdir()
+        (v1 / "memory.limit_in_bytes").write_text(str(2**63 - 4096))
+        (v1 / "memory.usage_in_bytes").write_text("0")
+        assert tm.available_memory_bytes(tmp_path) == 16 * 1024**3
+
+    def test_a_cgroup_already_over_its_limit_reads_as_zero_not_negative(
+        self, monkeypatch, tmp_path
+    ):
+        self._host(monkeypatch, 64)
+        (tmp_path / "memory.max").write_text(str(4 * 1024**3))
+        (tmp_path / "memory.current").write_text(str(6 * 1024**3))
+        assert tm.available_memory_bytes(tmp_path) == 0

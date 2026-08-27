@@ -166,3 +166,65 @@ class TestAutoYieldsToTheUpdate:
         model = _model(24, _ScalingDAStub(12.0), cols=6)
         with pytest.raises(ValueError, match="span of 12"):
             list(model._build_run_sets(_qlats(6)))
+
+
+class TestTheUpdateCadenceIsDisclosed:
+    """Every window guard is about windows WITHIN one update. Nothing crosses between
+    update() calls, so a chunked run's boundaries are result-bearing and unguarded.
+
+    Not fixable here: carrying the halo would withhold an update's output until the
+    next arrives. So it is said out loud, once, when the second update makes it true.
+    """
+
+    def _model_with_span(self, span_h, routed, warned=False):
+        model = _model(0, _ScalingDAStub(span_h))
+        model._has_routed = routed
+        if warned:
+            model._warned_cadence = True
+        return model
+
+    def test_the_first_update_is_silent(self, caplog):
+        with caplog.at_level("WARNING"):
+            self._model_with_span(12.0, routed=False)._warn_cross_update_cadence()
+        assert "more than one update" not in caplog.text
+
+    def test_the_second_update_says_so(self, caplog):
+        with caplog.at_level("WARNING"):
+            self._model_with_span(12.0, routed=True)._warn_cross_update_cadence()
+        assert "more than one update" in caplog.text
+        assert "span of 12" in caplog.text
+
+    def test_it_is_said_once_not_every_update(self, caplog):
+        model = self._model_with_span(12.0, routed=True)
+        with caplog.at_level("WARNING"):
+            for _ in range(5):
+                model._warn_cross_update_cadence()
+        assert caplog.text.count("more than one update") == 1
+
+    def test_a_zero_span_run_is_silent(self, caplog):
+        """At zero span the partition does not reach the result, so nor does the
+        update cadence: multi-window equivalence measures 0.0."""
+        with caplog.at_level("WARNING"):
+            self._model_with_span(0.0, routed=True)._warn_cross_update_cadence()
+        assert "more than one update" not in caplog.text
+
+    def test_no_assimilation_is_silent(self, caplog):
+        model = _model(0, None)
+        model._has_routed = True
+        with caplog.at_level("WARNING"):
+            model._warn_cross_update_cadence()
+        assert "more than one update" not in caplog.text
+
+
+def test_run_actually_calls_the_cadence_disclosure():
+    """Pins the CALL SITE, not just the method.
+
+    Deleting the call from run() left every direct-call test green, which would have
+    shipped a disclosure nobody ever sees. Read by source because exercising run()
+    needs a built network.
+    """
+    import inspect
+
+    from troute_nwm_bmi.troute_model import Model
+
+    assert "_warn_cross_update_cadence()" in inspect.getsource(Model.run)
