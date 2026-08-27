@@ -97,26 +97,34 @@ class RunSet(TypedDict):
 # sweeping max_loop_size on one machine over two domains (benchmark/RESULTS.md 5b):
 # Ohio at 11,327 links gives 55.5 MB per forcing column, CONUS at 1,102,154 gives
 # 414.6. Read as one per-element constant those are 409 B and 31 B, so a single
-# constant is off by 13x between them; solved as two terms they agree within 2%.
+# constant is off by 13x between them; solved as two terms they agree within 2% -- by
+# construction, since two domains fit two unknowns exactly. RESULTS.md 5b states what
+# that does and does not license.
 #
 # The per-column term is forcing I/O, frame assembly and output, which do not scale
 # with the domain. It dominates a small domain, which is why fitting Ohio alone
 # produced a per-element figure ~15x too high and made CONUS look like it needed
 # 152 GB a window.
-PER_COLUMN_BYTES = 60_000_000
+PER_COLUMN_BYTES = 52_000_000
 BASE_PER_ELEMENT_BYTES = 28
 
 # The scaling DA, swept the same way with the DA on: Ohio 125.1 MB/column and CONUS
 # 654.9, so the DA adds 67.8 MB per column and 13 B per element. Note where the cost
 # actually falls -- the code used to model the DA as +34 B/element and nothing per
 # column, which misses the term that dominates and overstates the one that does not.
-# These already include the Courant arrays, since a scaling run returns them.
+#
+# Measured with travel_time_lag OFF, which is what the sweep ran. That matters: the
+# drivers turn return_courant on only for the lag's trace, so no swept run allocated a
+# Courant block and this figure does NOT contain one.
 SCALING_PER_COLUMN_BYTES = 68_000_000
-SCALING_PER_ELEMENT_BYTES = BASE_PER_ELEMENT_BYTES + 13
+SCALING_PER_ELEMENT_DELTA = 13
 
-# Courant WITHOUT the DA was never swept, so this one is the declared width carried at
-# the same ratio the base term turned out to have: 3-wide float32.
-COURANT_PER_ELEMENT_BYTES = BASE_PER_ELEMENT_BYTES + 17
+# Never swept, so both are declared widths. Courant is 3-wide float32 carried at the
+# ratio the base term turned out to have; the lag additionally holds _assemble_cn's
+# [nt, N_seg] float64 trace, and it is the lag that turns Courant on in the first
+# place. They land on the WIDEST window a run has, since the span sizes that window.
+COURANT_PER_ELEMENT_BYTES = 17
+LAG_TRACE_PER_ELEMENT_BYTES = 11
 
 # What a worker pool adds on top of the main process, measured: CONUS tree PSS 27.8 GB
 # against 24.6 GB main-process at cpu_pool 8, Tier A at parity. Workers route their own
@@ -134,16 +142,22 @@ def per_column_bytes(scaling: bool) -> int:
     return PER_COLUMN_BYTES + (SCALING_PER_COLUMN_BYTES if scaling else 0)
 
 
-def per_element_bytes(courant: bool, scaling: bool) -> int:
+def per_element_bytes(courant: bool, scaling: bool, lag: bool = False) -> int:
     """Bytes per link-timestep, the term that DOES scale with the domain.
 
     flowveldepth is 4-wide float32 and upstream_array 1-wide, so 20 B declared against
-    28 B measured. The scaling figure is measured too and already carries Courant,
-    because a scaling run returns it; only Courant on its own is a declared width.
+    28 B measured. Additive, because the arrays are: a lag run allocates the DA's
+    frames AND a Courant block AND the trace, and folding them together under-read the
+    one window the lag makes widest.
     """
+    total = BASE_PER_ELEMENT_BYTES
     if scaling:
-        return SCALING_PER_ELEMENT_BYTES
-    return COURANT_PER_ELEMENT_BYTES if courant else BASE_PER_ELEMENT_BYTES
+        total += SCALING_PER_ELEMENT_DELTA
+    if courant or lag:
+        total += COURANT_PER_ELEMENT_BYTES
+    if lag:
+        total += LAG_TRACE_PER_ELEMENT_BYTES
+    return total
 
 
 def available_memory_bytes(cgroup_root: Path = Path("/sys/fs/cgroup")) -> int:
@@ -157,9 +171,10 @@ def available_memory_bytes(cgroup_root: Path = Path("/sys/fs/cgroup")) -> int:
     cgroups are absent, which includes macOS.
     """
     host = int(psutil.virtual_memory().available)
-    for limit_name, usage_name in (
-        ("memory.max", "memory.current"),                          # cgroup v2
-        ("memory/memory.limit_in_bytes", "memory/memory.usage_in_bytes"),  # v1
+    for limit_name, usage_name, stat_name, cache_key in (
+        ("memory.max", "memory.current", "memory.stat", "inactive_file"),
+        ("memory/memory.limit_in_bytes", "memory/memory.usage_in_bytes",
+         "memory/memory.stat", "total_inactive_file"),
     ):
         try:
             limit = int((cgroup_root / limit_name).read_text().strip())
@@ -168,8 +183,20 @@ def available_memory_bytes(cgroup_root: Path = Path("/sys/fs/cgroup")) -> int:
             # No cgroup here, or v2's unlimited, which is the word "max".
             continue
         # v1 reports a sentinel near 2**63 rather than a word when unlimited.
-        if limit < 2**62:
-            return min(host, max(0, limit - used))
+        if limit >= 2**62:
+            continue
+        # Usage COUNTS page cache, and this workload streams forcing and TimeSlice
+        # files through it, so a long-lived container drifts toward used == limit while
+        # holding gigabytes the kernel would hand straight back. Subtracting the
+        # reclaimable half is what the working-set readings do. Note the asymmetry this
+        # repairs: psutil's host figure is already cache-aware, so leaving this one
+        # naive made min() systematically prefer a number that was wrong.
+        try:
+            stat = (cgroup_root / stat_name).read_text().split()
+            used -= int(stat[stat.index(cache_key) + 1])
+        except (OSError, ValueError, IndexError):
+            pass
+        return min(host, max(0, limit - used))
     return host
 
 
@@ -950,8 +977,15 @@ class Model:
         # the corrected frame in float64 (24 B) only when it is active. Workers each
         # hold their own job's arrays, so the pool multiplies the transient.
         _scaling_now = getattr(self, "_scaling_da", None) is not None
-        _courant = bool(self.compute_parameters.get("return_courant", False)) or _scaling_now
-        per_element = per_element_bytes(_courant, _scaling_now)
+        # Scaling does NOT imply Courant: the drivers turn it on for the travel-time
+        # trace, so it follows the lag, not the DA. Treating the DA as implying it
+        # counted a block that lag-off runs never allocate, and missed the trace that
+        # lag-on runs do.
+        _lag = _scaling_now and bool(
+            getattr(self._scaling_da, "travel_time_lag", False)
+        )
+        _courant = bool(self.compute_parameters.get("return_courant", False))
+        per_element = per_element_bytes(_courant, _scaling_now, _lag)
         # Workers hold per-CLUSTER payloads, not domain copies, so the pool is a small
         # constant and not a multiplier: benchmark/RESULTS.md measures CONUS tree PSS at
         # cpu_pool 8 as 27.8 GB against 24.6 GB main-process, and Tier A at parity. A
@@ -965,7 +999,6 @@ class Model:
              + per_element * qlats.shape[0] * self.qts_subdivisions)
             * pool_overhead
         )
-        required_bytes = column_bytes * qlats.shape[1]
         # No intercept term: available_memory is read HERE, after the network, plan and
         # forcing are already resident, so the baseline is excluded by construction.
         # only account for 90% of the memory this process may actually use
@@ -1015,10 +1048,21 @@ class Model:
         partition_matters = scaling_active and span_cols > 0
         auto = cfg_loop <= 0
         # The same call the CLI makes, so one config resolves to one window width on
-        # either driver. Each narrows it its own way after: memory here, the output
-        # cadence there. Never sized UP from the memory estimate, which is calibrated
+        # either driver. Only the memory cap below is left to this one, since only the
+        # BMI measures memory; never sized UP from that estimate, which is calibrated
         # on one domain and would be trusted far past what was measured.
-        cfg_loop = resolve_window(cfg_loop, span_cols)
+        #
+        # The output cadence goes through the same call: the CLI enlarged for it and
+        # this driver did not, so stream_output_time 48 routed 48-column windows there
+        # and 24 here, which under a nonzero span is a difference in discharge.
+        _stream = self.output_parameters.get("stream_output") or {}
+        _sot_h = _stream.get("stream_output_time") if isinstance(_stream, dict) else None
+        _out_cols = (
+            math.ceil(float(_sot_h) * 3600.0 / (self.qts_subdivisions * float(self.dt)))
+            if _sot_h and float(_sot_h) > 0
+            else 0
+        )
+        cfg_loop = resolve_window(cfg_loop, span_cols, _out_cols)
 
         if partition_matters and nts < span_cols:
             # Checked BEFORE the memory guard: no amount of freed memory lets a
@@ -1061,7 +1105,11 @@ class Model:
             # update length already caps it. So it is inert, and refusing over it stops
             # a run that auto would serve. Say what actually ran and carry on; the wall
             # below is the one no window choice escapes.
-            if partition_matters and loop_size >= span_cols:
+            if partition_matters and loop_size >= span_cols and mem_divisions == 1:
+                # mem_divisions == 1 pins the cause: the cap IS this update's own
+                # forcing. Without that guard this fired on a memory-capped run too
+                # and blamed the update length, while the very next warning said
+                # machine load. Both cannot be the reason.
                 LOG.warning(
                     "%s is %d but this update supplies %d forcing timestep(s), so the "
                     "scaling DA operates over %d. Discharge depends on the update "
@@ -1069,6 +1117,17 @@ class Model:
                     "updates differs near every boundary.",
                     "automatic max_loop_size" if auto else "max_loop_size",
                     int(cfg_loop), nts, loop_size,
+                )
+            elif partition_matters and loop_size >= span_cols:
+                # Auto accepts a machine-load-derived partition here (an explicit
+                # window refuses). Say so plainly: on this path memory is no longer
+                # only a safety cap, it is in the result.
+                LOG.warning(
+                    "available memory, not the configuration, set this run's window to "
+                    "%d forcing timestep(s) under an active DA span. The partition is "
+                    "part of the result, so this run is not reproducible on a "
+                    "differently loaded machine. Pin max_loop_size to fix the window.",
+                    loop_size,
                 )
             if partition_matters and loop_size < span_cols:
                 # Memory was never the limit here: the cap IS this update's own

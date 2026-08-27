@@ -41,14 +41,15 @@ def _qlats(n_cols, t0=datetime(2019, 5, 29, 0, 0)):
     return pd.DataFrame(0.5, index=pd.Index([101, 102], name="feature_id"), columns=cols)
 
 
-def _required(cols, *, links=2, qts=12, courant=False, scaling=False, pool=1):
+def _required(cols, *, links=2, qts=12, courant=False, scaling=False, lag=False,
+              pool=1):
     """The model's own budget for a test domain, so a fixture can sit either side of it.
 
     Mirrors _build_run_sets deliberately: these fixtures exercise the CAP LOGIC, and
     what the constants themselves should be is pinned separately against the measured
     sweeps in TestTheEstimateTracksBothMeasuredSweeps.
     """
-    per_element = tm.per_element_bytes(courant, scaling)
+    per_element = tm.per_element_bytes(courant, scaling, lag)
     overhead = tm.POOL_OVERHEAD if pool > 1 else 1.0
     return int(cols * (tm.per_column_bytes(scaling) + per_element * links * qts)
                * overhead)
@@ -183,7 +184,7 @@ class TestRamCapIsAnErrorUnderActiveAssimilation:
     """
 
     def _pressure(self, monkeypatch, nts_cols=96):
-        required = _required(nts_cols, courant=True, scaling=True)
+        required = _required(nts_cols, scaling=True)
         monkeypatch.setattr(
             tm.psutil, "virtual_memory",
             lambda: SimpleNamespace(available=(required / 4) / 0.9),
@@ -383,7 +384,7 @@ class TestAutoNeverSizesUpFromTheEstimate:
         assert [rs["qlats"].shape[1] for rs in sets] == [AUTO_WINDOW] * 4
 
     def test_memory_still_caps_the_auto_window(self, monkeypatch):
-        required = _required(96, courant=True, scaling=True)
+        required = _required(96, scaling=True)
         monkeypatch.setattr(
             tm.psutil, "virtual_memory",
             lambda: SimpleNamespace(available=(required / 8) / 0.9),
@@ -435,9 +436,12 @@ class TestTheEstimateTracksBothMeasuredSweeps:
     def test_the_model_matches_each_domain_and_arm(self):
         for (name, scaling), (links, points) in SWEEPS.items():
             predicted = (tm.per_column_bytes(scaling)
-                         + tm.per_element_bytes(scaling, scaling) * links * QTS) / 1e6
+                         + tm.per_element_bytes(False, scaling) * links * QTS) / 1e6
             measured = _measured_slope(points)
-            assert 0.85 <= predicted / measured <= 1.20, (
+            # Lower bound above the runtime's own 0.9 reserve: a model allowed to
+            # read 15% low against a 10% reserve can still OOM. All four arms sit
+            # between 1.00 and 1.02, so this costs nothing today.
+            assert 0.95 <= predicted / measured <= 1.20, (
                 f"{name} scaling={scaling}: model {predicted:.0f} MB/column against "
                 f"{measured:.0f} measured ({predicted / measured:.2f}x)"
             )
@@ -482,7 +486,7 @@ class TestTheSplitStaysInsideTheCap:
     """
 
     def _cap(self, monkeypatch, cols, divisions):
-        required = _required(cols, courant=True, scaling=True)
+        required = _required(cols, scaling=True)
         monkeypatch.setattr(
             tm.psutil, "virtual_memory",
             lambda: SimpleNamespace(available=(required / divisions) / 0.9),
@@ -528,17 +532,32 @@ class TestTheScalingCostLandsWhereItWasMeasured:
         assert added / 1e6 == pytest.approx(67.8, abs=5)
 
     def test_scaling_adds_little_per_element(self):
-        added = tm.per_element_bytes(True, True) - tm.per_element_bytes(False, False)
+        added = tm.per_element_bytes(False, True) - tm.per_element_bytes(False, False)
         assert added == pytest.approx(13, abs=4)
 
-    def test_the_scaling_figure_already_carries_courant(self):
-        """A scaling run returns the Courant block, so the measured DA slope includes
-        it. Adding a separate Courant term on top would count it twice."""
-        assert tm.per_element_bytes(True, True) == tm.per_element_bytes(False, True)
+    def test_the_scaling_figure_does_not_carry_courant(self):
+        """The sweep ran with travel_time_lag OFF, and the drivers turn Courant on for
+        the lag's trace, so no swept run allocated a Courant block.
+
+        Folding Courant into the DA figure under-read a lag-on run on the one window
+        the lag makes widest, which is the direction that OOMs.
+        """
+        assert tm.per_element_bytes(True, True) > tm.per_element_bytes(False, True)
+
+    def test_the_lag_adds_courant_and_its_trace(self):
+        lag_only = tm.per_element_bytes(False, True, lag=True)
+        no_lag = tm.per_element_bytes(False, True)
+        assert lag_only - no_lag == (tm.COURANT_PER_ELEMENT_BYTES
+                                     + tm.LAG_TRACE_PER_ELEMENT_BYTES)
+
+    def test_the_lag_does_not_pay_for_courant_twice(self):
+        """The lag is what turns Courant on, so asking for both is not two blocks."""
+        assert (tm.per_element_bytes(True, True, lag=True)
+                == tm.per_element_bytes(False, True, lag=True))
 
     def test_courant_alone_is_still_the_declared_width(self):
         added = tm.per_element_bytes(True, False) - tm.per_element_bytes(False, False)
-        assert added == 17  # 3-wide float32 at the same ratio as the base term
+        assert added == tm.COURANT_PER_ELEMENT_BYTES == 17
 
 
 class TestMemoryIsWhatThisProcessMayUse:
@@ -614,7 +633,7 @@ class TestAutoTakesWhatFits:
     def _model(self, cols, span_h, divisions, monkeypatch):
         m = _model(nts_cols=cols)
         m._scaling_da = SimpleNamespace(innovation_spread_h=span_h, travel_time_lag=False)
-        required = _required(cols, courant=True, scaling=True)
+        required = _required(cols, scaling=True)
         monkeypatch.setattr(
             tm.psutil, "virtual_memory",
             lambda: SimpleNamespace(available=(required / divisions) / 0.9),
@@ -682,3 +701,138 @@ class TestTheCapIsAByteBudgetNotTwoRoundings:
         monkeypatch.setattr(tm, "available_memory_bytes", lambda *a, **k: 0)
         with pytest.raises(MemoryError, match="no memory budget left"):
             list(_model(nts_cols=10)._build_run_sets(_qlats(10)))
+
+
+class TestTheOutputCadenceReachesTheWindow:
+    """stream_output_time enlarges the ROUTING window, on this driver too.
+
+    One window writes one output part, so a window under the requested output span
+    cannot fill one. The CLI enlarged for it and this driver did not, so the same
+    config routed 48-column windows under -V5 and 24 here; under a nonzero DA span
+    that is a difference in discharge, not just in file boundaries.
+    """
+
+    def _model_with_output(self, cols, hours):
+        m = _model(nts_cols=cols)
+        m._config["output_parameters"] = {
+            "stream_output": {"stream_output_time": hours}
+        }
+        return m
+
+    def test_a_longer_output_span_widens_the_window(self, plenty_of_memory):
+        # 48 h of output against a 24-column preference: the window follows the output.
+        sets = list(self._model_with_output(96, 48)._build_run_sets(_qlats(96)))
+        assert [rs["qlats"].shape[1] for rs in sets] == [48, 48]
+
+    def test_a_shorter_output_span_changes_nothing(self, plenty_of_memory):
+        sets = list(self._model_with_output(96, 6)._build_run_sets(_qlats(96)))
+        assert [rs["qlats"].shape[1] for rs in sets] == [AUTO_WINDOW] * 4
+
+    def test_the_whole_run_sentinel_is_not_a_width(self, plenty_of_memory):
+        """-1 means one file for the whole run, not a one-column window."""
+        sets = list(self._model_with_output(96, -1)._build_run_sets(_qlats(96)))
+        assert [rs["qlats"].shape[1] for rs in sets] == [AUTO_WINDOW] * 4
+
+
+class TestTheEstimatorReadsTheLag:
+    """The lag's arrays must reach the SIZING, not just per_element_bytes.
+
+    Deleting the lag flag from the estimator left every direct-call test green, which
+    would ship a model that under-reads exactly the runs whose widest window the lag
+    forces. lag_window_h is zeroed here so the span stays 0 and only the memory term
+    differs; otherwise the lag would widen the window for an unrelated reason.
+    """
+
+    def _model_at(self, lag, monkeypatch, columns_affordable=6.0):
+        m = _model(nts_cols=48)
+        m._scaling_da = SimpleNamespace(
+            innovation_spread_h=0.0, travel_time_lag=lag, lag_window_h=0.0
+        )
+        column_bytes = _required(1, scaling=True, lag=lag)
+        monkeypatch.setattr(
+            tm.psutil, "virtual_memory",
+            lambda: SimpleNamespace(available=(_required(1, scaling=True)
+                                               * columns_affordable) / 0.9),
+        )
+        return m, column_bytes
+
+    def test_the_lag_narrows_the_window_at_the_same_memory(self, monkeypatch):
+        off, _ = self._model_at(False, monkeypatch)
+        off_widths = [rs["qlats"].shape[1] for rs in off._build_run_sets(_qlats(48))]
+        on, _ = self._model_at(True, monkeypatch)
+        on_widths = [rs["qlats"].shape[1] for rs in on._build_run_sets(_qlats(48))]
+        assert max(on_widths) < max(off_widths), (
+            f"lag off gave {off_widths}, lag on {on_widths}: the lag's Courant block "
+            "and trace did not reach the sizing"
+        )
+
+
+class TestReclaimableCacheIsNotCountedAsUsed:
+    """A cgroup's usage counts page cache, and this workload streams files through it.
+
+    A long-lived container therefore drifts toward used == limit while holding
+    gigabytes the kernel would hand straight back on demand. Reading that as no
+    headroom collapses the window and then fails the run outright, on a box with
+    plenty free. psutil's host figure is already cache-aware; leaving the cgroup side
+    naive made min() systematically prefer the wrong number.
+    """
+
+    def _host(self, monkeypatch, gb):
+        monkeypatch.setattr(
+            tm.psutil, "virtual_memory",
+            lambda: SimpleNamespace(available=int(gb * 1024**3)),
+        )
+
+    def test_v2_reclaimable_cache_is_given_back(self, monkeypatch, tmp_path):
+        self._host(monkeypatch, 64)
+        (tmp_path / "memory.max").write_text(str(8 * 1024**3))
+        (tmp_path / "memory.current").write_text(str(8 * 1024**3))   # looks full
+        (tmp_path / "memory.stat").write_text(
+            f"anon 1073741824\ninactive_file {6 * 1024**3}\nslab 0\n"
+        )
+        assert tm.available_memory_bytes(tmp_path) == 6 * 1024**3
+
+    def test_v1_reclaimable_cache_is_given_back(self, monkeypatch, tmp_path):
+        self._host(monkeypatch, 64)
+        v1 = tmp_path / "memory"
+        v1.mkdir()
+        (v1 / "memory.limit_in_bytes").write_text(str(8 * 1024**3))
+        (v1 / "memory.usage_in_bytes").write_text(str(8 * 1024**3))
+        (v1 / "memory.stat").write_text(f"total_inactive_file {5 * 1024**3}\n")
+        assert tm.available_memory_bytes(tmp_path) == 5 * 1024**3
+
+    def test_a_missing_stat_file_is_not_fatal(self, monkeypatch, tmp_path):
+        self._host(monkeypatch, 64)
+        (tmp_path / "memory.max").write_text(str(8 * 1024**3))
+        (tmp_path / "memory.current").write_text(str(2 * 1024**3))
+        assert tm.available_memory_bytes(tmp_path) == 6 * 1024**3
+
+
+class TestTheWarningNamesTheRightCause:
+    """Two different things narrow a window, and they need different warnings.
+
+    The cadence text fired on a memory-capped run too, telling the operator discharge
+    depended on update length while the next line said machine load. Only one of those
+    is the reason, and under auto the machine-load one means the run is not
+    reproducible, which is worth saying outright.
+    """
+
+    def test_a_short_update_is_blamed_on_the_update(self, plenty_of_memory, caplog):
+        m = _model(nts_cols=8)
+        m._scaling_da = SimpleNamespace(innovation_spread_h=1.0, travel_time_lag=False)
+        with caplog.at_level("WARNING"):
+            list(m._build_run_sets(_qlats(8)))
+        assert "depends on the update length" in caplog.text
+        assert "available memory, not the configuration" not in caplog.text
+
+    def test_a_memory_cap_is_blamed_on_memory(self, monkeypatch, caplog):
+        m = _model(nts_cols=96)
+        m._scaling_da = SimpleNamespace(innovation_spread_h=1.0, travel_time_lag=False)
+        monkeypatch.setattr(
+            tm.psutil, "virtual_memory",
+            lambda: SimpleNamespace(available=(_required(1, scaling=True) * 16) / 0.9),
+        )
+        with caplog.at_level("WARNING"):
+            list(m._build_run_sets(_qlats(96)))
+        assert "available memory, not the configuration" in caplog.text
+        assert "depends on the update length" not in caplog.text

@@ -44,7 +44,13 @@ def plan_windows(n_columns: int, window: int, span: int = 0) -> WindowBounds:
     width = max(1, min(window, n_columns))
     count = math.ceil(n_columns / width)
     if span > 0 and count > 1 and n_columns // count < span:
-        count = 1
+        # Give up the CAP minimally, not the split entirely. The most windows whose
+        # floor still reaches the span is n // span, and that exceeds the requested
+        # width by at most about one column. Collapsing to a single window instead
+        # turned a 2161-column run at span 60 into one 2161-column window, ~120 GB,
+        # while 36 windows of 60 and 61 hold the span; one column of run length was
+        # the difference. The caller's own memory check gates the small excess.
+        count = max(1, n_columns // span)
     base, extra = divmod(n_columns, count)
     bounds: WindowBounds = []
     start = 0
@@ -55,14 +61,22 @@ def plan_windows(n_columns: int, window: int, span: int = 0) -> WindowBounds:
     return bounds
 
 
-def resolve_window(configured: int | None, span: int = 0) -> int:
+def resolve_window(
+    configured: int | None, span: int = 0, output_cols: int = 0
+) -> int:
     """Columns per window from the config alone, identically for either driver.
 
     ``configured`` of 0 or None is the schema's "automatic" and resolves to
     :data:`AUTO_WINDOW`. ``span`` raises it either way, since a window under the DA's
-    horizon changes discharge, which no memory knob is allowed to do.
+    horizon changes discharge, which no memory knob is allowed to do. ``output_cols``
+    raises it too: one window writes one output part, so a window under the requested
+    ``stream_output_time`` cannot fill one.
 
-    Drivers narrow this further on their own: the BMI caps it by available memory, the
-    CLI raises it to hold ``stream_output_time``. What must not differ is this.
+    The output cadence lives HERE rather than in one driver because it changes the
+    routing partition. The CLI enlarged for it and the BMI did not, so the same config
+    with stream_output_time 48 routed 48-column windows on one and 24 on the other,
+    and under a nonzero DA span that is a difference in discharge.
+
+    Only the memory cap is left to a driver, since only the BMI measures memory.
     """
-    return max(int(configured or AUTO_WINDOW), span, 1)
+    return max(int(configured or AUTO_WINDOW), span, output_cols, 1)

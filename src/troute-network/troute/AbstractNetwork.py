@@ -1044,11 +1044,13 @@ class AbstractNetwork(ABC):
                 stream_output_time = stream_output.get('stream_output_time', None)
                 # stream_output_time is HOURS; max_loop_size counts forcing
                 # FILES. Comparing them raw was only right for hourly forcing
-                # (-1 = whole run in one file, exempt).
+                # (-1 = whole run in one file, exempt). Applied through
+                # resolve_window so the BMI enlarges for it identically.
                 if stream_output_time and stream_output_time > 0:
-                    sot_files = math.ceil(stream_output_time * 3600.0 / dt_qlat)
-                    if sot_files > max_loop_size:
-                        max_loop_size = sot_files
+                    max_loop_size = resolve_window(
+                        max_loop_size,
+                        output_cols=math.ceil(stream_output_time * 3600.0 / dt_qlat),
+                    )
             # The scaling DA's forward innovation window reads into the NEXT
             # window's innovation, and that halo is exactly one window deep, so a
             # window shorter than innovation_spread_h leaves its own tail on

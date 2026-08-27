@@ -772,10 +772,15 @@ actually used.
 Part of why the DA's domain-scaled cost stays modest is that it
 bounds itself: `_resolve_spread_chunk` caps the upstream-spread
 transient at `_SPREAD_CHUNK_BUDGET_ELEMS` (64 M float64, 512 MB)
-and chunks above it, bit-identically. CONUS is over that budget
-at every window; Ohio only reaches it near `mls = 8`. So the two
-domains' DA slopes are not measuring quite the same regime, and
-the per-element DA figure is the softest number here.
+and chunks above it, bit-identically. Note the budget counts
+CONCATENATED TREE segments, not domain links: the CONUS run log
+reports 12,234,251 of them, so CONUS is over the budget at every
+window measured here (observed in the run log at `mls = 8`, and
+294 M and 587 M elements at `mls` 2 and 4). Where Ohio crosses it
+was not observed. So the per-element DA figure is the softest
+number here, and the reason is extrapolation: the windows this
+model actually serves (auto 24, span-widened 48+) sit past the
+threshold, where the transient stops growing.
 
 CONUS DA has only two points. `mls = 8` drove the measuring
 machine (32 GB) into swap with loky workers dying, so its peak
@@ -784,13 +789,33 @@ discarded rather than reported. CONUS with the DA also costs
 1,261 s at `mls = 2` against 270 s without, a 4.7x wall cost
 that is worth knowing separately from the memory.
 
-Caveats. Two domains fit two unknowns exactly, so the 2%
-agreement on slope is arithmetic, not validation; what IS
-independently checked is linearity in window size, 4 points per
-domain, residuals under 5%. Neither sweep ran with the DA or
-Courant arrays on, so those terms in `per_element_bytes` remain
-declared widths. A third domain (VPU 01, ~180 k flowpaths) would
-give the model a degree of freedom to fail against.
+Caveats, stated precisely because these constants gate a hard
+`MemoryError`:
+
+- **The 2% agreement is arithmetic, not validation.** Two domains
+  fit two unknowns exactly, so the model reproduces both slopes by
+  construction and cannot fail against them.
+- **Linearity in window size IS independently checked**, but not
+  as tightly as first written here. Four points each for Ohio (both
+  arms) and CONUS DA-off; worst residual 6.7% on Ohio off, 6.6% on
+  Ohio DA, 2.4% on CONUS off. Both Ohio arms over-predict at
+  `mls = 1` and under-predict at `mls = 4`, the same sub-linear
+  onset the section above records. CONUS DA has only two points, so
+  it has no residual at all.
+- **The DA sweep ran with `travel_time_lag` off.** The drivers turn
+  `return_courant` on only for the lag's trace, so no swept run
+  allocated a Courant block: the 13 B/element figure is lag-off
+  scaling. Courant and the lag's `[nt, N_seg]` trace stay declared
+  widths, and they land on the window the span makes widest.
+- **Both sweeps ran at `qts_subdivisions = 12`,** so the split of
+  the per-column term into qts-dependent and qts-independent parts
+  is unidentified.
+
+Proportionate summary: trusted for lag-off scaling at qts 12;
+adequate for capping and warning; thin for a hard refusal, and
+untested for lag-on and for `return_courant`. A third domain
+(VPU 01, ~180 k flowpaths) is the cheap way to buy the model its
+first degree of freedom.
 
 Reproduce with:
 
