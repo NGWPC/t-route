@@ -790,10 +790,14 @@ class ForcingParameters(BaseModel):
     Value is in hours. To handle memory issues, t-route can divvy it's simulation time into chunks, reducing the amount
     of forcing and data assimilation files it reads into memory at once. This is the size of those time loops.
 
-    0 (the default) sizes it automatically and conservatively from available memory,
-    never shorter than the DA's own span. Set a value to pin the partition instead:
-    that is only necessary when the DA has a span, since otherwise the partition does
-    not reach the result.
+    0 (the default) sizes it automatically, and both drivers log what they chose.
+    Under BMI that means 24 forcing columns, never shorter than the DA's own span and
+    capped by available memory. The CLI has no memory estimator, so there it means a
+    flat 24, still enlarged to cover the DA span.
+
+    Setting a value pins the window. It only changes results when the DA has a span,
+    since otherwise the partition does not reach them, and a value longer than the
+    driver's update cannot bound memory at all.
     """
     qlat_file_index_col: str = "feature_id"
     """

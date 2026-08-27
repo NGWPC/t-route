@@ -426,3 +426,45 @@ class TestAutoSaysWhatItChose:
         with caplog.at_level("INFO"):
             list(_model(nts_cols=96, max_loop_size=24)._build_run_sets(_qlats(96)))
         assert "max_loop_size not set" not in caplog.text
+
+
+class TestTheSplitStaysInsideTheCap:
+    """Every emitted window must fit the memory cap AND cover the DA span.
+
+    Filling to loop_size and folding a short remainder into its neighbour satisfied
+    the span by breaking the cap: 47 columns at a cap of 23 came out as one window of
+    47, and 100 columns at a cap of 25 ended [24, 24, 24, 28]. An even split cannot
+    do that, because no window exceeds the ceiling of the average.
+    """
+
+    def _cap(self, monkeypatch, cols, divisions):
+        required = 2 * cols * 12 * tm.per_element_bytes(True, True)
+        monkeypatch.setattr(
+            tm.psutil, "virtual_memory",
+            lambda: SimpleNamespace(available=(required / divisions) / 0.9),
+        )
+        return cols / divisions
+
+    def _model_with_span(self, cols, span_h):
+        m = _model(nts_cols=cols)
+        m._scaling_da = SimpleNamespace(innovation_spread_h=span_h, travel_time_lag=False)
+        return m
+
+    def test_no_window_exceeds_the_cap_or_falls_under_the_span(self, monkeypatch):
+        cap = self._cap(monkeypatch, 100, 4)
+        sets = list(self._model_with_span(100, 12.0)._build_run_sets(_qlats(100)))
+        widths = [rs["qlats"].shape[1] for rs in sets]
+        assert sum(widths) == 100
+        assert max(widths) <= cap, f"{widths} exceeds the {cap} column cap"
+        assert min(widths) >= 12, f"{widths} falls under the 12 column span"
+
+    def test_an_unsplittable_update_beyond_the_cap_raises(self, monkeypatch):
+        # 47 columns against a 24 column span: any two windows leave one at 23, and
+        # the single window that would work is twice what memory allows.
+        self._cap(monkeypatch, 47, 2)
+        with pytest.raises(MemoryError, match="one window"):
+            list(self._model_with_span(47, 24.0)._build_run_sets(_qlats(47)))
+
+    def test_an_unsplittable_update_within_the_cap_runs(self, plenty_of_memory):
+        sets = list(self._model_with_span(47, 24.0)._build_run_sets(_qlats(47)))
+        assert [rs["qlats"].shape[1] for rs in sets] == [47]

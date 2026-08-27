@@ -1019,24 +1019,36 @@ class Model:
                 "final_timestamp": datetime.strptime(str(qlats.columns[-1]), "%Y%m%d%H%M")
             }
         else:
-            # construct run sets on the resolved window size
-            bounds = [(i, min(i + loop_size, nts)) for i in range(0, nts, loop_size)]
-            # A final remainder shorter than the span is folded into the window before
-            # it, matching _fold_short_final_set on the -V5 side. The enlargement above
-            # exempts the final window, which is right for the forward halo (nothing
-            # follows it to read) and wrong for the travel-time lag: a short final
-            # window reads across a boundary it cannot supply. Measured on the Ohio
-            # subset with a 12 h lag, a 4-file remainder differed from an evenly
-            # divided run by 17.1 m3/s backward and 12.9 m3/s forward. Correctness wins
-            # over the memory cap here, exactly as it does on the CLI.
-            if span_cols > 0 and len(bounds) > 1 and bounds[-1][1] - bounds[-1][0] < span_cols:
-                tail = bounds.pop()
-                bounds[-1] = (bounds[-1][0], tail[1])
+            # Spread the update EVENLY over as few windows as the cap allows, rather
+            # than filling to loop_size and folding a short remainder into its
+            # neighbour: that fold ran after the memory cap and could push a window
+            # clean past it (47 columns at a cap of 23 became one window of 47).
+            # An even split keeps every window inside the cap by construction, and
+            # above the DA span whenever any split can be.
+            n = math.ceil(nts / loop_size)
+            if span_cols > 0 and n > 1 and nts // n < span_cols:
+                # No split of this update keeps every window over the span, so the
+                # tail would read across a boundary it cannot supply. One window
+                # does, if memory holds it.
+                if nts > mem_loop_size:
+                    raise MemoryError(
+                        f"covering the scaling DA's span of {span_cols} forcing "
+                        f"timesteps needs this {nts}-timestep update in one window, "
+                        f"but available memory caps it at {mem_loop_size}. Splitting "
+                        "would leave a window under the span, which changes discharge. "
+                        "Free memory, or reduce the DA span."
+                    )
                 LOG.info(
-                    "scaling DA: final remainder of %d forcing column(s) folded into "
-                    "the window before it, which then holds %d.",
-                    tail[1] - tail[0], bounds[-1][1] - bounds[-1][0],
+                    "scaling DA: %d forcing timestep(s) routed as one window; no split "
+                    "keeps every window over the span of %d.", nts, span_cols,
                 )
+                n = 1
+            base, extra = divmod(nts, n)
+            bounds, step = [], 0
+            for i in range(n):
+                stop = step + base + (1 if i < extra else 0)
+                bounds.append((step, stop))
+                step = stop
             for start, stop in bounds:
                 times = qlats.columns[start:stop]
                 yield {
