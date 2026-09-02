@@ -47,6 +47,9 @@ def _write_merged_netcdf(files: list[Path], dest: Path) -> None:
         data_vars="minimal",
         coords="minimal",
         compat="override",
+        # Each chunk carries its own reference_time; keep the first rather than
+        # unioning them into an extra dimension.
+        join="override",
     ) as ds:
         # Materialize before writing. The lazy dask graph reads the same files the
         # writer holds open, which is where an integrated ngen run hung.
