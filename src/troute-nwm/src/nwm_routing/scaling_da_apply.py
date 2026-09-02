@@ -1004,11 +1004,26 @@ class ScalingDA:
             cpu_pool=self._cpu_pool,
         )
         if obs.empty:
-            return None
+            msg = (
+                f"scaling DA: the {len(paths)} TimeSlice file(s) selected for the "
+                f"window starting {index[0]} carry no readable observations for the "
+                f"{len(want)} crosswalked gage(s). Provide TimeSlices covering the "
+                "simulation period, or turn off streamflow_da.streamflow_scaling."
+            )
+            raise ValueError(msg)
         df = obs.transpose()  # reader returns destination x time
         idx = pd.DatetimeIndex(df.index)
         df.index = idx.tz_localize(None) if idx.tz is not None else idx
         df = df[~df.index.duplicated(keep="first")].reindex(columns=want)
+        # Warn, do not raise: a forecast leg runs past the newest observation by design.
+        if not df.empty and (df.index.max() < index[0] or df.index.min() > index[-1]):
+            LOG.warning(
+                "scaling DA: the selected TimeSlice observations span %s to %s and do "
+                "not overlap the simulation window %s to %s, so nothing is assimilated "
+                "in it. Expected on a forecast leg; otherwise check the TimeSlice "
+                "directory.",
+                df.index.min(), df.index.max(), index[0], index[-1],
+            )
         # Cache what is RETURNED, so hit and miss hand back the same column set.
         self._obs_cache = (key, df)
         return df
