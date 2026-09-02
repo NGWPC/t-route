@@ -135,7 +135,8 @@ class reservoir_model():
                 self._levelpool.lake_number,        # lake identification number
                 values['gage_observations'],        # gage observation values (cms)
                 values['gage_time'],                # gage observation times (sec)
-                self._time,                         # model time (sec)
+                # End of the interval being routed, as mc_reach passes dt*timestep.
+                self._time + self._time_step,       # model time (sec)
                 self._prev_persisted_outflow,       # previously persisted outflow (cms)
                 self._persistence_update_time,      
                 self._persistence_index,            # number of sequentially persisted update cycles
@@ -178,7 +179,7 @@ class reservoir_model():
                 self._timeseries_idx,                     # index of for current time series observation
                 self._total_counts,                       # total number of observations in RFC timeseries
                 self._time_step,                          # routing period (sec)
-                self._time,                               # model time (sec)
+                self._time + self._time_step,             # model time (sec)
                 self._update_time,                        # time to advance to next time series index
                 self._da_time_step,                       # frequency of DA observations (sec)
                 self._rfc_forecast_persist_days*24*60*60, # max seconds RFC forecasts will be used/persisted (days -> seconds)

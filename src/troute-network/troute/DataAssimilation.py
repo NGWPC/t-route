@@ -13,7 +13,7 @@ import logging
 
 LOG = logging.getLogger("TROUTE")
 
-from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data
+from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data, read_rfc_timeseries
 
 from troute.network import bmi_array2df as a2df
 
@@ -1173,7 +1173,10 @@ class RFCDA(AbstractDA):
                 
                 # RFC Observations
                 rfc_timeseries_path = str(rfc_parameters.get('reservoir_rfc_forecasts_time_series_path'))
-                self._rfc_timeseries_df = _read_timeseries_files(rfc_timeseries_path, timeseries_dates, start_datetime, final_persist_datetime)           
+                self._rfc_timeseries_df = _read_timeseries_files(
+                    rfc_timeseries_path, timeseries_dates, start_datetime, final_persist_datetime,
+                    routing_period=self._run_parameters.get('dt', 300),
+                )
                 self._reservoir_rfc_df, self._reservoir_rfc_param_df = assemble_rfc_dataframes(
                                                                                                 self._rfc_timeseries_df, 
                                                                                                 network.rfc_lake_gage_crosswalk,
@@ -1918,18 +1921,23 @@ def new_lastobs(run_results, time_increment):
     - lastobs_df (DataFrame): Last gage observations data for DA
     """
 
-    df = pd.concat(
-        [
-            pd.DataFrame(
-                # TODO: Add time_increment (or subtract?) from time_since_lastobs
-                np.array([rr[3][1],rr[3][2]]).T,
-                index=rr[3][0],
-                columns=["time_since_lastobs", "lastobs_discharge"]
-            )
-            for rr in run_results
-        ],
-        copy=False,
-    )
+    columns = ["time_since_lastobs", "lastobs_discharge"]
+    # Drop empty frames: pandas lets them decide the result dtype, and concat of
+    # nothing but empties raises.
+    frames = [
+        pd.DataFrame(
+            # TODO: Add time_increment (or subtract?) from time_since_lastobs
+            np.array([rr[3][1],rr[3][2]]).T,
+            index=rr[3][0],
+            columns=columns
+        )
+        for rr in run_results
+        if len(rr[3][0]) > 0
+    ]
+    if not frames:
+        return pd.DataFrame(columns=columns)
+
+    df = pd.concat(frames, copy=False)
     df["time_since_lastobs"] = df["time_since_lastobs"] - time_increment
 
     return df
@@ -2287,58 +2295,97 @@ def _rfc_timeseries_qcqa(discharge,stationId,synthetic,totalCounts,timestamp,tim
     return rfc_df, rfc_param_df
 
 
-def _read_timeseries_files(filepath, timeseries_dates, t0, final_persist_datetime):
+def _read_timeseries_files(filepath, timeseries_dates, t0, final_persist_datetime,
+                           routing_period=300):
+    """Newest RFC forecast per gage that actually covers t0, as one long frame.
+
+    Newest-first but coverage-gated: the newest issue has the latest slice start, so
+    taking it unconditionally passed over an older file that did cover t0.
+    """
     # Search for most recent RFC timseries file based on offset hours and lookback window
     # for each location.
     files = glob.glob(filepath + '/*')
     # create temporary dataframe with file names, split up by location and datetime
     df = pd.DataFrame([f.split('/')[-1].split('.') for f in files], columns=['Datetime','dt','ID','rfc','ext'])
-    df = df[df['Datetime'].isin(timeseries_dates)][['ID','Datetime']]
-    # For each location, find the most recent timeseries file (within timeseries window calculated a priori)
-    df['Datetime'] = df['Datetime'].apply(lambda _: datetime.strptime(_, '%Y-%m-%d_%H'))
-    df = df.groupby('ID').max().reset_index()
-    df['Datetime'] = df['Datetime'].dt.strftime('%Y-%m-%d_%H')
-
-    # Loop through list of timeseries files and store relevent information in dataframe.
-    file_list = (df['Datetime'] + '.60min.' + df['ID'] + '.RFCTimeSeries.ncdf').tolist()
-    rfc_df = pd.DataFrame()
-    for f in file_list:
-        # drop queryTime (non-CF units now raise on open; unused here) and force
-        # decode_timedelta (timeSteps carries a bare "seconds" unit).
-        ds = xr.open_dataset(
-            filepath + '/' + f, drop_variables="queryTime", decode_timedelta=True
+    df = df[df['Datetime'].isin(timeseries_dates)][['ID','Datetime','dt']]
+    if df.empty:
+        # Fatal by policy: enabling RFC DA claims the forecasts are provisioned.
+        msg = (
+            f"reservoir RFC DA is enabled but no RFC timeseries file in {filepath} "
+            f"is dated within the lookback window {timeseries_dates[0]} to "
+            f"{timeseries_dates[-1]} ({len(files)} file(s) present). Provide "
+            "forecasts covering the simulation period, or turn off "
+            "reservoir_da.reservoir_rfc_da.reservoir_rfc_forecasts."
         )
-        sliceStartTime = datetime.strptime(ds.attrs.get('sliceStartTimeUTC'), '%Y-%m-%d_%H:%M:%S')
-        sliceTimeResolutionMinutes = ds.attrs.get('sliceTimeResolutionMinutes')
-        df = ds.to_dataframe().reset_index().sort_values('forecastInd')[['stationId','discharges','synthetic_values','totalCounts','timeSteps']]
-        df['Datetime'] = pd.date_range(sliceStartTime, periods=df.shape[0], freq=sliceTimeResolutionMinutes+'min')
+        raise FileNotFoundError(msg)
+    df['Datetime'] = df['Datetime'].apply(lambda _: datetime.strptime(_, '%Y-%m-%d_%H'))
+
+    rfc_df = pd.DataFrame()
+    for gage, candidates in df.sort_values('Datetime', ascending=False).groupby('ID'):
+        chosen, rejected = None, []
+        for stamp, cadence in zip(candidates['Datetime'], candidates['dt']):
+            f = f"{stamp.strftime('%Y-%m-%d_%H')}.{cadence}.{gage}.RFCTimeSeries.ncdf"
+            record = read_rfc_timeseries(filepath + '/' + f)
+            if t0 in record.datetimes:
+                chosen = (f, record)
+                break
+            rejected.append(f"{f} spans {record.datetimes[0]} to {record.datetimes[-1]}")
+        if chosen is None:
+            msg = (
+                f"reservoir RFC DA: none of the {len(rejected)} forecast file(s) for gage "
+                f"{gage} in the lookback window cover the simulation start t0={t0}, so no "
+                f"forecast can be aligned to the run ({'; '.join(rejected)}). Provide "
+                "forecasts covering the simulation period, or turn off "
+                "reservoir_da.reservoir_rfc_da.reservoir_rfc_forecasts."
+            )
+            raise ValueError(msg)
+        f, record = chosen
+        # t0 in the untruncated series; the truncation below only trims the tail.
+        timeseries_idx = record.datetimes.get_loc(t0)
+        one = pd.DataFrame({
+            'stationId': record.station_id,
+            'discharges': record.discharges,
+            'synthetic_values': record.synthetic,
+            'totalCounts': record.total_counts,
+            'timeSteps': pd.Timedelta(seconds=record.timestep_seconds),
+            'Datetime': record.datetimes,
+        })
         # Filter out forecasts that go beyond the rfc_persist_days parameter. This isn't necessary, but removes
         # excess data, keeping the dataframe of observations as small as possible.
-        df = df[df['Datetime']<final_persist_datetime]
-        # Locate where t0 is in the timeseries
-        df['timeseries_idx'] = df.index[df.Datetime == t0][0]
-        df['file'] = f
-
-        # Validate data to determine whether or not it will be used.
-        use_rfc = _validate_RFC_data(
-            df['stationId'][0],
-            df.discharges,
-            df.synthetic_values,
+        # Inclusive, to match the consumer's `current_time <= persist_seconds`.
+        one = one[one['Datetime'] <= final_persist_datetime]
+        one['timeseries_idx'] = timeseries_idx
+        one['file'] = f
+        # Validate the forecast, not the history in front of it: the kernel only reads
+        # forward from t0.
+        active = one[one['Datetime'] >= t0]
+        one['use_rfc'] = _validate_RFC_data(
+            record.station_id,
+            active.discharges,
+            active.synthetic_values,
             filepath,
             f,
-            300, #NOTE: this is t-route's default timestep. This will need to be verifiied again within t-route...
-            False
+            # The run's real timestep, so validation's "longer than an hour" check can fire.
+            routing_period,
+            False,
+            da_time_step=record.timestep_seconds,
         )
-        df['use_rfc'] = use_rfc
-        df['da_timestep'] = int(sliceTimeResolutionMinutes)*60
-
-        rfc_df = pd.concat([rfc_df, df])
-    rfc_df['stationId'] = rfc_df['stationId'].str.decode('utf-8').str.strip()
+        one['da_timestep'] = record.timestep_seconds
+        rfc_df = pd.concat([rfc_df, one])
     return rfc_df
 
 def assemble_rfc_dataframes(rfc_timeseries_df, rfc_lake_gage_crosswalk, t0, rfc_parameters):
     # Retrieve rfc timeseries dataframe from BMI dictionary
     rfc_df = rfc_timeseries_df
+    if rfc_df.empty:
+        # A BMI caller can transport no station at all.
+        msg = (
+            "reservoir RFC DA is enabled but no RFC timeseries observations were "
+            "provided, so there is nothing to assimilate. Provide forecasts "
+            "covering the simulation period, or turn off "
+            "reservoir_da.reservoir_rfc_da.reservoir_rfc_forecasts."
+        )
+        raise ValueError(msg)
     # Create reservoir_rfc_df dataframe of observations, rows are locations and columns are dates.
     reservoir_rfc_df = rfc_df[['stationId','discharges','Datetime']].sort_values(['stationId','Datetime']).pivot(index='stationId',columns='Datetime').fillna(-999.0)
     reservoir_rfc_df.columns = reservoir_rfc_df.columns.droplevel()
@@ -2363,9 +2410,29 @@ def assemble_rfc_dataframes(rfc_timeseries_df, rfc_lake_gage_crosswalk, t0, rfc_
     # lengths/start dates for each location so the array ends up having many NaN observations after we 
     # pivot the dataframe from long to wide format. We therefore need to adjust the timeseries index and
     # total counts to reflect the new position of t0 in the observation array. 
-    new_timeseries_idx = reservoir_rfc_df.columns.get_loc(t0) - 1 #minus 1 so on first call of reservoir_rfc_da(), timeseries_idx will advance 1 position to t0.
-    reservoir_rfc_param_df['totalCounts'] = reservoir_rfc_param_df['totalCounts'] + (new_timeseries_idx - reservoir_rfc_param_df['timeseries_idx'])
-    reservoir_rfc_param_df['timeseries_idx'] = new_timeseries_idx
+    if t0 not in reservoir_rfc_df.columns:
+        msg = (
+            f"reservoir RFC DA: the assembled RFC forecasts span "
+            f"{reservoir_rfc_df.columns.min()} to {reservoir_rfc_df.columns.max()} "
+            f"and do not cover the simulation start t0={t0}. Provide forecasts "
+            "covering the simulation period, or turn off "
+            "reservoir_da.reservoir_rfc_da.reservoir_rfc_forecasts."
+        )
+        raise ValueError(msg)
+    cadences = set(reservoir_rfc_param_df['da_timestep'].dropna().astype(int))
+    if len(cadences) > 1:
+        msg = (
+            f"reservoir RFC DA: the selected forecasts mix cadences {sorted(cadences)} s. "
+            "They share one observation grid and the kernel advances one column per "
+            "cadence, so the coarser gages would read padding. Use forecasts of a single "
+            "cadence."
+        )
+        raise ValueError(msg)
+    t0_column = reservoir_rfc_df.columns.get_loc(t0)
+    rebase = t0_column - reservoir_rfc_param_df['timeseries_idx']
+    # totalCounts is consumed as the inclusive last index, so it rebases off C - 1.
+    reservoir_rfc_param_df['totalCounts'] = reservoir_rfc_param_df['totalCounts'] - 1 + rebase
+    reservoir_rfc_param_df['timeseries_idx'] = t0_column
     # Fill in NaNs with default values.
     # Assign back, not df[col].fillna(inplace=True): pandas 3 copies the
     # intermediate and the fill would stop reaching the frame.
@@ -2375,8 +2442,13 @@ def assemble_rfc_dataframes(rfc_timeseries_df, rfc_lake_gage_crosswalk, t0, rfc_
     # Make sure columns are the correct types
     reservoir_rfc_param_df['totalCounts'] = reservoir_rfc_param_df['totalCounts'].astype(int)
     reservoir_rfc_param_df['da_timestep'] = reservoir_rfc_param_df['da_timestep'].astype(int)
-    reservoir_rfc_param_df['update_time'] = 0
-    reservoir_rfc_param_df['rfc_persist_days'] = rfc_parameters.get('reservoir_rfc_forecast_persist_days', 11)
+    # Seeded at t0, so the first advance is one cadence out, as the standalone does.
+    reservoir_rfc_param_df['update_time'] = reservoir_rfc_param_df['da_timestep']
+    persist_days = rfc_parameters.get('reservoir_rfc_forecast_persist_days', 11)
+    reservoir_rfc_param_df['rfc_persist_days'] = persist_days
+    # Absolute, fixed at the run's t0: the kernel's clock is window-local. The packer
+    # turns this into seconds remaining.
+    reservoir_rfc_param_df['persist_until'] = t0 + timedelta(days=persist_days)
 
     return reservoir_rfc_df, reservoir_rfc_param_df
 

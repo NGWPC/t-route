@@ -15,7 +15,7 @@ import logging
 #from bmi_df2array import *
 import bmi_df2array as df2a
 
-from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data
+from troute.DataAssimilation import _read_timeseries_files
 import netCDF4
 from troute.config import Config
 from nwm_routing.log_level_set import log_level_set
@@ -161,7 +161,10 @@ class DAforcing_model():
             # RFC Observations
             if rfc:
                 rfc_timeseries_path = str(rfc_parameters.get('reservoir_rfc_forecasts_time_series_path'))
-                self._rfc_timeseries_df = _read_timeseries_files(rfc_timeseries_path, timeseries_dates, start_datetime, final_persist_datetime)
+                self._rfc_timeseries_df = _read_timeseries_files(
+                    rfc_timeseries_path, timeseries_dates, start_datetime,
+                    final_persist_datetime, routing_period=dt,
+                )
 
             # Lastobs
             lastobs_file = data_assimilation_parameters.get('streamflow_da', {}).get('lastobs_file', False)
@@ -574,54 +577,6 @@ def _interpolate_one(df, interpolation_limit, frequency):
                        )
     return interp_out
 
-def _read_timeseries_files(filepath, timeseries_dates, t0, final_persist_datetime):
-    # Search for most recent RFC timseries file based on offset hours and lookback window
-    # for each location.
-    files = glob.glob(filepath + '/*')
-    # create temporary dataframe with file names, split up by location and datetime
-    df = pd.DataFrame([f.split('/')[-1].split('.') for f in files], columns=['Datetime','dt','ID','rfc','ext'])
-    df = df[df['Datetime'].isin(timeseries_dates)][['ID','Datetime']]
-    # For each location, find the most recent timeseries file (within timeseries window calculated a priori)
-    df['Datetime'] = df['Datetime'].apply(lambda _: datetime.strptime(_, '%Y-%m-%d_%H'))
-    df = df.groupby('ID').max().reset_index()
-    df['Datetime'] = df['Datetime'].dt.strftime('%Y-%m-%d_%H')
-
-    # Loop through list of timeseries files and store relevent information in dataframe.
-    file_list = (df['Datetime'] + '.60min.' + df['ID'] + '.RFCTimeSeries.ncdf').tolist()
-    rfc_df = pd.DataFrame()
-    for f in file_list:
-        # drop queryTime (non-CF units now raise on open; unused here) and force
-        # decode_timedelta (bmi_df2array calls .total_seconds() on timeSteps).
-        ds = xr.open_dataset(
-            filepath + '/' + f, drop_variables="queryTime", decode_timedelta=True
-        )
-        sliceStartTime = datetime.strptime(ds.attrs.get('sliceStartTimeUTC'), '%Y-%m-%d_%H:%M:%S')
-        sliceTimeResolutionMinutes = ds.attrs.get('sliceTimeResolutionMinutes')
-        df = ds.to_dataframe().reset_index().sort_values('forecastInd')[['stationId','discharges','synthetic_values','totalCounts','timeSteps']]
-        df['Datetime'] = pd.date_range(sliceStartTime, periods=df.shape[0], freq=sliceTimeResolutionMinutes+'min')
-        # Filter out forecasts that go beyond the rfc_persist_days parameter. This isn't necessary, but removes
-        # excess data, keeping the dataframe of observations as small as possible.
-        df = df[df['Datetime']<final_persist_datetime]
-        # Locate where t0 is in the timeseries
-        df['timeseries_idx'] = df.index[df.Datetime == t0][0]
-        df['file'] = f
-
-        # Validate data to determine whether or not it will be used.
-        use_rfc = _validate_RFC_data(
-            df['stationId'][0],
-            df.discharges,
-            df.synthetic_values,
-            filepath,
-            f,
-            300, #NOTE: this is t-route's default timestep. This will need to be verifiied again within t-route...
-            False
-        )
-        df['use_rfc'] = use_rfc
-        df['da_timestep'] = int(sliceTimeResolutionMinutes)*60
-
-        rfc_df = pd.concat([rfc_df, df])
-    rfc_df['stationId'] = rfc_df['stationId'].str.decode('utf-8').str.strip()
-    return rfc_df
 
 def _read_lastobs_file(
         lastobsfile,
@@ -910,7 +865,13 @@ def write_flowveldepth_netcdf(values,
                 LOG.debug(f"Flowveldepth data saved as PICKLE files in {stream_output_directory}")
 
             else:
-                print('WRONG FORMAT')
+                # Config validation pins this to .nc/.csv/.pkl, so reaching here means a
+                # caller bypassed it.
+                LOG.error(
+                    "stream_output_type %r is not one of '.nc', '.csv' or '.pkl', so no "
+                    "flowveldepth output was written to %s.",
+                    stream_output_type, stream_output_directory,
+                )
 
         if stream_output_directory:
             if (stream_output_type =='.nc'):
