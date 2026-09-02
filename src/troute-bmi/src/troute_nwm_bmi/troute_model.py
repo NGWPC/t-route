@@ -761,7 +761,7 @@ class Model:
         da._reservoir_usace_param_df = resolved["usace"]
         if "usbr" in resolved:
             da._reservoir_usbr_param_df = resolved["usbr"]
-        da._reservoir_rfc_param_df = resolved["rfc"]
+        da._reservoir_rfc_param_df = self._anchor_rfc_deadline(resolved["rfc"])
         da._great_lakes_param_df = resolved["gl"]
         if getattr(self, "_scaling_da", None) is not None:
             # Restore-or-invalidate, never keep: a stale own-trace surviving a
@@ -770,6 +770,31 @@ class Model:
                 data.get("scaling_tau"), dt=float(self.dt)
             )
         self._network.update_waterbody_water_elevation()
+
+    def _anchor_rfc_deadline(self, rfc_param_df):
+        """Give a pre-deadline checkpoint a persistence horizon anchored to this run.
+
+        A state carrying only a duration has no deadline for the packer to measure
+        against. `_orig_t0` is the best anchor available on a restore, and only an
+        approximation of the original run's, so say so once.
+        """
+        if rfc_param_df is None or rfc_param_df.empty:
+            return rfc_param_df
+        if "persist_until" in rfc_param_df:
+            return rfc_param_df
+        days = rfc_param_df.get("rfc_persist_days")
+        if days is None:
+            return rfc_param_df
+        rfc_param_df = rfc_param_df.copy()
+        rfc_param_df["persist_until"] = [
+            pd.Timestamp(self._orig_t0) + timedelta(days=float(d)) for d in days
+        ]
+        LOG.warning(
+            "reservoir RFC DA: this checkpoint predates the persistence deadline, so it "
+            "is anchored to this run's start (%s) rather than the original run's.",
+            self._orig_t0,
+        )
+        return rfc_param_df
 
     def reset_time(self):
         self._time = 0.0

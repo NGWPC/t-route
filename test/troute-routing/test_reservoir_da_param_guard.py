@@ -9,6 +9,8 @@ package on ``KeyError: 'totalCounts'``, which names a column and not the mistake
 """
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 import pytest
 
@@ -29,7 +31,7 @@ def _prep(**frames):
     ]
     args = [frames.get(name, _EMPTY) for name in order]
     return _prep_reservoir_da_dataframes(
-        *args, frames["waterbody_types_df_sub"], _T0, False
+        *args, frames["waterbody_types_df_sub"], _T0
     )
 
 
@@ -88,3 +90,53 @@ def test_no_observations_is_still_a_clean_no_op() -> None:
         waterbody_types_df_sub=pd.DataFrame({"reservoir_type": [4]}, index=[1001])
     )
     assert out  # a full tuple of empties, no raise
+
+
+@pytest.mark.parametrize("reservoir_type", [2, 3, 4, 7])
+def test_missing_observations_demote_to_level_pool(reservoir_type: int) -> None:
+    """No observation frame means level pool, for every reservoir DA type.
+
+    Demotion cannot depend on how the frames were built: a CLI run keeping its type-4
+    waterbodies looks them up in empty RFC parameter arrays.
+    """
+    types_df = pd.DataFrame({"reservoir_type": [reservoir_type]}, index=[1001])
+    _prep(waterbody_types_df_sub=types_df)
+    assert types_df["reservoir_type"].iloc[0] == 1
+
+
+def test_glacially_dammed_lakes_are_reported(caplog):
+    """Only type 4 is packed, but the kernel runs the RFC DA for 4 and 5 alike.
+
+    A type-5 lake falls back to level pool, so it has to be reported rather than read
+    as working glacial-lake support.
+    """
+    types_df = pd.DataFrame({"reservoir_type": [5, 5, 4]}, index=[9001, 9002, 9003])
+    obs = pd.DataFrame({_T0: [5.0]}, index=[9003])
+    params = pd.DataFrame(
+        {"totalCounts": [1], "timeseries_idx": [0], "file": ["f"], "use_rfc": [True],
+         "da_timestep": [3600], "update_time": [0], "rfc_persist_days": [11],
+         # The packer anchors the persistence horizon to the run start and refuses a
+         # frame without it, so a hand-built one has to carry it too.
+         "persist_until": [_T0 + pd.Timedelta(days=11)]},
+        index=[9003],
+    )
+    with caplog.at_level(logging.WARNING, logger="TROUTE"):
+        _prep(
+            waterbody_types_df_sub=types_df,
+            reservoir_rfc_df=obs,
+            reservoir_rfc_param_df=params,
+        )
+    assert "reservoir_type 5" in caplog.text
+    assert "2 glacially dammed lake(s)" in caplog.text
+
+    # Reported once per lake: this prep runs per job per window.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="TROUTE"):
+        _prep(
+            waterbody_types_df_sub=pd.DataFrame(
+                {"reservoir_type": [5, 5, 4]}, index=[9001, 9002, 9003]
+            ),
+            reservoir_rfc_df=obs,
+            reservoir_rfc_param_df=params,
+        )
+    assert "glacially dammed" not in caplog.text

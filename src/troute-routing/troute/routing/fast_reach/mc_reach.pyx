@@ -241,7 +241,7 @@ cpdef object compute_network_structured(
     const int[:] reservoir_rfc_timeseries_idx,
     const float[:] reservoir_rfc_update_time,
     const int[:] reservoir_rfc_da_timestep,
-    const int[:] reservoir_rfc_persist_days,
+    const int[:] reservoir_rfc_persist_seconds,
     const int[:] great_lakes_idx,
     const int[:] great_lakes_times,
     const float[:] great_lakes_discharge,
@@ -737,22 +737,28 @@ cpdef object compute_network_structured(
                         usbr_prev_persistence_index[res_idx[0][0]]  = new_persistence_index
                         usbr_persistence_update_time[res_idx[0][0]] = new_persistence_update_time
 
-                    # RFC reservoir hybrid DA inputs
-                    if r.reach.lp.wbody_type_code == 4:
+                    # Gathered for both types the DA runs for, so a type-5 lake does not
+                    # read the previous reservoir's locals and res_idx.
+                    has_rfc_params = 0
+                    if r.reach.lp.wbody_type_code == 4 or r.reach.lp.wbody_type_code == 5:
                         # find index location of waterbody in reservoir_rfc_obs 
                         # and reservoir_rfc_time
                         res_idx            = np.where(rfc_idx == r.reach.lp.lake_number)
-                        wbody_gage_obs     = reservoir_rfc_obs[res_idx[0][0],:]
-                        totalCounts        = reservoir_rfc_totalCounts[res_idx[0][0]]
-                        rfc_file           = reservoir_rfc_file[res_idx[0][0]]
-                        use_RFC            = reservoir_rfc_use_forecast[res_idx[0][0]]
-                        current_timeseries_idx = rfc_timeseries_idx[res_idx[0][0]]
-                        update_time        = rfc_update_time[res_idx[0][0]]
-                        rfc_timestep       = reservoir_rfc_da_timestep[res_idx[0][0]]
-                        rfc_persist_days   = reservoir_rfc_persist_days[res_idx[0][0]]
+                        # Type 5 is never packed, and exclude_segments can drop a type 4.
+                        # Level pool, not another reservoir's forecast.
+                        if res_idx[0].shape[0] > 0:
+                            has_rfc_params     = 1
+                            wbody_gage_obs     = reservoir_rfc_obs[res_idx[0][0],:]
+                            totalCounts        = reservoir_rfc_totalCounts[res_idx[0][0]]
+                            rfc_file           = reservoir_rfc_file[res_idx[0][0]]
+                            use_RFC            = reservoir_rfc_use_forecast[res_idx[0][0]]
+                            current_timeseries_idx = rfc_timeseries_idx[res_idx[0][0]]
+                            update_time        = rfc_update_time[res_idx[0][0]]
+                            rfc_timestep       = reservoir_rfc_da_timestep[res_idx[0][0]]
+                            rfc_persist_secs   = reservoir_rfc_persist_seconds[res_idx[0][0]]
 
                     # Execute RFC reservoir DA - both RFC(4) and Glacially Dammed Lake(5) types
-                    if r.reach.lp.wbody_type_code == 4 or r.reach.lp.wbody_type_code == 5:
+                    if has_rfc_params:
                         
                         #print('***********************************************************')
                         #print('calling reservoir DA code for lake_id:', r.reach.lp.lake_number) 
@@ -776,7 +782,7 @@ cpdef object compute_network_structured(
                             dt * timestep,                               # model time (sec)
                             update_time,                        # time to advance to next time series index
                             rfc_timestep,                       # frequency of DA observations (sec)
-                            rfc_persist_days*24*60*60, # max seconds RFC forecasts will be used/persisted (days -> seconds)
+                            rfc_persist_secs,  # seconds of the horizon left at this window's start
                             r.reach.lp.wbody_type_code,                           # reservoir type
                             upstream_flows,                                   # waterbody inflow (cms)
                             initial_water_elevation,                  # water surface el., previous timestep (m)

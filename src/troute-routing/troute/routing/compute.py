@@ -115,6 +115,7 @@ _EMPTY_F64 = np.empty(0, dtype=np.float64)
 # `qvd_ts_w` in mc_reach.pyx). Flattened flowveldepth rows stride by this.
 QVD_WIDTH = 4
 _EMPTY_DF = pd.DataFrame()
+_REPORTED_TYPE5: set[int] = set()
 _EMPTY_GL_DF = pd.DataFrame(columns=["lake_id", "time", "Discharge"])
 _EMPTY_LIST: list = []
 _QLAT_LOC_MAP = {"top": 0, "middle": 1, "bottom": 2}
@@ -535,7 +536,7 @@ class ComputeInputs:
     reservoir_rfc_timeseries_idx: Int32Array
     reservoir_rfc_update_time: Float32Array
     reservoir_rfc_da_timestep: Int32Array
-    reservoir_rfc_persist_days: Int32Array
+    reservoir_rfc_persist_seconds: Int32Array
     great_lakes_idx: Int32Array
     great_lakes_times: Int32Array
     great_lakes_discharge: Float32Array
@@ -1116,7 +1117,6 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
                                   great_lakes_climatology_df,
                                   waterbody_types_df_sub,
                                   t0, 
-                                  from_files,
                                   exclude_segments=None):
     '''
     Helper function to build reservoir DA data arrays for routing computations
@@ -1241,6 +1241,17 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
     
     # RFC reservoirs
     if not reservoir_rfc_df.empty and not waterbody_types_df_sub.empty:
+        # Only type 4 is packed, but the kernel runs the DA for 4 and 5 alike, so a
+        # type-5 lake falls back to level pool. Warn once per lake: this runs per job.
+        type5 = waterbody_types_df_sub.index[waterbody_types_df_sub['reservoir_type'] == 5]
+        unreported = set(type5) - _REPORTED_TYPE5
+        if unreported:
+            _REPORTED_TYPE5.update(unreported)
+            LOG.warning(
+                "reservoir RFC DA: %d glacially dammed lake(s) (reservoir_type 5) have no "
+                "RFC forecast, because only type 4 is packed; they run as level pool. "
+                "Lake id(s): %s", len(unreported), sorted(unreported)[:10],
+            )
         rfc_wbodies_sub = waterbody_types_df_sub[
             waterbody_types_df_sub['reservoir_type']==4
             ].index
@@ -1254,7 +1265,20 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
         reservoir_rfc_timeseries_idx = reservoir_rfc_param_df['timeseries_idx'].loc[rfc_wbodies_sub].to_numpy()
         reservoir_rfc_update_time = reservoir_rfc_param_df['update_time'].loc[rfc_wbodies_sub].to_numpy()
         reservoir_rfc_da_timestep = reservoir_rfc_param_df['da_timestep'].loc[rfc_wbodies_sub].to_numpy()
-        reservoir_rfc_persist_days = reservoir_rfc_param_df['rfc_persist_days'].loc[rfc_wbodies_sub].to_numpy()
+        # Seconds left of the horizon at this window's start: the kernel's clock is
+        # window-local, so a whole-horizon duration would re-arm every window.
+        if 'persist_until' not in reservoir_rfc_param_df:
+            # This knows only the window t0, so it cannot rebuild the deadline;
+            # load_state repairs a restored frame.
+            msg = (
+                "reservoir RFC DA: the parameter frame carries no persist_until, so the "
+                "persistence horizon cannot be anchored to the run start. Rebuild the "
+                "reservoir DA state rather than restoring one written before it existed."
+            )
+            raise ValueError(msg)
+        reservoir_rfc_persist_seconds = (
+            reservoir_rfc_param_df['persist_until'].loc[rfc_wbodies_sub] - t0
+        ).dt.total_seconds().to_numpy()
     else:
         reservoir_rfc_df_sub = _EMPTY_DF
         reservoir_rfc_totalCounts = _EMPTY_F64
@@ -1263,10 +1287,10 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
         reservoir_rfc_timeseries_idx = _EMPTY_F64
         reservoir_rfc_update_time = _EMPTY_F64
         reservoir_rfc_da_timestep = _EMPTY_F64
-        reservoir_rfc_persist_days = _EMPTY_F64
-        if not from_files:
-            if not waterbody_types_df_sub.empty:
-                waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 4] = 1
+        reservoir_rfc_persist_seconds = _EMPTY_F64
+        # Demote whichever way the frames were built, as every other type above does.
+        if not waterbody_types_df_sub.empty:
+            waterbody_types_df_sub.loc[waterbody_types_df_sub['reservoir_type'] == 4] = 1
     
     # Great Lakes
     if not great_lakes_df.empty and not waterbody_types_df_sub.empty:
@@ -1297,7 +1321,7 @@ def _prep_reservoir_da_dataframes(reservoir_usgs_df,
         reservoir_usgs_df_sub, reservoir_usgs_df_time, reservoir_usgs_update_time, reservoir_usgs_prev_persisted_flow, reservoir_usgs_persistence_update_time, reservoir_usgs_persistence_index,
         reservoir_usace_df_sub, reservoir_usace_df_time, reservoir_usace_update_time, reservoir_usace_prev_persisted_flow, reservoir_usace_persistence_update_time, reservoir_usace_persistence_index,
         reservoir_usbr_df_sub, reservoir_usbr_df_time, reservoir_usbr_update_time, reservoir_usbr_prev_persisted_flow, reservoir_usbr_persistence_update_time, reservoir_usbr_persistence_index,
-        reservoir_rfc_df_sub, reservoir_rfc_totalCounts, reservoir_rfc_file, reservoir_rfc_use_forecast, reservoir_rfc_timeseries_idx, reservoir_rfc_update_time, reservoir_rfc_da_timestep, reservoir_rfc_persist_days,
+        reservoir_rfc_df_sub, reservoir_rfc_totalCounts, reservoir_rfc_file, reservoir_rfc_use_forecast, reservoir_rfc_timeseries_idx, reservoir_rfc_update_time, reservoir_rfc_da_timestep, reservoir_rfc_persist_seconds,
         gl_df_sub, gl_parm_lake_id_sub, gl_param_flows_sub, gl_param_time_sub, gl_param_update_time_sub, gl_climatology_df_sub,
         waterbody_types_df_sub
         )
@@ -1798,7 +1822,7 @@ def build_compute_package(
         reservoir_rfc_timeseries_idx,
         reservoir_rfc_update_time,
         reservoir_rfc_da_timestep,
-        reservoir_rfc_persist_days,
+        reservoir_rfc_persist_seconds,
         gl_df_sub,
         gl_parm_lake_id_sub,
         gl_param_flows_sub,
@@ -1820,7 +1844,6 @@ def build_compute_package(
         assimilation_data.great_lakes_climatology_df,
         job.waterbodies_types_df,
         config.t0,
-        config.from_files,
     )
 
     return ComputeInputs(
@@ -1913,7 +1936,7 @@ def build_compute_package(
         reservoir_rfc_timeseries_idx=reservoir_rfc_timeseries_idx.astype("int32"),
         reservoir_rfc_update_time=reservoir_rfc_update_time.astype("float32"),
         reservoir_rfc_da_timestep=reservoir_rfc_da_timestep.astype("int32"),
-        reservoir_rfc_persist_days=reservoir_rfc_persist_days.astype("int32"),
+        reservoir_rfc_persist_seconds=reservoir_rfc_persist_seconds.astype("int32"),
         # Great Lakes DA data
         great_lakes_idx=gl_df_sub.lake_id.to_numpy(dtype="int32"),
         great_lakes_times=gl_df_sub.time.to_numpy(dtype="int32"),
