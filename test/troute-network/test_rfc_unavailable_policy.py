@@ -41,6 +41,18 @@ def _crosswalk(gages: list[str]) -> pd.DataFrame:
     ).set_index("rfc_lake_id")
 
 
+def _crosswalk_nhf(gages: list[str]) -> pd.DataFrame:
+    """The shape NHF's preprocess_data_assimilation actually builds.
+
+    It ends in ``.reset_index()``, so the lake id is a column and the index is a
+    RangeIndex. Fixtures that only ever used the indexed shape could not see that the
+    gageless lookup was reading row positions as lake ids.
+    """
+    return pd.DataFrame(
+        {"rfc_gage_id": gages, "rfc_lake_id": list(range(101, 101 + len(gages)))}
+    )
+
+
 # --------------------------------------------------------------- no file in the window
 
 @needs_fixture
@@ -312,3 +324,21 @@ def test_an_empty_frame_is_still_fatal_by_default():
     """Suppressing the duplicate must not soften the policy."""
     with pytest.raises(ValueError, match="no RFC timeseries observations"):
         assemble_rfc_dataframes(pd.DataFrame(), _crosswalk(["A1"]), _t0(), _WITH_WINDOW)
+
+
+# ------------------------------------------- the crosswalk shape the builders produce
+
+
+@pytest.mark.parametrize("build", [_crosswalk, _crosswalk_nhf], ids=["indexed", "nhf"])
+def test_a_gageless_lake_is_reported_whichever_crosswalk_shape(build, caplog):
+    """NHF hands this over with the lake id in a column; the policy must not depend
+    on which builder produced the crosswalk."""
+    t0 = _t0()
+    crosswalk = build(["A1", None])
+    with caplog.at_level(logging.WARNING):
+        _, par = assemble_rfc_dataframes(_frame("A1", t0), crosswalk, t0, _PARAMS)
+    assert not par.loc[102, "use_rfc"]
+    assert "no gage in the hydrofabric" in caplog.text
+    # The gageless lake is NOT an availability failure, so it must not be reported
+    # as one -- under the default action that would have ended the run.
+    assert "have a gage but no usable forecast" not in caplog.text

@@ -2431,6 +2431,14 @@ def _read_timeseries_files(filepath, timeseries_dates, t0, final_persist_datetim
 
 def assemble_rfc_dataframes(rfc_timeseries_df, rfc_lake_gage_crosswalk, t0, rfc_parameters):
     action = rfc_parameters.get('reservoir_rfc_forecasts_unavailable_action', 'error')
+    # One crosswalk shape from here down: lake id in the INDEX. The NHF builder hands
+    # it over reset_index()'d, with the lake id in a column and a RangeIndex, and the
+    # gageless lookup below reads the index as lake ids -- so on that path it compared
+    # row positions against lake ids, never matched, and a lake the hydrofabric gives
+    # no gage took the availability policy (by default, ending the run) instead of the
+    # warn-and-level-pool it is meant to take.
+    if 'rfc_lake_id' in getattr(rfc_lake_gage_crosswalk, 'columns', ()):
+        rfc_lake_gage_crosswalk = rfc_lake_gage_crosswalk.set_index('rfc_lake_id')
     # Retrieve rfc timeseries dataframe from BMI dictionary
     rfc_df = rfc_timeseries_df
     if rfc_df.empty:
