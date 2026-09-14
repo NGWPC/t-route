@@ -29,6 +29,10 @@ from troute import nhd_network
 from troute.DataAssimilation import (
     _diversion_seed_at,
     _fill_diversion_row,
+    _last_report_before,
+    _newer_seed,
+    _read_diversion_observations,
+    _seed_from_record,
     new_diversion_applied,
 )
 from troute.routing.compute import RoutingResultsCollection, _resolve_diversion_da
@@ -715,3 +719,221 @@ class TestDiversionStateInResults:
                                                      applied=[5.0] * len(later))])
         assert a.append_timesteps(b).diversion_applied() == {d: 5.0 for d in later}
 
+
+def _write_timeslice(folder, stamp: pd.Timestamp, values: dict[str, float], quality: int = 100,
+                     content_stamp: pd.Timestamp | None = None):
+    """One TimeSlice file in the reader's schema, named for its instant."""
+    import netCDF4
+
+    stamp_str = stamp.strftime("%Y-%m-%d_%H:%M:%S")
+    content_str = (content_stamp or stamp).strftime("%Y-%m-%d_%H:%M:%S")
+    sites = list(values)
+    with netCDF4.Dataset(str(folder / f"{stamp_str}.15min.usgsTimeSlice.ncdf"), "w") as nc:
+        nc.sliceTimeResolutionMinutes = "15"
+        nc.createDimension("stationIdInd", len(sites))
+        nc.createDimension("stationIdStringLength", 15)
+        nc.createDimension("timeStringLength", 19)
+        v = nc.createVariable("stationId", "S1", ("stationIdInd", "stationIdStringLength"))
+        v[:] = np.array([list(s.ljust(15)) for s in sites], dtype="S1")
+        v = nc.createVariable("time", "S1", ("stationIdInd", "timeStringLength"))
+        v[:] = np.array([list(content_str.ljust(19)) for _ in sites], dtype="S1")
+        v = nc.createVariable("discharge", "f4", ("stationIdInd",))
+        v[:] = np.array([values[s] for s in sites], dtype="f4")
+        v = nc.createVariable("discharge_quality", "i2", ("stationIdInd",))
+        v[:] = np.full(len(sites), quality, dtype="i2")
+
+
+class TestSeedFromTheRecord:
+    """A fresh process holds the last report even when it predates the reader's window."""
+
+    T0 = pd.Timestamp("2011-06-01 00:00")
+
+    @pytest.fixture
+    def folder(self, tmp_path):
+        d = tmp_path / "usgs"
+        d.mkdir()
+        _write_timeslice(d, self.T0 - pd.Timedelta(days=13), {DIVERSION_GAGE: 1.0})
+        _write_timeslice(d, self.T0 - pd.Timedelta(days=5), {DIVERSION_GAGE: 5.0})
+        _write_timeslice(d, self.T0 - pd.Timedelta(days=4), {DIVERSION_GAGE: np.nan})
+        _write_timeslice(d, self.T0 - pd.Timedelta(days=3), {DIVERSION_GAGE: 3.0}, quality=10)
+        _write_timeslice(d, self.T0 + pd.Timedelta(hours=1), {DIVERSION_GAGE: 9.0})
+        return d
+
+    def test_the_newest_finite_report_within_the_horizon_wins(self, folder):
+        found = _last_report_before(folder, DIVERSION_GAGE, self.T0, pd.Timedelta(days=11), 1)
+        assert found == (self.T0 - pd.Timedelta(days=5), 5.0)
+
+    def test_an_unreadable_file_is_skipped_not_fatal(self, folder, caplog):
+        (folder / (self.T0 - pd.Timedelta(days=2)).strftime("%Y-%m-%d_%H:%M:%S")
+         ).with_suffix(".15min.usgsTimeSlice.ncdf").write_bytes(b"not a netcdf")
+        with caplog.at_level(logging.WARNING):
+            found = _last_report_before(folder, DIVERSION_GAGE, self.T0, pd.Timedelta(days=11), 1)
+        assert found == (self.T0 - pd.Timedelta(days=5), 5.0)
+        assert "unreadable TimeSlice" in caplog.text
+
+    def test_the_readers_validity_rules_apply(self, folder):
+        """A newer report the reader would reject must not become the seed."""
+        _write_timeslice(folder, self.T0 - pd.Timedelta(days=1), {DIVERSION_GAGE: -999.0})
+        _write_timeslice(folder, self.T0 - pd.Timedelta(hours=12), {DIVERSION_GAGE: 0.0})
+        found = _last_report_before(folder, DIVERSION_GAGE, self.T0, pd.Timedelta(days=11), 1)
+        assert found == (self.T0 - pd.Timedelta(days=5), 5.0)
+
+    def test_the_reports_own_timestamp_must_be_inside_the_window(self, folder):
+        """A file named inside the window whose report is dated a month back is skipped."""
+        _write_timeslice(folder, self.T0 - pd.Timedelta(hours=6), {DIVERSION_GAGE: 8.0},
+                         content_stamp=self.T0 - pd.Timedelta(days=40))
+        found = _last_report_before(folder, DIVERSION_GAGE, self.T0, pd.Timedelta(days=11), 1)
+        assert found == (self.T0 - pd.Timedelta(days=5), 5.0)
+
+    def test_a_report_beyond_the_horizon_is_not_found(self, folder, caplog):
+        with caplog.at_level(logging.WARNING):
+            found = _last_report_before(folder, DIVERSION_GAGE, self.T0, pd.Timedelta(days=4), 1)
+        assert found is None
+        # The staged history is named, so a folder too shallow for the horizon is visible.
+        assert "oldest file in that span is 2011-05-28" in caplog.text
+
+    def test_seed_only_a_gage_with_nothing_else(self, folder):
+        class _Network:
+            t0 = self.T0
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        params = {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+                  "diversion_persist_days": 11}
+        da_params = {"usgs_timeslices_folder": str(folder)}
+        empty = pd.DataFrame()
+        seeded = _seed_from_record(empty, params, da_params, _Network(), {})
+        assert seeded == {GAGE_LINK: (self.T0 - pd.Timedelta(days=5), 5.0)}
+        # A report at or before t0 in the frame, or a carried seed, means no scan.
+        frame = pd.DataFrame([[7.0, np.nan]], index=pd.Index([GAGE_LINK], dtype="int64"),
+                             columns=pd.date_range(self.T0, periods=2, freq="5min"))
+        assert _seed_from_record(frame, params, da_params, _Network(), {}) == {}
+        carried = {GAGE_LINK: (self.T0, 2.0)}
+        assert _seed_from_record(empty, params, da_params, _Network(), carried) == carried
+        assert _seed_from_record(empty, params, {}, _Network(), {}) == {}
+
+    def test_a_report_after_t0_does_not_suppress_the_scan(self, folder):
+        """A report later in the window is the hold's successor, not its source."""
+        class _Network:
+            t0 = self.T0
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        params = {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+                  "diversion_persist_days": 11}
+        da_params = {"usgs_timeslices_folder": str(folder)}
+        frame = pd.DataFrame([[np.nan, np.nan, 7.0]], index=pd.Index([GAGE_LINK], dtype="int64"),
+                             columns=pd.date_range(self.T0, periods=3, freq="h"))
+        seeded = _seed_from_record(frame, params, da_params, _Network(), {})
+        assert seeded == {GAGE_LINK: (self.T0 - pd.Timedelta(days=5), 5.0)}
+
+    def test_a_zero_horizon_never_scans(self, folder, caplog):
+        class _Network:
+            t0 = self.T0
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        params = {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+                  "diversion_persist_days": 0}
+        with caplog.at_level(logging.WARNING):
+            out = _seed_from_record(pd.DataFrame(), params, {"usgs_timeslices_folder": str(folder)},
+                                    _Network(), {})
+        assert out == {}
+        assert caplog.text == ""
+
+    def test_an_empty_scan_is_not_repeated_for_a_later_t0(self, tmp_path, caplog):
+        """The CLI reseeds every window; a folder with nothing is scanned once."""
+        folder = tmp_path / "empty"
+        folder.mkdir()
+
+        class _Network:
+            t0 = self.T0
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        params = {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+                  "diversion_persist_days": 11}
+        da_params = {"usgs_timeslices_folder": str(folder)}
+        cache: dict = {}
+        with caplog.at_level(logging.WARNING):
+            _seed_from_record(pd.DataFrame(), params, da_params, _Network(), {}, cache)
+            _Network.t0 = self.T0 + pd.Timedelta(hours=2)
+            _seed_from_record(pd.DataFrame(), params, da_params, _Network(), {}, cache)
+        assert cache == {GAGE_LINK: self.T0}
+        assert caplog.text.count("no report in the TimeSlices") == 1
+
+    def test_the_deferred_scan_seeds_and_refills(self, folder):
+        """The drivers call seed_from_record after any checkpoint restore."""
+        from troute.DataAssimilation import NudgingDA, _DiversionRow
+
+        class _Network:
+            t0 = self.T0
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        class _Stub:
+            seed_from_record = NudgingDA.seed_from_record
+            refill_diversion_rows = NudgingDA.refill_diversion_rows
+
+        grid = pd.date_range(self.T0, periods=4, freq="5min")
+        raw = pd.Series(np.nan, index=grid, dtype=float)
+        da = _Stub()
+        da._data_assimilation_parameters = {
+            "usgs_timeslices_folder": str(folder),
+            "diversion_da": {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+                             "diversion_persist_days": 11},
+        }
+        da._usgs_df = raw.to_frame().T
+        da._usgs_df.index = pd.Index([GAGE_LINK], dtype="int64")
+        da._diversion_rows = {GAGE_LINK: _DiversionRow(raw, DIVERSION_GAGE)}
+        da._diversion_seed_in, da._diversion_scan_empty_before = {}, {}
+        da.seed_from_record(_Network())
+        assert da._diversion_seed_in == {GAGE_LINK: (self.T0 - pd.Timedelta(days=5), 5.0)}
+        np.testing.assert_allclose(da._usgs_df.loc[GAGE_LINK].to_numpy(), 5.0)
+        # Already seeded: a second call changes nothing and scans nothing.
+        da.seed_from_record(_Network())
+        assert da._diversion_scan_empty_before == {}
+
+    def test_an_unreadable_window_read_holds_instead_of_raising(self, tmp_path, caplog):
+        """A file removed between discovery and read must not end an hourly cycle."""
+        class _Network:
+            t0 = self.T0
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        params = {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE}}
+        da_params = {"usgs_timeslices_folder": str(tmp_path)}
+        da_run = {"usgs_timeslice_files": ["2011-06-01_00:00:00.15min.usgsTimeSlice.ncdf"]}
+        with caplog.at_level(logging.WARNING):
+            out = _read_diversion_observations(pd.DataFrame(), params, da_params, _Network(),
+                                               {"dt": 300, "cpu_pool": 1}, da_run)
+        assert out.empty
+        assert "could not be read" in caplog.text
+
+    def test_the_later_seed_wins_the_merge(self):
+        old = {GAGE_LINK: (self.T0 - pd.Timedelta(days=2), 1.0)}
+        new = {GAGE_LINK: (self.T0, 2.0)}
+        assert _newer_seed(old, new) == new
+        assert _newer_seed(new, old) == new
+        assert _newer_seed(None, new) == new
+        assert _newer_seed(new, None) == new
+
+
+class TestHourlyCycles:
+    """Standard AnA: two-hour windows cycling hourly, the seed carried between them."""
+
+    def test_the_hold_expires_at_the_absolute_deadline_not_per_window(self):
+        class _Network:
+            t0 = pd.Timestamp("2011-06-01 00:00")
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        params = {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+                  "diversion_persist_days": 11}
+        report = (_Network.t0 - pd.Timedelta(days=10, hours=23), 4.0)
+        deadline = report[0] + pd.Timedelta(days=11)
+        seed = {GAGE_LINK: report}
+        held_windows = 0
+        for cycle in range(6):
+            _Network.t0 = pd.Timestamp("2011-06-01 00:00") + pd.Timedelta(hours=cycle)
+            out, rows = _fill_diversion_row(pd.DataFrame(), params, _Network, {"dt": 300},
+                                            seed_in=seed, nts=24)
+            row = out.loc[GAGE_LINK]
+            expected = np.where(row.index <= deadline, 4.0, np.nan)
+            np.testing.assert_array_equal(row.to_numpy(), expected)
+            held_windows += int(row.notna().any())
+            seed = _diversion_seed_at(rows, seed)
+        assert held_windows == 2, "cycles 0 and 1 reach the deadline, later cycles do not"

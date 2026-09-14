@@ -40,6 +40,7 @@ class AbstractDA(ABC):
     """
     __slots__ = ["_usgs_df", "_usbr_df", "_last_obs_df", "_da_parameter_dict",
                  "_diversion_seed_in", "_diversion_rows", "_diversion_applied",
+                 "_diversion_scan_empty_before",
                  "_reservoir_usgs_df", "_reservoir_usgs_param_df", 
                  "_reservoir_usace_df", "_reservoir_usace_param_df",
                  "_reservoir_usbr_df", "_reservoir_usbr_param_df", 
@@ -233,6 +234,7 @@ class NudgingDA(AbstractDA):
         self._diversion_seed_in = {}
         self._diversion_rows = {}
         self._diversion_applied = {}
+        self._diversion_scan_empty_before = {}
         if diversion_da_parameters.get('diversion_gage_crosswalk'):
             self._usgs_df = _read_diversion_observations(
                 self._usgs_df, diversion_da_parameters, data_assimilation_parameters,
@@ -337,6 +339,10 @@ class NudgingDA(AbstractDA):
                 self._usgs_df, diversion_da_parameters, data_assimilation_parameters,
                 network, run_parameters, da_run,
             )
+            self._diversion_seed_in = _seed_from_record(
+                self._usgs_df, diversion_da_parameters, data_assimilation_parameters,
+                network, self._diversion_seed_in, self._diversion_scan_empty_before,
+            )
             self._usgs_df, self._diversion_rows = _fill_diversion_row(
                 self._usgs_df,
                 diversion_da_parameters,
@@ -345,6 +351,24 @@ class NudgingDA(AbstractDA):
                 seed_in=self._diversion_seed_in,
                 nts=(da_run or {}).get('nts'),
             )
+
+    def seed_from_record(self, network):
+        """Seed a gage with no carried seed and no report at or before t0 from the record.
+
+        Called by the drivers once any checkpoint is restored, so a checkpointed cycle
+        never scans; a scan that found nothing is remembered, so later windows do not
+        repeat it.
+        """
+        params = self._data_assimilation_parameters.get('diversion_da', {}) or {}
+        if not params.get('diversion_gage_crosswalk'):
+            return
+        seeded = _seed_from_record(
+            self._usgs_df, params, self._data_assimilation_parameters, network,
+            self._diversion_seed_in, self._diversion_scan_empty_before,
+        )
+        if seeded != self._diversion_seed_in:
+            self._diversion_seed_in = seeded
+            self.refill_diversion_rows()
 
     def diversion_seed_at(self, tau=None):
         """The last diversion observation known at ``tau`` (all columns when None).
@@ -1434,6 +1458,117 @@ def _read_diversion_observations(
     if usgs_df.empty or usgs_df.shape[1] == 0:
         return obs
     return usgs_df.combine_first(obs)
+
+
+def _last_report_before(
+    folder: str | pathlib.Path,
+    site_no: str,
+    before: pd.Timestamp,
+    horizon: pd.Timedelta,
+    qc_threshold: float,
+) -> tuple[pd.Timestamp, float] | None:
+    """The gage's newest valid report in the files named for ``[before - horizon, before)``.
+
+    Newest file first, one file at a time, stopping at the first hit, so a gage that
+    reported recently costs one read and a quiet one at most the horizon's worth. Valid
+    means what the reader accepts: quality in range and at least ``qc_threshold``,
+    discharge above zero, and the report's own timestamp inside the window.
+    """
+    stamped = []
+    for path in pathlib.Path(folder).glob("*usgsTimeSlice.ncdf"):
+        try:
+            stamp = pd.Timestamp(path.name[:19].replace("_", " "))
+        except ValueError:
+            continue  # not named for an instant
+        if before - horizon <= stamp < before:
+            stamped.append((stamp, path))
+    for _, path in sorted(stamped, reverse=True):
+        try:
+            obs, qual = nhd_io._read_timeslice_file(str(path))
+        except (OSError, ValueError, KeyError) as exc:
+            # A shared folder can hold a truncated or foreign file; the scan is a
+            # fallback and must not end an hourly cycle over it.
+            LOG.warning("diversion DA: skipping unreadable TimeSlice %s (%s)", path.name, exc)
+            continue
+        if obs.empty or site_no not in obs.index:
+            continue
+        row = obs.loc[site_no].astype(float)
+        if not qual.empty and site_no in qual.index:
+            quality = qual.loc[site_no].astype(float)
+            quality = quality.mask(quality < 0).mask(quality > 1)
+            row = row.mask(quality < qc_threshold)
+        row = row.mask(row <= 0)
+        when = pd.to_datetime(row.index.astype(str).str.replace("_", " "), errors="coerce")
+        row = row[(when >= before - horizon) & (when < before)]
+        finite = row.dropna()
+        if finite.empty:
+            continue
+        newest = pd.to_datetime(str(finite.index[-1]).replace("_", " "))
+        return newest, float(finite.iloc[-1])
+    # Say how far back the folder reaches: the horizon is only as long as the
+    # history the deployment stages.
+    LOG.warning(
+        "diversion gage %s: no report in the TimeSlices between %s and %s; the folder's "
+        "oldest file in that span is %s", site_no, before - horizon, before,
+        min(stamped)[0] if stamped else "none",
+    )
+    return None
+
+
+def _seed_from_record(
+    usgs_df: pd.DataFrame,
+    diversion_da_parameters: dict,
+    data_assimilation_parameters: dict,
+    network,
+    seed_in: dict | None,
+    empty_before: dict | None = None,
+) -> dict:
+    """Seed a gage with no carried seed and no report in the frame from the TimeSlices.
+
+    A fresh process (a forecast cycle without a checkpoint) reads only the reader's
+    lookback, so a gage quiet for longer would have nothing to hold although the
+    horizon allows it. The last report within the horizon before t0 stands in.
+    """
+    seed = dict(seed_in or {})
+    folder = data_assimilation_parameters.get("usgs_timeslices_folder")
+    horizon = _diversion_horizon(diversion_da_parameters)
+    if not folder or horizon <= pd.Timedelta(0):
+        return seed
+    site_to_node = getattr(network, "_diversion_site_to_node", {})
+    t0 = pd.Timestamp(network.t0)
+    empty_before = {} if empty_before is None else empty_before
+    for site_no in diversion_da_parameters.get("diversion_gage_crosswalk", {}).values():
+        site_no = str(site_no)
+        if site_no not in site_to_node:
+            continue
+        link_id = int(site_to_node[site_no])
+        if link_id in seed:
+            continue
+        if link_id in getattr(usgs_df, "index", []):
+            # Only reports at or before t0 make a seed: a report later in the window
+            # is the hold's successor, not its source.
+            row = usgs_df.loc[link_id]
+            if isinstance(row.index, pd.DatetimeIndex):
+                row = row[row.index <= t0]
+            if row.notna().any():
+                continue
+        if link_id in empty_before and t0 >= empty_before[link_id]:
+            # An earlier scan found nothing back to its horizon; anything since sits
+            # in a frame this object has already seen.
+            continue
+        found = _last_report_before(
+            folder, site_no, t0, horizon, data_assimilation_parameters.get("qc_threshold", 1)
+        )
+        if found is None:
+            empty_before[link_id] = t0
+        else:
+            seed[link_id] = found
+            LOG.warning(
+                "diversion gage %s: no report in this window's TimeSlices; holding the last "
+                "one, %.1f at %s, %.1f h before t0", site_no, found[1], found[0],
+                (t0 - found[0]).total_seconds() / 3600,
+            )
+    return seed
 
 
 def _newer_seed(a: dict | None, b: dict | None) -> dict:

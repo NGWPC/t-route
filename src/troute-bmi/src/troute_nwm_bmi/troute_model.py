@@ -337,6 +337,8 @@ class Model:
         # unwritten output -- recovery is checkpoint-restart (load_state), the
         # same contract a mid-update failure already had before the deferral.
         pending = None
+        # After any load_state: a checkpointed cycle carries its seed and never scans.
+        self._data_assimilation.seed_from_record(self._network)
         for run in run_sets:
             LOG.debug("Starting routing function")
             route_start_time = time.time()
