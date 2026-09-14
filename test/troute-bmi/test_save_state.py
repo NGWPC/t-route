@@ -398,7 +398,12 @@ def test_load_state_does_not_erase_live_reservoir_da_params():
 
 
 def test_load_state_still_installs_real_reservoir_da_params():
-    """The guard must not block the ordinary case: a populated saved frame wins."""
+    """The guard must not block the ordinary case: a populated saved frame wins.
+
+    RFC is the exception, and has its own test below: its parameters describe the
+    observation grid this cycle built, so a checkpoint's copy cannot be installed
+    over them.
+    """
     model = _make_model(0.0, _ExecutionPlanLike())
     saved_rfc = pd.DataFrame({"totalCounts": [99]})
     state = {
@@ -414,10 +419,93 @@ def test_load_state_still_installs_real_reservoir_da_params():
         "gl": pd.DataFrame({"d": [44]}),
         "scaling_tau": None,
     }
+    live_rfc = model._data_assimilation._reservoir_rfc_param_df.copy()
+    model.load_state(state)
+    da = model._data_assimilation
+    pd.testing.assert_frame_equal(da._reservoir_usgs_param_df, state["usgs"])
+    pd.testing.assert_frame_equal(da._reservoir_usace_param_df, state["usace"])
+    pd.testing.assert_frame_equal(da._great_lakes_param_df, state["gl"])
+    # RFC keeps what this cycle selected.
+    pd.testing.assert_frame_equal(da._reservoir_rfc_param_df, live_rfc)
+
+
+def test_a_checkpoint_with_fewer_gages_does_not_shrink_the_roster(caplog):
+    """Downstream the lastobs index picks the roster, so a narrow checkpoint would
+    quietly stop assimilating the gages it never saw."""
+    import logging
+
+    model = _make_model(0.0, _ExecutionPlanLike())
+    da = model._data_assimilation
+    da._last_obs_df = pd.DataFrame(
+        {"time_since_lastobs": [0.0, 0.0, 0.0], "lastobs_discharge": [1.0, 2.0, 3.0]},
+        index=[30, 50, 70],
+    )
+    saved = pd.DataFrame(
+        {"time_since_lastobs": [9.0, 9.0], "lastobs_discharge": [8.0, 8.0]},
+        index=[50, 30],
+    )
+    state = {
+        "time": 0.0, "q0": pd.DataFrame({"q": [1.0]}), "seeded_q0": None,
+        "t0": "2020-01-01_00:00:00", "last_obs": saved,
+        "usgs": pd.DataFrame(), "usace": pd.DataFrame(), "usbr": pd.DataFrame(),
+        "rfc": pd.DataFrame(), "gl": pd.DataFrame(), "scaling_tau": None,
+    }
+    with caplog.at_level(logging.WARNING):
+        model.load_state(state)
+    out = model._data_assimilation._last_obs_df
+    assert set(out.index) == {30, 50, 70}
+    # The checkpoint's history is kept where it had any.
+    assert out.loc[30, "lastobs_discharge"] == 8.0
+    # The gage it never saw starts with no history, which is the kernel's own default.
+    assert pd.isna(out.loc[70, "lastobs_discharge"])
+    assert "carries no last observations for 1 gage(s)" in caplog.text
+
+
+def test_load_state_keeps_this_cycles_rfc_selection():
+    """A checkpoint's cursor indexes the grid its own cycle built, not this one's."""
+    model = _make_model(0.0, _ExecutionPlanLike())
+    live_rfc = model._data_assimilation._reservoir_rfc_param_df.copy()
+    state = {
+        "time": 0.0, "q0": pd.DataFrame({"q": [1.0]}), "seeded_q0": None,
+        "t0": "2020-01-01_00:00:00", "last_obs": pd.DataFrame(),
+        "usgs": pd.DataFrame(), "usace": pd.DataFrame(), "usbr": pd.DataFrame(),
+        "rfc": pd.DataFrame({"timeseries_idx": [72], "totalCounts": [99]}),
+        "gl": pd.DataFrame(), "scaling_tau": None,
+    }
     model.load_state(state)
     pd.testing.assert_frame_equal(
-        model._data_assimilation._reservoir_rfc_param_df, saved_rfc
+        model._data_assimilation._reservoir_rfc_param_df, live_rfc
     )
+
+
+def test_load_state_does_not_carry_the_rfc_horizon_deadline():
+    """The horizon is measured from the forecast's issue, so every cycle derives it.
+
+    Carrying a checkpoint's deadline would deny a newly adopted forecast its own
+    allowance, and re-arm an old one that should have expired.
+    """
+    model = _make_model(0.0, _ExecutionPlanLike())
+    da = model._data_assimilation
+    fresh = pd.Timestamp("2020-01-12")
+    da._reservoir_rfc_param_df = pd.DataFrame(
+        {"timeseries_idx": [5], "persist_until": [fresh]}, index=[101]
+    )
+    state = {
+        "time": 0.0, "q0": pd.DataFrame({"q": [1.0]}), "seeded_q0": None,
+        "t0": "2020-01-01_00:00:00", "last_obs": pd.DataFrame(),
+        "usgs": pd.DataFrame(), "usace": pd.DataFrame(), "usbr": pd.DataFrame(),
+        "rfc": pd.DataFrame(
+            {"timeseries_idx": [72], "persist_until": [pd.Timestamp("2020-01-08")]},
+            index=[101],
+        ),
+        "gl": pd.DataFrame(), "scaling_tau": None,
+    }
+    model.load_state(state)
+    out = model._data_assimilation._reservoir_rfc_param_df
+    assert out.loc[101, "timeseries_idx"] == 5
+    assert out.loc[101, "persist_until"] == fresh
+
+
 
 
 def test_load_state_rejects_a_no_da_checkpoint_after_routing():
@@ -558,22 +646,43 @@ def test_a_disabled_run_does_not_launder_stale_reservoir_params():
 def test_an_enabled_run_with_no_observations_yet_still_takes_the_checkpoint():
     """The symmetric case: empty live does NOT mean the type is off.
 
-    A run with RFC DA on that has not seen an observation in this window has an empty
-    live frame and legitimately needs the checkpoint's persistence. Distinguishing it
-    from the disabled run above is exactly what the recorded flags are for.
+    A persistence type with DA on that has not seen an observation in this window has
+    an empty live frame and legitimately needs the checkpoint's state. Distinguishing
+    it from the disabled run above is exactly what the recorded flags are for. RFC is
+    the exception and has its own test below: its parameters are derived per cycle.
     """
     run_a = _make_model(3600.0, _ExecutionPlanLike())
-    saved = pd.DataFrame({"totalCounts": [12], "update_time": [3600]})
-    run_a._data_assimilation._reservoir_rfc_param_df = saved
+    saved = pd.DataFrame({"prev_persisted_outflow": [12.0], "update_time": [3600]})
+    run_a._data_assimilation._reservoir_usgs_param_df = saved
     state = _state_from(run_a)
-    assert state["reservoir_da_enabled"]["rfc"] is True
+    assert state["reservoir_da_enabled"]["usgs"] is True
 
-    run_b = _make_model(0.0, _ExecutionPlanLike())  # RFC on
-    run_b._data_assimilation._reservoir_rfc_param_df = pd.DataFrame()  # nothing yet
+    run_b = _make_model(0.0, _ExecutionPlanLike())
+    run_b._data_assimilation._reservoir_usgs_param_df = pd.DataFrame()  # nothing yet
     run_b.load_state(state)
     pd.testing.assert_frame_equal(
-        run_b._data_assimilation._reservoir_rfc_param_df, saved
+        run_b._data_assimilation._reservoir_usgs_param_df, saved
     )
+
+
+def test_a_cycle_that_selected_no_rfc_forecast_does_not_adopt_the_checkpoints(caplog):
+    """RFC parameters are derived from this cycle's files, so an empty live frame is
+    an answer rather than a gap. Adopting the checkpoint's cursor would index a grid
+    this cycle never built, and write it back out as if this run had produced it."""
+    import logging
+
+    run_a = _make_model(3600.0, _ExecutionPlanLike())
+    run_a._data_assimilation._reservoir_rfc_param_df = pd.DataFrame(
+        {"totalCounts": [12], "timeseries_idx": [48]}
+    )
+    state = _state_from(run_a)
+
+    run_b = _make_model(0.0, _ExecutionPlanLike())
+    run_b._data_assimilation._reservoir_rfc_param_df = pd.DataFrame()
+    with caplog.at_level(logging.WARNING):
+        run_b.load_state(state)
+    assert run_b._data_assimilation._reservoir_rfc_param_df.empty
+    assert "selected no RFC forecast" in caplog.text
 
 
 def test_switching_a_type_on_mid_cycle_works_on_a_fresh_model():

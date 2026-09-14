@@ -17,7 +17,9 @@ import os
 import stat
 from pathlib import Path
 
+import numpy as np
 import pytest
+import xarray as xr
 
 troute_model = pytest.importorskip(
     "troute_nwm_bmi.troute_model",
@@ -51,8 +53,8 @@ def test_no_temporary_file_is_left_behind(parts):
 def test_temporary_file_is_created_in_the_destination_directory(parts, tmp_path):
     """Otherwise the final rename can cross filesystems and fail with EXDEV.
 
-    The lakeout branch used to create its temporary file in the stream output
-    directory, which is a different directory in every shipped config.
+    The stream output directory is a different filesystem in some configs, so the
+    temporary file belongs in the destination directory.
     """
     seen: list[Path] = []
     _merge_into_first(parts, lambda dest: (seen.append(dest), dest.write_text("x"))[-1])
@@ -103,3 +105,32 @@ def test_suffix_follows_the_destination_not_the_caller(parts, tmp_path):
     seen: list[Path] = []
     _merge_into_first(parts, lambda dest: (seen.append(dest), dest.write_text("x"))[-1])
     assert seen[0].suffix == ".csv"
+
+
+def _chunk(path: Path, hour: int) -> Path:
+    """One netCDF chunk, stamped with its own initialization time like the writer."""
+    xr.Dataset(
+        {"flow": (("time", "feature_id"), np.full((2, 3), float(hour)))},
+        coords={
+            "time": np.array([hour * 2, hour * 2 + 1], dtype="datetime64[h]"),
+            "feature_id": [1, 2, 3],
+            "reference_time": np.array([hour], dtype="datetime64[h]").reshape(1),
+        },
+    ).to_netcdf(path)
+    return path
+
+
+def test_merged_netcdf_keeps_the_first_chunks_reference_time(tmp_path):
+    """Chunks carry different t0, and the merged run has exactly one.
+
+    Aligning them with xarray's outer join unioned the reference_times into an
+    extra dimension, so the run's only copy of its results claimed to have been
+    initialized twice.
+    """
+    files = [_chunk(tmp_path / f"part{i}.nc", i) for i in range(2)]
+    troute_model._write_merged_netcdf(files, tmp_path / "merged.nc")
+
+    with xr.open_dataset(tmp_path / "merged.nc") as ds:
+        assert ds.reference_time.values[0] == np.datetime64("1970-01-01T00")
+        assert ds.sizes == {"time": 4, "feature_id": 3, "reference_time": 1}
+        assert ds.flow.values[:, 0].tolist() == [0.0, 0.0, 1.0, 1.0]

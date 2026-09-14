@@ -47,6 +47,9 @@ def _write_merged_netcdf(files: list[Path], dest: Path) -> None:
         data_vars="minimal",
         coords="minimal",
         compat="override",
+        # Each chunk carries its own reference_time; keep the first rather than
+        # unioning them into an extra dimension.
+        join="override",
     ) as ds:
         # Materialize before writing. The lazy dask graph reads the same files the
         # writer holds open, which is where an integrated ngen run hung.
@@ -609,6 +612,36 @@ class Model:
             "gl": bool(persistence.get("reservoir_persistence_greatLake", False)),
         }
 
+    def _restore_lastobs_frame(
+        self, restored: pd.DataFrame | None, live: pd.DataFrame
+    ) -> pd.DataFrame | None:
+        """Let the checkpoint supply history, never decide which gages have any.
+
+        Downstream the roster comes from the lastobs index, so a checkpoint written
+        with fewer gages than this run has quietly stops assimilating the difference.
+        A gage the checkpoint never saw has no history, which is what the kernel's
+        NaN initial value already means.
+        """
+        if restored is None or restored.empty:
+            return restored
+        # A run started without a lastobs file has no live frame to compare against,
+        # but its observations still name the gages it assimilates.
+        roster = live.index if live is not None and not live.empty else getattr(
+            getattr(self, "_data_assimilation", None), "_usgs_df", pd.DataFrame()
+        ).index
+        if not len(roster):
+            return restored
+        missing = roster.difference(restored.index)
+        if not len(missing):
+            return restored
+        LOG.warning(
+            "load_state: the checkpoint carries no last observations for %d gage(s) "
+            "this run assimilates; they start with no history rather than being "
+            "dropped. Gage(s): %s",
+            len(missing), sorted(missing)[:10],
+        )
+        return restored.reindex(restored.index.union(roster))
+
     def _compatible_lastobs(self, frame: pd.DataFrame) -> pd.DataFrame:
         """Drop lastobs rows this run does not assimilate.
 
@@ -693,6 +726,45 @@ class Model:
         )
         return live
 
+    def _restore_rfc_frame(
+        self,
+        saved: pd.DataFrame | None,
+        live: pd.DataFrame,
+        *,
+        advanced: bool,
+        live_on: bool | None,
+    ) -> pd.DataFrame:
+        """Keep this cycle's RFC selection whole; the checkpoint contributes nothing.
+
+        Every RFC parameter describes the observation grid built from the files this
+        cycle selected, and the checkpoint's copy describes whichever grid the previous
+        cycle built. Even the horizon is derived, since it is measured from the
+        forecast's issue time: carrying it would deny a newer forecast its allowance.
+        """
+        if live_on is False:
+            return self._restore_da_frame(
+                saved, live, "RFC reservoir DA parameters",
+                advanced=advanced, live_on=live_on,
+            )
+        if advanced and not live.empty:
+            # Neither frame describes the checkpoint's time: the live selection was
+            # built for this model's t0, the saved cursor for its own cycle's grid.
+            msg = (
+                "load_state: this model has already routed, so its RFC selection is "
+                "past the checkpoint's time and the checkpoint's own cursor indexes a "
+                "grid this run did not build. Restore into a fresh model."
+            )
+            raise ValueError(msg)
+        if saved is not None and not saved.empty and live.empty:
+            # An empty live frame is this cycle's answer, not a gap for the checkpoint
+            # to fill: its cursor indexes a grid this cycle never built.
+            LOG.warning(
+                "load_state: this cycle selected no RFC forecast, so the checkpoint's "
+                "%d row(s) are dropped rather than carried into the state it writes.",
+                len(saved),
+            )
+        return live
+
     def load_state(self, data: dict):
         # Whether the live DA frames still describe the checkpoint's time. Not
         # `self._time`, which load_state overwrites and reset_time zeroes.
@@ -714,18 +786,19 @@ class Model:
         # lastobs gets the reservoir treatment too: time_since_lastobs is relative,
         # so carrying a stale frame hands the next run day-old obs as current.
         resolved = {
-            "last_obs": restore(
-                data["last_obs"], da._last_obs_df, "last observations",
-                live_on=self._owns_lastobs()),
+            "last_obs": self._restore_lastobs_frame(
+                restore(data["last_obs"], da._last_obs_df, "last observations",
+                        live_on=self._owns_lastobs()),
+                da._last_obs_df),
             "usgs": restore_reservoir(
                 "usgs", data["usgs"], da._reservoir_usgs_param_df,
                 "USGS reservoir DA parameters"),
             "usace": restore_reservoir(
                 "usace", data["usace"], da._reservoir_usace_param_df,
                 "USACE reservoir DA parameters"),
-            "rfc": restore_reservoir(
-                "rfc", data["rfc"], da._reservoir_rfc_param_df,
-                "RFC reservoir DA parameters"),
+            "rfc": self._restore_rfc_frame(
+                data["rfc"], da._reservoir_rfc_param_df,
+                advanced=advanced, live_on=live_on["rfc"]),
             "gl": restore_reservoir(
                 "gl", data["gl"], da._great_lakes_param_df,
                 "Great Lakes DA parameters"),

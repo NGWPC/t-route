@@ -271,6 +271,7 @@ class bmi_troute(Bmi):
         self._values['rfc_use_rfc'] = np.zeros(0)
         self._values['rfc_Datetime'] = np.zeros(0)
         self._values['rfc_timeSteps'] = np.zeros(0)
+        self._values['rfc_issue_time'] = np.zeros(0)
         self._values['rfc_StationId_array'] = np.zeros(0)
         self._values['rfc_StationId_stringLengths'] = np.zeros(0)
         self._values['rfc_List_array'] = np.zeros(0)

@@ -1,3 +1,4 @@
+import math
 import troute.nhd_io as nhd_io
 import pandas as pd
 import numpy as np
@@ -6,14 +7,18 @@ import xarray as xr
 from datetime import datetime, timedelta
 from abc import ABC
 from joblib import delayed, Parallel
-import glob
 import re
 import time
 import logging
 
 LOG = logging.getLogger("TROUTE")
 
-from troute.routing.fast_reach.reservoir_RFC_da import _validate_RFC_data
+from troute.routing.fast_reach.reservoir_RFC_da import (
+    ABSURD_DISCHARGE_CMS,
+    _RFC_FILENAME,
+    _validate_RFC_data,
+    read_rfc_timeseries,
+)
 
 from troute.network import bmi_array2df as a2df
 
@@ -1127,6 +1132,7 @@ class RFCDA(AbstractDA):
                         rfc_use_rfc = value_dict['rfc_use_rfc']
                         rfc_Datetime = value_dict['rfc_Datetime']
                         rfc_timeSteps = value_dict['rfc_timeSteps']
+                        rfc_issue_time = value_dict.get('rfc_issue_time')
                 
                         rfc_StationId_stringLengths = value_dict['rfc_StationId_stringLengths']
                         rfc_List_array = value_dict['rfc_List_array']
@@ -1139,7 +1145,7 @@ class RFCDA(AbstractDA):
                                 rfc_use_rfc, rfc_Datetime, rfc_timeSteps, \
                                 rfc_StationId_array, rfc_StationId_stringLengths, \
                                 rfc_List_array, rfc_List_stringLengths, 
-                                dateNull)
+                                dateNull, rfc_issue_time)
 
                 self._reservoir_rfc_df, self._reservoir_rfc_param_df = assemble_rfc_dataframes(
                                                                                             rfc_df, 
@@ -1173,7 +1179,13 @@ class RFCDA(AbstractDA):
                 
                 # RFC Observations
                 rfc_timeseries_path = str(rfc_parameters.get('reservoir_rfc_forecasts_time_series_path'))
-                self._rfc_timeseries_df = _read_timeseries_files(rfc_timeseries_path, timeseries_dates, start_datetime, final_persist_datetime)           
+                self._rfc_timeseries_df = _read_timeseries_files(
+                    rfc_timeseries_path, timeseries_dates, start_datetime, final_persist_datetime,
+                    routing_period=self._run_parameters.get('dt', 300),
+                    unavailable_action=rfc_parameters.get(
+                        'reservoir_rfc_forecasts_unavailable_action', 'error'),
+                    gages=network.rfc_lake_gage_crosswalk['rfc_gage_id'].dropna(),
+                )
                 self._reservoir_rfc_df, self._reservoir_rfc_param_df = assemble_rfc_dataframes(
                                                                                                 self._rfc_timeseries_df, 
                                                                                                 network.rfc_lake_gage_crosswalk,
@@ -1918,18 +1930,23 @@ def new_lastobs(run_results, time_increment):
     - lastobs_df (DataFrame): Last gage observations data for DA
     """
 
-    df = pd.concat(
-        [
-            pd.DataFrame(
-                # TODO: Add time_increment (or subtract?) from time_since_lastobs
-                np.array([rr[3][1],rr[3][2]]).T,
-                index=rr[3][0],
-                columns=["time_since_lastobs", "lastobs_discharge"]
-            )
-            for rr in run_results
-        ],
-        copy=False,
-    )
+    columns = ["time_since_lastobs", "lastobs_discharge"]
+    # Drop empty frames: pandas lets them decide the result dtype, and concat of
+    # nothing but empties raises.
+    frames = [
+        pd.DataFrame(
+            # TODO: Add time_increment (or subtract?) from time_since_lastobs
+            np.array([rr[3][1],rr[3][2]]).T,
+            index=rr[3][0],
+            columns=columns
+        )
+        for rr in run_results
+        if len(rr[3][0]) > 0
+    ]
+    if not frames:
+        return pd.DataFrame(columns=columns)
+
+    df = pd.concat(frames, copy=False)
     df["time_since_lastobs"] = df["time_since_lastobs"] - time_increment
 
     return df
@@ -2098,8 +2115,9 @@ def _timeslice_qcqa(discharge,
         observation_df_T.index, format = "%Y-%m-%d_%H:%M:%S"  # index variable as type datetime
     )
     
-    # specify resampling frequency 
-    frequency = str(int(frequency_secs/60))+"min"    
+    # Seconds, not truncated minutes: truncation puts a dt that is not whole minutes
+    # on the wrong grid, and any dt under 60 s on no grid at all.
+    frequency = f"{int(frequency_secs)}s"
     
     # interpolate and resample frequency
     buffer_df = observation_df_T.resample(frequency).asfreq()
@@ -2135,10 +2153,14 @@ def _timeslice_qcqa(discharge,
     return observation_df_new
 
 def _interpolate_one(df, interpolation_limit, frequency):
-    
-    interp_out = (df.resample('min').
+
+    # Interpolate on the finest grid the minute-based limit and the target step share,
+    # so a target that is not whole minutes still gets values rather than NaN.
+    step_seconds = int(pd.Timedelta(frequency).total_seconds())
+    base_seconds = math.gcd(60, step_seconds) or 60
+    interp_out = (df.resample(f'{base_seconds}s').
                         interpolate(
-                            limit = interpolation_limit, 
+                            limit = interpolation_limit * (60 // base_seconds),
                             limit_direction = 'both'
                         ).
                         resample(frequency).
@@ -2287,58 +2309,151 @@ def _rfc_timeseries_qcqa(discharge,stationId,synthetic,totalCounts,timestamp,tim
     return rfc_df, rfc_param_df
 
 
-def _read_timeseries_files(filepath, timeseries_dates, t0, final_persist_datetime):
+def _rfc_unavailable(msg, action, error=ValueError, warn=True):
+    """Raise or warn, by policy, when a forecast a reservoir needs is not usable.
+
+    ``error`` ends the run: enabling RFC DA asserts the forecasts are provisioned.
+    ``level_pool`` lets the affected reservoirs run as level pool, so one late gage
+    does not break an operational chain of runs. ``warn`` is False where the
+    per-run summary already reports the same state.
+    """
+    if action == 'level_pool':
+        if warn:
+            LOG.warning("%s Running level pool there instead.", msg)
+        return
+    raise error(msg)
+
+
+def _read_timeseries_files(filepath, timeseries_dates, t0, final_persist_datetime,
+                           routing_period=300, unavailable_action='error', gages=None):
+    """Newest RFC forecast per gage that actually covers t0, as one long frame.
+
+    Newest-first but coverage-gated: the newest issue has the latest slice start, so
+    taking it unconditionally passed over an older file that did cover t0.
+    """
     # Search for most recent RFC timseries file based on offset hours and lookback window
     # for each location.
-    files = glob.glob(filepath + '/*')
-    # create temporary dataframe with file names, split up by location and datetime
-    df = pd.DataFrame([f.split('/')[-1].split('.') for f in files], columns=['Datetime','dt','ID','rfc','ext'])
-    df = df[df['Datetime'].isin(timeseries_dates)][['ID','Datetime']]
-    # For each location, find the most recent timeseries file (within timeseries window calculated a priori)
-    df['Datetime'] = df['Datetime'].apply(lambda _: datetime.strptime(_, '%Y-%m-%d_%H'))
-    df = df.groupby('ID').max().reset_index()
-    df['Datetime'] = df['Datetime'].dt.strftime('%Y-%m-%d_%H')
-
-    # Loop through list of timeseries files and store relevent information in dataframe.
-    file_list = (df['Datetime'] + '.60min.' + df['ID'] + '.RFCTimeSeries.ncdf').tolist()
-    rfc_df = pd.DataFrame()
-    for f in file_list:
-        # drop queryTime (non-CF units now raise on open; unused here) and force
-        # decode_timedelta (timeSteps carries a bare "seconds" unit).
-        ds = xr.open_dataset(
-            filepath + '/' + f, drop_variables="queryTime", decode_timedelta=True
+    # Names are split on '.' into a fixed five fields, so anything the ingestion did not
+    # write (a leftover .gz, a directory) has to be dropped before the split.
+    files, ignored = [], []
+    for f in sorted(pathlib.Path(filepath).glob('*')):
+        keep = f.is_file() and _RFC_FILENAME.fullmatch(f.name)
+        (files if keep else ignored).append(f)
+    if ignored:
+        LOG.warning(
+            "reservoir RFC DA: ignoring %d file(s) in %s that are not named "
+            "<issue>.<cadence>min.<gage>.RFCTimeSeries.ncdf, e.g. %s",
+            len(ignored), filepath, ignored[0].name,
         )
-        sliceStartTime = datetime.strptime(ds.attrs.get('sliceStartTimeUTC'), '%Y-%m-%d_%H:%M:%S')
-        sliceTimeResolutionMinutes = ds.attrs.get('sliceTimeResolutionMinutes')
-        df = ds.to_dataframe().reset_index().sort_values('forecastInd')[['stationId','discharges','synthetic_values','totalCounts','timeSteps']]
-        df['Datetime'] = pd.date_range(sliceStartTime, periods=df.shape[0], freq=sliceTimeResolutionMinutes+'min')
-        # Filter out forecasts that go beyond the rfc_persist_days parameter. This isn't necessary, but removes
-        # excess data, keeping the dataframe of observations as small as possible.
-        df = df[df['Datetime']<final_persist_datetime]
-        # Locate where t0 is in the timeseries
-        df['timeseries_idx'] = df.index[df.Datetime == t0][0]
-        df['file'] = f
+    # create temporary dataframe with file names, split up by location and datetime
+    df = pd.DataFrame([f.name.split('.') for f in files], columns=['Datetime','dt','ID','rfc','ext'])
+    df = df[df['Datetime'].isin(timeseries_dates)][['ID','Datetime','dt']]
+    if gages is not None:
+        # The forecast folder is shared across domains and holds hundreds of gages.
+        # Only the ones this domain routes can say anything about this run.
+        df = df[df['ID'].isin(set(gages))]
+    if df.empty:
+        msg = (
+            f"reservoir RFC DA is enabled but no RFC timeseries file in {filepath} "
+            f"is dated within the lookback window {timeseries_dates[0]} to "
+            f"{timeseries_dates[-1]} ({len(files)} file(s) present). Provide "
+            "forecasts covering the simulation period, or turn off "
+            "reservoir_da.reservoir_rfc_da.reservoir_rfc_forecasts."
+        )
+        _rfc_unavailable(msg, unavailable_action, FileNotFoundError)
+        return pd.DataFrame()
+    df['Datetime'] = df['Datetime'].apply(lambda _: datetime.strptime(_, '%Y-%m-%d_%H'))
 
-        # Validate data to determine whether or not it will be used.
+    rfc_df = pd.DataFrame()
+    for gage, candidates in df.sort_values('Datetime', ascending=False).groupby('ID'):
+        chosen, rejected = None, []
+        for stamp, cadence in zip(candidates['Datetime'], candidates['dt']):
+            f = f"{stamp.strftime('%Y-%m-%d_%H')}.{cadence}.{gage}.RFCTimeSeries.ncdf"
+            record = read_rfc_timeseries(filepath + '/' + f)
+            if t0 in record.datetimes:
+                chosen = (f, record)
+                break
+            rejected.append(f"{f} spans {record.datetimes[0]} to {record.datetimes[-1]}")
+        if chosen is None:
+            msg = (
+                f"reservoir RFC DA: none of the {len(rejected)} forecast file(s) for gage "
+                f"{gage} in the lookback window cover the simulation start t0={t0}, so no "
+                f"forecast can be aligned to the run ({'; '.join(rejected)}). Provide "
+                "forecasts covering the simulation period, or turn off "
+                "reservoir_da.reservoir_rfc_da.reservoir_rfc_forecasts."
+            )
+            _rfc_unavailable(msg, unavailable_action)
+            continue
+        f, record = chosen
+        # t0 in the untruncated series; the truncation below only trims the tail.
+        timeseries_idx = record.datetimes.get_loc(t0)
+        one = pd.DataFrame({
+            'stationId': record.station_id,
+            'discharges': record.discharges,
+            'synthetic_values': record.synthetic,
+            'totalCounts': record.total_counts,
+            'timeSteps': pd.Timedelta(seconds=record.timestep_seconds),
+            'Datetime': record.datetimes,
+        })
+        # Trim at this forecast's own deadline, which the kernel measures from the issue
+        # rather than from t0. The caller passes the allowance as t0 plus persist_days.
+        one = one[one['Datetime'] <= record.issue_time + (final_persist_datetime - t0)]
+        one['timeseries_idx'] = timeseries_idx
+        one['file'] = f
+        # Whether there is anything to assimilate is a question about the forecast, so
+        # the history in front of t0 must not answer it.
+        active = one[one['Datetime'] >= t0]
         use_rfc = _validate_RFC_data(
-            df['stationId'][0],
-            df.discharges,
-            df.synthetic_values,
+            record.station_id,
+            active.discharges,
+            active.synthetic_values,
             filepath,
             f,
-            300, #NOTE: this is t-route's default timestep. This will need to be verifiied again within t-route...
-            False
+            # The run's real timestep, so validation's "longer than an hour" check can fire.
+            routing_period,
+            False,
+            da_time_step=record.timestep_seconds,
         )
-        df['use_rfc'] = use_rfc
-        df['da_timestep'] = int(sliceTimeResolutionMinutes)*60
-
-        rfc_df = pd.concat([rfc_df, df])
-    rfc_df['stationId'] = rfc_df['stationId'].str.decode('utf-8').str.strip()
+        # An absurd value is different: when the sample at the cursor is unusable the
+        # kernel walks BACKWARD, so one behind t0 reaches the reservoir just as readily.
+        if use_rfc and any(v >= ABSURD_DISCHARGE_CMS for v in one.discharges):
+            LOG.warning(
+                "reservoir RFC DA: %s holds a discharge at or above the %d cms limit "
+                "before t0, which the backtrack can reach; using level pool instead.",
+                f, ABSURD_DISCHARGE_CMS,
+            )
+            use_rfc = False
+        one['use_rfc'] = use_rfc
+        one['da_timestep'] = record.timestep_seconds
+        one['issue_time'] = record.issue_time
+        rfc_df = pd.concat([rfc_df, one])
     return rfc_df
 
 def assemble_rfc_dataframes(rfc_timeseries_df, rfc_lake_gage_crosswalk, t0, rfc_parameters):
+    action = rfc_parameters.get('reservoir_rfc_forecasts_unavailable_action', 'error')
+    # One crosswalk shape from here down: lake id in the INDEX. The NHF builder hands
+    # it over reset_index()'d, with the lake id in a column and a RangeIndex, and the
+    # gageless lookup below reads the index as lake ids -- so on that path it compared
+    # row positions against lake ids, never matched, and a lake the hydrofabric gives
+    # no gage took the availability policy (by default, ending the run) instead of the
+    # warn-and-level-pool it is meant to take.
+    if 'rfc_lake_id' in getattr(rfc_lake_gage_crosswalk, 'columns', ()):
+        rfc_lake_gage_crosswalk = rfc_lake_gage_crosswalk.set_index('rfc_lake_id')
     # Retrieve rfc timeseries dataframe from BMI dictionary
     rfc_df = rfc_timeseries_df
+    if rfc_df.empty:
+        # A BMI caller can transport no station at all.
+        msg = (
+            "reservoir RFC DA is enabled but no RFC timeseries observations were "
+            "provided, so there is nothing to assimilate. Provide forecasts "
+            "covering the simulation period, or turn off "
+            "reservoir_da.reservoir_rfc_da.reservoir_rfc_forecasts."
+        )
+        # The reader has already named the folder and the window it searched, and the
+        # summary below says the same thing with counts, so warning here says it twice.
+        _rfc_unavailable(msg, action, warn=False)
+        _report_rfc_selection(None, t0, rfc_parameters, rfc_lake_gage_crosswalk)
+        return pd.DataFrame(), pd.DataFrame()
     # Create reservoir_rfc_df dataframe of observations, rows are locations and columns are dates.
     reservoir_rfc_df = rfc_df[['stationId','discharges','Datetime']].sort_values(['stationId','Datetime']).pivot(index='stationId',columns='Datetime').fillna(-999.0)
     reservoir_rfc_df.columns = reservoir_rfc_df.columns.droplevel()
@@ -2351,7 +2466,16 @@ def assemble_rfc_dataframes(rfc_timeseries_df, rfc_lake_gage_crosswalk, t0, rfc_
                         set_index('rfc_lake_id')
                         )
     # Create reservoir_rfc_df dataframe of parameters
-    reservoir_rfc_param_df = rfc_df[['stationId','totalCounts','timeseries_idx','file','use_rfc','da_timestep']].drop_duplicates().set_index('stationId')
+    if 'issue_time' not in rfc_df:
+        # The horizon is measured from the forecast's issue, so a caller that
+        # transports observations without it cannot be given one.
+        msg = (
+            "reservoir RFC DA: the RFC observations carry no issue time, so the "
+            "persistence horizon cannot be anchored to the forecast. Read the "
+            "forecasts from files, or transport issueTimeUTC alongside them."
+        )
+        raise ValueError(msg)
+    reservoir_rfc_param_df = rfc_df[['stationId','totalCounts','timeseries_idx','file','use_rfc','da_timestep','issue_time']].drop_duplicates().set_index('stationId')
     reservoir_rfc_param_df = (
                             rfc_lake_gage_crosswalk.
                             reset_index().
@@ -2363,22 +2487,122 @@ def assemble_rfc_dataframes(rfc_timeseries_df, rfc_lake_gage_crosswalk, t0, rfc_
     # lengths/start dates for each location so the array ends up having many NaN observations after we 
     # pivot the dataframe from long to wide format. We therefore need to adjust the timeseries index and
     # total counts to reflect the new position of t0 in the observation array. 
-    new_timeseries_idx = reservoir_rfc_df.columns.get_loc(t0) - 1 #minus 1 so on first call of reservoir_rfc_da(), timeseries_idx will advance 1 position to t0.
-    reservoir_rfc_param_df['totalCounts'] = reservoir_rfc_param_df['totalCounts'] + (new_timeseries_idx - reservoir_rfc_param_df['timeseries_idx'])
-    reservoir_rfc_param_df['timeseries_idx'] = new_timeseries_idx
+    if t0 not in reservoir_rfc_df.columns:
+        msg = (
+            f"reservoir RFC DA: the assembled RFC forecasts span "
+            f"{reservoir_rfc_df.columns.min()} to {reservoir_rfc_df.columns.max()} "
+            f"and do not cover the simulation start t0={t0}. Provide forecasts "
+            "covering the simulation period, or turn off "
+            "reservoir_da.reservoir_rfc_da.reservoir_rfc_forecasts."
+        )
+        _rfc_unavailable(msg, action)
+        _report_rfc_selection(None, t0, rfc_parameters, rfc_lake_gage_crosswalk)
+        return pd.DataFrame(), pd.DataFrame()
+    cadences = set(reservoir_rfc_param_df['da_timestep'].dropna().astype(int))
+    if len(cadences) > 1:
+        msg = (
+            f"reservoir RFC DA: the selected forecasts mix cadences {sorted(cadences)} s. "
+            "They share one observation grid and the kernel advances one column per "
+            "cadence, so the coarser gages would read padding. Use forecasts of a single "
+            "cadence."
+        )
+        raise ValueError(msg)
+    t0_column = reservoir_rfc_df.columns.get_loc(t0)
+    rebase = t0_column - reservoir_rfc_param_df['timeseries_idx']
+    # totalCounts is consumed as the inclusive last index, so it rebases off C - 1.
+    reservoir_rfc_param_df['totalCounts'] = reservoir_rfc_param_df['totalCounts'] - 1 + rebase
+    reservoir_rfc_param_df['timeseries_idx'] = t0_column
     # Fill in NaNs with default values.
     # Assign back, not df[col].fillna(inplace=True): pandas 3 copies the
     # intermediate and the fill would stop reaching the frame.
-    reservoir_rfc_param_df['use_rfc'] = reservoir_rfc_param_df['use_rfc'].fillna(False)
+    # Two states share this shape: a lake with no gage at all can never have a
+    # forecast, while a gage with no usable file follows the availability policy.
+    unmatched = reservoir_rfc_param_df.index[reservoir_rfc_param_df['use_rfc'].isna()]
+    gageless = set(
+        rfc_lake_gage_crosswalk.index[rfc_lake_gage_crosswalk['rfc_gage_id'].isna()]
+    )
+    no_gage = sorted(set(unmatched) & gageless)
+    no_data = sorted(set(unmatched) - gageless)
+    if no_gage:
+        LOG.warning(
+            "reservoir RFC DA: %d RFC reservoir(s) have no gage in the hydrofabric, so "
+            "no forecast can exist for them; they run level pool. Lake id(s): %s",
+            len(no_gage), no_gage[:10],
+        )
+    if no_data:
+        msg = (
+            f"reservoir RFC DA: {len(no_data)} of {len(reservoir_rfc_param_df)} RFC "
+            f"reservoir(s) have a gage but no usable forecast. Lake id(s): "
+            f"{no_data[:10]}. Provide forecasts covering the simulation period, or turn "
+            "off reservoir_da.reservoir_rfc_da.reservoir_rfc_forecasts."
+        )
+        _rfc_unavailable(msg, action)
+    # eq, not fillna: the column is object dtype after the join, and filling it
+    # downcasts silently, which pandas warns about and will change.
+    reservoir_rfc_param_df['use_rfc'] = reservoir_rfc_param_df['use_rfc'].eq(True)
     reservoir_rfc_param_df['totalCounts'] = reservoir_rfc_param_df['totalCounts'].fillna(0)
     reservoir_rfc_param_df['da_timestep'] = reservoir_rfc_param_df['da_timestep'].fillna(0)
     # Make sure columns are the correct types
     reservoir_rfc_param_df['totalCounts'] = reservoir_rfc_param_df['totalCounts'].astype(int)
     reservoir_rfc_param_df['da_timestep'] = reservoir_rfc_param_df['da_timestep'].astype(int)
-    reservoir_rfc_param_df['update_time'] = 0
-    reservoir_rfc_param_df['rfc_persist_days'] = rfc_parameters.get('reservoir_rfc_forecast_persist_days', 11)
+    # A lake with no forecast has no deadline. The packer still casts the column to
+    # int32, and NaN there is INT_MIN on some platforms, so give it t0 instead.
+    reservoir_rfc_param_df['issue_time'] = reservoir_rfc_param_df['issue_time'].fillna(t0)
+    # Seeded at t0, so the first advance is one cadence out, as the standalone does.
+    # Float, because the kernel hands a float32 clock back into this column each window.
+    reservoir_rfc_param_df['update_time'] = (
+        reservoir_rfc_param_df['da_timestep'].astype(float)
+    )
+    persist_days = rfc_parameters.get('reservoir_rfc_forecast_persist_days', 11)
+    # Measured from the forecast's issue, not the run's t0: the horizon caps how long a
+    # product may be used. The packer turns it into seconds remaining at each window.
+    reservoir_rfc_param_df['persist_until'] = (
+        reservoir_rfc_param_df['issue_time'] + timedelta(days=persist_days)
+    )
+    _report_rfc_selection(reservoir_rfc_param_df, t0, rfc_parameters)
 
     return reservoir_rfc_df, reservoir_rfc_param_df
+
+
+def _rfc_search_window(t0, rfc_parameters):
+    """The span the selection actually searched, as the reader builds it."""
+    lookback = rfc_parameters.get('reservoir_rfc_forecasts_lookback_hours') or 0
+    offset = rfc_parameters.get('reservoir_rfc_forecasts_offset_hours') or 0
+    end = t0 + timedelta(hours=offset)
+    return end - timedelta(hours=lookback), end
+
+
+def _report_rfc_selection(param_df, t0, rfc_parameters, crosswalk=None):
+    """One line per run saying what the RFC DA actually has to work with.
+
+    "Selected", not "applied": whether a forecast reaches a reservoir is decided in the
+    kernel, which keeps only the cursor. The searched window is reported because a
+    domain running level pool with every issue just outside it looks identical, from
+    the outflow alone, to one with no forecasts at all.
+    """
+    start, end = _rfc_search_window(t0, rfc_parameters)
+    selected = (
+        param_df['use_rfc'].fillna(False).astype(bool)
+        if param_df is not None and not param_df.empty
+        else None
+    )
+    total = (
+        len(param_df) if selected is not None
+        else (0 if crosswalk is None else len(crosswalk))
+    )
+    n = int(selected.sum()) if selected is not None else 0
+    if not n:
+        LOG.info(
+            "reservoir RFC DA: no forecast selected for any of %d reservoir(s); all run "
+            "level pool. Searched %s to %s.", total, start, end,
+        )
+        return
+    ages = (t0 - param_df.loc[selected, 'issue_time']).dt.total_seconds() / 3600
+    LOG.info(
+        "reservoir RFC DA: %d of %d reservoir(s) have a forecast selected, %d run level "
+        "pool. Selected issues are %.0f to %.0f h old at t0=%s. Searched %s to %s.",
+        n, total, total - n, ages.min(), ages.max(), t0, start, end,
+    )
 
 def _read_lastobs_file(
         lastobsfile,

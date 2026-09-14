@@ -3,6 +3,8 @@ import json
 import sys
 import math
 import pathlib
+import re
+from typing import Any
 import logging
 from datetime import *
 import time
@@ -1047,6 +1049,57 @@ def get_usgs_df_from_csv(usgs_csv, routelink_subset_file, index_col="link"):
     return usgs_df
 
 
+# What the streamflow ingestion writes: <center>.<cadence>min.usgsTimeSlice.ncdf
+_TIMESLICE_CADENCE = re.compile(r"\.(\d+)min\.")
+
+
+def _whole_minutes(label: str, declared: Any) -> int:
+    """A declared cadence in whole minutes, refusing anything int() would truncate."""
+    minutes = float(declared)
+    if not minutes.is_integer():
+        msg = (
+            f"{label} declares a {minutes} min cadence. Cadences are whole minutes; a "
+            "fractional one would be truncated and read at the wrong rate."
+        )
+        raise ValueError(msg)
+    return int(minutes)
+
+
+def _check_timeslice_cadence(name: str, declared: Any) -> None:
+    """Cross-check a TimeSlice's cadence, the way the RFC reader checks its own.
+
+    The observations are resampled onto the model timestep with no reference to this,
+    so a file that is not the cadence it claims is read at the wrong rate silently.
+    Files written before the attribute existed carry no cadence to check against, and
+    are left alone rather than rejected.
+    """
+    if declared is None:
+        return
+    attr_minutes = _whole_minutes(f"streamflow DA: {name}", declared)
+    from_name = _TIMESLICE_CADENCE.search(name)
+    if from_name is None:
+        msg = (
+            f"streamflow DA: {name} carries no cadence token in its filename, so the "
+            "cadence cannot be cross-checked against the file's own attributes."
+        )
+        raise ValueError(msg)
+    name_minutes = int(from_name.group(1))
+    if attr_minutes <= 0 or name_minutes != attr_minutes:
+        msg = (
+            f"streamflow DA: {name} disagrees about its own cadence -- filename says "
+            f"{name_minutes} min, sliceTimeResolutionMinutes says {attr_minutes} min."
+        )
+        raise ValueError(msg)
+    if 60 % attr_minutes:
+        # The ingestion's rule, shared with the RFC product.
+        msg = (
+            f"streamflow DA: {name} has a {attr_minutes} min cadence, which does not "
+            "divide 60. The observation retrieval only writes cadences that divide 60 "
+            "with no remainder."
+        )
+        raise ValueError(msg)
+
+
 def _read_timeslice_file(f):
 
     with netCDF4.Dataset(
@@ -1054,7 +1107,14 @@ def _read_timeslice_file(f):
         mode = 'r',
         format = "NETCDF4"
     ) as ds:
-        
+
+        # getncattr, not __dict__: reading one attribute cannot be spoiled by an
+        # unrelated one that fails to decode.
+        declared = (
+            ds.getncattr('sliceTimeResolutionMinutes')
+            if 'sliceTimeResolutionMinutes' in ds.ncattrs() else None
+        )
+        _check_timeslice_cadence(pathlib.Path(f).name, declared)
         discharge = ds.variables['discharge'][:].filled(fill_value = np.nan)
         stns      = ds.variables['stationId'][:].filled(fill_value = np.nan)
         t         = ds.variables['time'][:].filled(fill_value = np.nan)
@@ -1087,10 +1147,14 @@ def _read_timeslice_file(f):
     return timeslice_observations, observation_quality
 
 def _interpolate_one(df, interpolation_limit, frequency):
-    
-    interp_out = (df.resample('min').
+
+    # Interpolate on the finest grid the minute-based limit and the target step share,
+    # so a target that is not whole minutes still gets values rather than NaN.
+    step_seconds = int(pd.Timedelta(frequency).total_seconds())
+    base_seconds = math.gcd(60, step_seconds) or 60
+    interp_out = (df.resample(f'{base_seconds}s').
                         interpolate(
-                            limit = interpolation_limit, 
+                            limit = interpolation_limit * (60 // base_seconds),
                             limit_direction = 'both'
                         ).
                         resample(frequency).
@@ -1215,8 +1279,9 @@ def get_obs_from_timeslices(
         observation_df_T.index, format = "%Y-%m-%d_%H:%M:%S"  # index variable as type datetime
     )
     
-    # specify resampling frequency 
-    frequency = str(int(frequency_secs/60))+"min"    
+    # Seconds, not truncated minutes: truncation puts a dt that is not whole minutes
+    # on the wrong grid, and any dt under 60 s on no grid at all.
+    frequency = f"{int(frequency_secs)}s"
     
     # interpolate and resample frequency
     buffer_df = observation_df_T.resample(frequency).asfreq()

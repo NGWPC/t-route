@@ -540,6 +540,9 @@ class ReservoirRfcParameters(BaseModel):
     """
     Parameters controlling RFC reservoirs DA.
     """
+    # A misspelled key here would otherwise be dropped, taking the policy with it.
+    model_config = ConfigDict(extra='forbid')
+
     reservoir_rfc_forecasts: Literal[True] = True
     """
     If True, RFC reservoirs will perform data assimilation.
@@ -558,9 +561,18 @@ class ReservoirRfcParameters(BaseModel):
     Offset hours forward in time from simulation time to look for files. 
     This helps find the most recent RFC timeseries files for operational NWM use.
     """
-    reservoir_rfc_forecast_persist_days: int = 11
+    # int32 seconds reach the kernel, so the horizon cannot exceed 2**31-1 s.
+    reservoir_rfc_forecast_persist_days: Annotated[int, Field(ge=0, le=24855)] = 11
     """
     Days to persist an observation when no new, good observations can be found.
+    """
+    reservoir_rfc_forecasts_unavailable_action: Literal['error', 'level_pool'] = 'error'
+    """
+    What to do when a forecast a reservoir needs is missing or does not cover the run.
+    'error' ends the run naming the reason, on the grounds that enabling RFC DA asserts
+    the forecasts are provisioned. 'level_pool' runs that reservoir as level pool and
+    warns, which is what an operational cycle wants: one late gage should not break a
+    chain of runs.
     """
 
 
