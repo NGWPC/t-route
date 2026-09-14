@@ -1,8 +1,10 @@
 from pathlib import Path
 
 import geopandas as gpd
+import numpy as np
 import pandas as pd
 import pytest
+import xarray as xr
 
 from ..utils.integration_helpers import (
 
@@ -132,24 +134,52 @@ CFG_NO_DIVERSION = Config(
         timeslice_lookback_hours=48,
     ),
 )
-CFG_HISTORICAL = Config(
+# The diversion gage's record is cut here while the forcing and the other gage
+# run on: the shape of a forecast at a gage whose feed has stopped.
+OBS_CUT = "2011-05-31 00:00"
+CFG_PERSIST = Config(
     DATA_DIR,
     START_TIME,
     END_TIME_WITH_RUNOUT,
     restart_dir_name="restart",
-    config_file_name="config_historical.yaml",
-    output_dir_name="output_historical",
+    config_file_name="config_persist.yaml",
+    output_dir_name="output_persist",
     data_assimilation_parameters=DataAssimilationParameters(
-        # Same observation archive as CFG_NO_DIVERSION, which has the diversion
-        # gage removed. Every other gage is still nudged, so the run is a real
-        # forecast-mode shape and CFG_NO_DIVERSION is a matched control: the only
-        # difference between the two is the diversion itself.
-        usgs_timeslices_folder="usgs_da_no_diversion",
+        usgs_timeslices_folder="usgs_da_persist",
         streamflow_nudging=True,
         timeslice_lookback_hours=48,
-        persist_historical_median=True,
-        diversion_gage_crosswalk={1270479816524705: "07381482"}
+        diversion_gage_crosswalk={1270479816524705: "07381482"},
+        # The cut period is 30 days; the default horizon (11 days, as for RFC) would
+        # expire inside it, so this case sets one that outlasts it.
+        diversion_persist_days=45,
     ),
+)
+# The same demonstration with streamflow nudging off: the diversion reads its own
+# gage and nothing else assimilates, the shape of the run once nudging is removed.
+# Its control has no DA at all, so the two differ by the transfer alone.
+CFG_PERSIST_NO_NUDGING = Config(
+    DATA_DIR,
+    START_TIME,
+    END_TIME_WITH_RUNOUT,
+    restart_dir_name="restart",
+    config_file_name="config_persist_no_nudging.yaml",
+    output_dir_name="output_persist_no_nudging",
+    data_assimilation_parameters=DataAssimilationParameters(
+        usgs_timeslices_folder="usgs_da_persist",
+        streamflow_nudging=False,
+        timeslice_lookback_hours=48,
+        diversion_gage_crosswalk={1270479816524705: "07381482"},
+        diversion_persist_days=45,
+    ),
+)
+CFG_CONTROL_NO_NUDGING = Config(
+    DATA_DIR,
+    START_TIME,
+    END_TIME_WITH_RUNOUT,
+    restart_dir_name="restart",
+    config_file_name="config_control_no_nudging.yaml",
+    output_dir_name="output_control_no_nudging",
+    data_assimilation_parameters=DataAssimilationParameters(streamflow_nudging=False),
 )
 
 GAGES_PATCH = {
@@ -172,8 +202,12 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
         CFG_DIVERSION.write_yaml()
     if refresh or not CFG_NO_DIVERSION.config_path.exists():
         CFG_NO_DIVERSION.write_yaml()
-    if refresh or not CFG_HISTORICAL.config_path.exists():
-        CFG_HISTORICAL.write_yaml()
+    if refresh or not CFG_PERSIST.config_path.exists():
+        CFG_PERSIST.write_yaml()
+    if refresh or not CFG_PERSIST_NO_NUDGING.config_path.exists():
+        CFG_PERSIST_NO_NUDGING.write_yaml()
+    if refresh or not CFG_CONTROL_NO_NUDGING.config_path.exists():
+        CFG_CONTROL_NO_NUDGING.write_yaml()
 
     if refresh or not CFG_DIVERSION.domain_path.exists():
         offnetwork_upstreams = get_offnetwork_upstreams(source_gpkg, FP_IDS)
@@ -239,10 +273,27 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
             dv_only=True
         )
 
+    if CFG_PERSIST.usgs_timeslices_dir is not None and (
+        refresh or not has_files(CFG_PERSIST.usgs_timeslices_dir, "*.usgsTimeSlice.ncdf")
+    ):
+        lookback_hours = CFG_PERSIST.data_assimilation_parameters.timeslice_lookback_hours or 0
+        da_start = (pd.Timestamp(START_TIME) - pd.Timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
+        write_usgs_timeslices(
+            station_ids=["07381482", "07289000"],
+            start_time=da_start,
+            end_time=END_TIME_WITH_RUNOUT,
+            output_dir=CFG_PERSIST.usgs_timeslices_dir,
+            dv_only=True,
+            end_time_by_station={"07381482": OBS_CUT},
+        )
+
 # Gages bracketing the control structure, with the routing link each resolves to.
 # Taken from the diagnostics behind the Old River report (its Figure 7).
 MISSISSIPPI_BATON_ROUGE = ("07374000", 1269974759984431)  # downstream of the diversion
 ATCHAFALAYA_SIMMESPORT = ("07381490", 1269985531956909)  # receives the diverted water
+DONOR_FP = 1270479816524705  # Mississippi flowpath the diversion is taken from
+RECEIVING_HEADWATER_FP = 1270478544606477  # where 07381482 sits, per GAGES_PATCH
+MISSISSIPPI_VICKSBURG = ("07289000", 1271020831654835)  # upstream of the structure
 
 # Inputs are generated out of band by ``python -m test.nhf.prep_tests``, which calls
 # the module-level ``setup`` above. The fixtures below only gate on that data being
@@ -259,11 +310,43 @@ def no_diversion_case(built_case):
     return built_case(CFG_NO_DIVERSION)
 
 @pytest.fixture
-def historical_case(built_case):
-    """Forecast-mode shape: the diversion gage has no observation, so climatology
-    supplies it. Every other gage is still nudged, exactly as in no_diversion_case,
-    which is therefore the matched control."""
-    return built_case(CFG_HISTORICAL)
+def persist_case(built_case):
+    """Forecast shape: the diversion record is cut at OBS_CUT, the forcing and the
+    upstream gage run on, and the last observation is held. no_diversion_case is
+    the matched control."""
+    return built_case(CFG_PERSIST)
+
+@pytest.fixture
+def persist_no_nudging_case(built_case):
+    """persist_case with streamflow nudging off; control_no_nudging_case is its control."""
+    return built_case(CFG_PERSIST_NO_NUDGING)
+
+@pytest.fixture
+def control_no_nudging_case(built_case):
+    """No DA at all: the control for the nudging-off demonstration."""
+    return built_case(CFG_CONTROL_NO_NUDGING)
+
+def _timeslice_series(timeslice_dir: Path, site_no: str) -> pd.Series:
+    """The gage's discharge on the hour, read back from the timeslice files."""
+    values = {}
+    for path in sorted(timeslice_dir.glob("*_??:00:00.15min.usgsTimeSlice.ncdf")):
+        with xr.open_dataset(path) as ds:
+            ids = [s.decode().strip() if isinstance(s, bytes) else str(s).strip()
+                   for s in ds["stationId"].to_numpy()]
+            if site_no not in ids:
+                continue
+            i = ids.index(site_no)
+            stamp = ds["time"].to_numpy()[i]
+            stamp = stamp.decode() if isinstance(stamp, bytes) else str(stamp)
+            values[pd.Timestamp(stamp.replace("_", " "))] = float(ds["discharge"].to_numpy()[i])
+    return pd.Series(values).sort_index()
+
+def _flow_at(output_dir: Path, fp_id: int) -> pd.Series:
+    ds = load_output(output_dir)
+    try:
+        return ds["flow"].sel(feature_id=fp_id).to_series()
+    finally:
+        ds.close()
 
 def _peak_at(output_dir: Path, fp_id: int) -> float:
     """Peak simulated discharge at a routing link over the run."""
@@ -304,25 +387,57 @@ def test_diversion_moves_water_from_mississippi_to_atchafalaya(
     )
 
 @pytest.mark.integration
-def test_historical_median_diverts_without_timeslices(
-    historical_case, no_diversion_case
-):
-    """Forecast mode: climatology alone still moves water.
+@pytest.mark.parametrize(
+    ("persist", "control"),
+    [("persist_case", "no_diversion_case"),
+     ("persist_no_nudging_case", "control_no_nudging_case")],
+    ids=["nudging", "no_nudging"],
+)
+def test_persistence_holds_the_last_observation(persist, control, request):
+    """Miscellaneous step 13 with the record ending mid-run, with and without nudging.
 
-    persist_historical_median populates the diversion gage's row when no
-    observation exists, so the transfer keeps working past the end of the
-    observation record. This is the mode a forecast actually runs in.
+    13.1 over the observed period: the receiving headwater carries the gage record
+    and the donor gives up the same amount. 13.2 over the cut period: the last
+    specified value persists at both nodes instead of transitioning back to the
+    simulated flow, with no step at the cut, and nothing changes upstream.
+
+    Without the hold the diverted amount drops to zero within an hour of the cut and
+    the receiving headwater drains within a few hours; with it both nodes stay on the
+    last value.
     """
+    persist_case = request.getfixturevalue(persist)
+    no_diversion_case = request.getfixturevalue(control)
     run_troute(no_diversion_case.config_path)
-    _, ms_link = MISSISSIPPI_BATON_ROUGE
-    ms_without = _peak_at(no_diversion_case.output_dir, ms_link)
+    run_troute(persist_case.config_path)
+    obs = _timeslice_series(persist_case.usgs_timeslices_dir, "07381482")
+    cut = pd.Timestamp(OBS_CUT)
+    last = float(obs[:cut].dropna().iloc[-1])
 
-    run_troute(historical_case.config_path)
-    ms_with = _peak_at(historical_case.output_dir, ms_link)
+    head = _flow_at(persist_case.output_dir, RECEIVING_HEADWATER_FP)
+    diverted = (_flow_at(no_diversion_case.output_dir, DONOR_FP)
+                - _flow_at(persist_case.output_dir, DONOR_FP))
+    index = head.index
+    observed = (index > pd.Timestamp(START_TIME) + pd.Timedelta(hours=24)) & (index <= cut)
+    held = (index > cut) & (index <= pd.Timestamp(END_TIME))
+    # The intervals must exist, or the equalities below hold on nothing.
+    assert observed.sum() >= 24 * 30 and held.sum() >= 24 * 29, (observed.sum(), held.sum())
 
-    assert ms_with < ms_without, (
-        "climatological diversion should still reduce the Mississippi peak "
-        f"({ms_with:.1f} vs {ms_without:.1f} cms)"
+    # 13.1: assimilated as an addition at the receiving node and a subtraction at
+    # the donor, every written hour, once the cold start has settled.
+    np.testing.assert_allclose(head[observed], obs.reindex(index)[observed], rtol=0.01)
+    np.testing.assert_allclose(diverted[observed], obs.reindex(index)[observed], rtol=0.03)
+    # 13.2: the last specified value persists at both nodes.
+    np.testing.assert_allclose(head[held], last, rtol=0.01)
+    np.testing.assert_allclose(diverted[held], last, rtol=0.03)
+    # No step at the cut.
+    after, before = cut + pd.Timedelta(hours=1), cut - pd.Timedelta(hours=1)
+    step = abs(float(diverted[after]) - float(diverted[before]))
+    assert step < 0.02 * last, f"diverted amount stepped by {step:.0f} cms at the cut"
+    # Elsewhere unchanged: the upstream gage's flow is the control's.
+    _, vicksburg = MISSISSIPPI_VICKSBURG
+    np.testing.assert_allclose(
+        _flow_at(persist_case.output_dir, vicksburg),
+        _flow_at(no_diversion_case.output_dir, vicksburg), rtol=1e-6,
     )
 
 # Regenerate the diagnostics behind the report with:
