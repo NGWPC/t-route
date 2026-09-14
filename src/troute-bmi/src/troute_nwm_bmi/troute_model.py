@@ -344,22 +344,24 @@ class Model:
             # below (nwm_route gets the local binding, so injecting later leaves the
             # kernel on the previous window's frame). The injected gage set is fixed,
             # keeping the cached execution plan valid across runs.
+            usgs_df = self._data_assimilation.usgs_df
             if self._scaling_da is not None:
                 from nwm_routing.scaling_da_apply import merge_injected_obs
 
                 # One list spanning this update: t0 advances every update_until
                 # call, and a per-window list would tie the observations to
-                # max_loop_size.
-                self._data_assimilation._usgs_df = merge_injected_obs(  # pyright: ignore[reportPrivateUsage]
+                # max_loop_size. Merged into the local, never back onto the DA
+                # object: the merge reindexes surviving rows onto this window's
+                # columns, and nothing rebuilds the run-spanning rows between windows.
+                usgs_df = merge_injected_obs(
                     self._scaling_da.build_usgs_df(
                         run["t0"], self.dt, run["nts"], scaling_da_run
                     ),
-                    self._data_assimilation.usgs_df,
+                    usgs_df,
                     # The diversion owns its gage's row: the held values it filled in.
                     protected=(getattr(self._network, "diversion_da", {}) or {}).values(),
                 )
 
-            usgs_df = self._data_assimilation.usgs_df
             if not usgs_df.empty:
                 # Trims run-spanning nudging/diversion frames; no-op for the
                 # injected frame, whose columns already start at t0.
