@@ -974,6 +974,7 @@ def _prep_da_dataframes(
     lastobs_df,
     param_df_sub_idx,
     exclude_segments=None,
+    include_segments=(),
     ):
     """
     Produce, based on the segments in the param_df_sub_idx (which is a subset
@@ -1017,7 +1018,14 @@ def _prep_da_dataframes(
                         intersection(subnet_segs).
                         to_list()
                        )
-        lastobs_df_sub = lastobs_df.loc[lastobs_segs]
+        # A diversion gage is on the roster whenever it has observations: its row
+        # is what moves the water, and a lastobs file that predates the diversion
+        # does not carry it.
+        lastobs_segs += [
+            seg for seg in include_segments
+            if seg in usgs_df.index and seg in subnet_segs and seg not in lastobs_segs
+        ]
+        lastobs_df_sub = lastobs_df.reindex(lastobs_segs)
         usgs_segs = (usgs_df.index.
                      intersection(subnet_segs).
                      reindex(lastobs_segs)[0].
@@ -1822,6 +1830,7 @@ def build_compute_package(
     usgs_df_sub, lastobs_df_sub, da_positions_list_byseg = _prep_da_dataframes(
         assimilation_data.usgs_df, assimilation_data.lastobs_df, job.river_reaches,
         exclude_segments=job.offnetwork_upstreams,
+        include_segments=tuple(config.diversion_da.values()),
     )
     da_positions_list_byreach, da_positions_list_bygage = _prep_da_positions_byreach(
         job.routing_paths, lastobs_df_sub.index

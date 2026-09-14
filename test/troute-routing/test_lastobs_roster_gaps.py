@@ -29,6 +29,19 @@ def test_a_gage_with_no_observation_this_window_does_not_raise() -> None:
     assert out is not None
 
 
+def test_a_diversion_gage_joins_the_roster_without_a_lastobs_row() -> None:
+    """A lastobs file that predates the diversion must not silence its gage."""
+    usgs, lastobs = _frames()
+    lastobs = lastobs.drop(index=70)
+    usgs_sub, lastobs_sub, positions = _prep_da_dataframes(
+        usgs, lastobs, pd.Index([30, 70]), include_segments=(70,)
+    )
+    assert list(lastobs_sub.index) == [30, 70]
+    assert lastobs_sub.loc[70].isna().all()
+    assert not usgs_sub.loc[70].isna().any()
+    assert list(positions) == [0, 1]
+
+
 def test_the_unreported_gage_keeps_a_row_of_missing_observations() -> None:
     usgs, lastobs = _frames()
     usgs_df_sub = _prep_da_dataframes(usgs, lastobs, pd.Index([30, 70]))[0]
