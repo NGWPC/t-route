@@ -107,6 +107,15 @@ def _flow(results: object, link: int, nts: int) -> NDArray[np.float64]:
     raise KeyError(f"the kernel did not return link {link}")
 
 
+def _nudge(results: object, link: int) -> NDArray[np.float64]:
+    """The kernel's nudge at a gage link, one column per routing step from t0."""
+    for r in results:  # type: ignore[attr-defined]
+        gages = list(np.asarray(r[3][0]))
+        if link in gages:
+            return np.asarray(r[9])[gages.index(link)].astype(float)
+    raise KeyError(f"the kernel returned no nudge for link {link}")
+
+
 def _carry_q0(results: object) -> pd.DataFrame:
     return pd.concat([
         pd.DataFrame(np.asarray(r[1])[:, [-4, -4, -2, -1]], index=r[0],
@@ -147,11 +156,16 @@ def test_steady_diversion_removes_exactly_the_observed_amount(qlat_add_loc: str)
 
 @pytest.mark.parametrize("qlat_add_loc", ["middle", "bottom"])
 def test_one_step_subtraction_leaves_no_tail(qlat_add_loc: str) -> None:
-    """A subtraction at one step must not echo into later steps.
+    """A subtraction at one step must not echo into later steps, on either side.
 
     If the subtracted outflow were the routing state, a single-step diversion would
     leave a geometric tail (C3, C3 squared, ...) in the donor's flow. With the state
     restored the donor returns to the inflow at the very next step.
+
+    The receiving gage stops with it: no nudge after the observation, so what is left
+    is the channel draining the water it was handed (the observation is the node's
+    stored outflow, which Muskingum-Cunge carries through C3, here 0.95 a step). A
+    decaying nudge would hold it near the observation for hours instead.
     """
     hours = 120
     nts = hours * _QTS
@@ -174,9 +188,18 @@ def test_one_step_subtraction_leaves_no_tail(qlat_add_loc: str) -> None:
         diversion_da={_DONOR: _GAGE}, gage_segments={_GAGE},
     )
     donor = _flow(results, _DONOR, nts)
+    receiver = _flow(results, _GAGE, nts)
     # Returned row j is routing step j + 1, so the pulse lands on row pulse_step - 1.
     assert np.isclose(donor[pulse_step - 1], _INFLOW - _DIVERTED, atol=1.0)
     np.testing.assert_allclose(donor[pulse_step:pulse_step + 4], _INFLOW, atol=1.0)
+    assert np.isclose(receiver[pulse_step - 1], _DIVERTED, atol=1.0)
+    nudge = _nudge(results, _GAGE)
+    assert np.isclose(nudge[pulse_step], _DIVERTED, atol=1.0)
+    np.testing.assert_array_equal(nudge[pulse_step + 1:pulse_step + 24], 0.0)
+    tail = receiver[pulse_step - 1:pulse_step + 23]
+    assert np.all(np.diff(tail) < 0), "the receiver is being held up after the observation"
+    assert tail[12] < 70, tail[12]
+    assert tail[18] < 10, tail[18]
 
 
 @pytest.mark.parametrize("qlat_add_loc", ["middle", "bottom"])
