@@ -432,6 +432,7 @@ class Model:
                 # diversion is silently disabled under BMI, which is the path ngen
                 # drives. NHF only: other network types do not resolve this map.
                 diversion_da=getattr(self._network, "diversion_da", {}) or {},
+                diversion_applied=self._data_assimilation.diversion_applied,
                 # Same static split points as the -V5 driver: the plan is cached
                 # across updates, so it must not depend on this window's data. Same
                 # helper as the -V5 driver so both plans split at an identical set.
@@ -572,6 +573,7 @@ class Model:
             "t0": self._network._t0,
             # updated data stored on DataAssimilation
             "last_obs": self._data_assimilation._last_obs_df,
+            "diversion_applied": dict(self._data_assimilation.diversion_applied),
             "usgs": self._data_assimilation._reservoir_usgs_param_df,
             "usace": self._data_assimilation._reservoir_usace_param_df,
             # USBR persistence state is updated every window alongside USGS and
@@ -827,6 +829,7 @@ class Model:
         self._seeded_q0 = seeded
         self._network._t0 = data["t0"]
         da._last_obs_df = self._compatible_lastobs(resolved["last_obs"])
+        da._diversion_applied = data.get("diversion_applied") or {}
         da._reservoir_usgs_param_df = resolved["usgs"]
         da._reservoir_usace_param_df = resolved["usace"]
         if "usbr" in resolved:

@@ -163,6 +163,7 @@ class ComputeConfig:
     subnetwork_target_size: int
     backend: Literal["loky", "threading", "multiprocessing"] = "loky"
     diversion_da: dict[ReachId, int] = field(default_factory=dict)
+    diversion_applied: dict[ReachId, float] = field(default_factory=dict)
 
     def __post_init__(self):
         # Control serial execution by forcing single worker instead of a code change.
@@ -552,6 +553,7 @@ class ComputeInputs:
     from_files: bool = True
     qlat_add_loc: int = 1
     diversion_da: dict = field(default_factory=dict)
+    diversion_applied: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -1670,12 +1672,20 @@ def _resolve_diversion_da(
     diversion_da: dict[ReachId, int],
     river_reaches: np.ndarray,
     usgs_df_sub: pd.DataFrame,
+    exclude_segments=(),
 ) -> dict:
-    """Translate a global diversion map (fp_ids) to kernel-ready indices for one job."""
+    """Translate a global diversion map (fp_ids) to kernel-ready indices for one job.
+
+    A donor the job holds only as an off-network upstream is not routed here, so
+    the job neither subtracts from it nor reports its state; the job that routes it
+    does both.
+    """
     if not diversion_da:
         return {}
     kernel_map: dict[int, int] = {}
     for ms_id, gage_seg_id in diversion_da.items():
+        if ms_id in exclude_segments:
+            continue
         # Binary-search for the Mississippi segment in this job's sorted index.
         pos = int(np.searchsorted(river_reaches, ms_id))
         if pos >= len(river_reaches) or river_reaches[pos] != ms_id:
@@ -1695,6 +1705,20 @@ def _resolve_diversion_da(
         gage_i = int(usgs_df_sub.index.get_loc(gage_seg_id))
         kernel_map[pos] = gage_i
     return kernel_map
+
+
+def _resolve_diversion_applied(
+    diversion_applied: dict[ReachId, float],
+    kernel_map: dict[int, int],
+    river_reaches: np.ndarray,
+) -> dict[int, float]:
+    """The carried subtraction per kernel gage index, for the donors in this job."""
+    if not diversion_applied or not kernel_map:
+        return {}
+    return {
+        gage_i: float(diversion_applied[river_reaches[pos]])
+        for pos, gage_i in kernel_map.items() if river_reaches[pos] in diversion_applied
+    }
 
 
 def _align_eloss_columns(eloss_sub: pd.DataFrame, qlat_columns: pd.Index) -> pd.DataFrame:
@@ -1850,6 +1874,10 @@ def build_compute_package(
         config.t0,
     )
 
+    kernel_map = _resolve_diversion_da(
+        config.diversion_da, job.river_reaches, usgs_df_sub,
+        exclude_segments=job.offnetwork_upstreams,
+    )
     return ComputeInputs(
         nsteps=config.nts,
         dt=config.dt,
@@ -1955,7 +1983,10 @@ def build_compute_package(
         return_courant=config.return_courant,
         from_files=config.from_files,
         qlat_add_loc=config.qlat_add_loc_c,
-        diversion_da=_resolve_diversion_da(config.diversion_da, job.river_reaches, usgs_df_sub),
+        diversion_da=kernel_map,
+        diversion_applied=_resolve_diversion_applied(
+            config.diversion_applied, kernel_map, job.river_reaches
+        ),
     )
 
 
@@ -2066,6 +2097,7 @@ def compute_nhd_routing_v02(
     qlat_add_loc: Literal["top", "middle", "bottom"] = "middle",
     diversion_da: dict[ReachId, int] | None = None,
     gage_segments: set | None = None,
+    diversion_applied: dict[ReachId, float] | None = None,
 ) -> tuple[RoutingResultsCollection, ExecutionPlan]:
     """Build typed routing objects from legacy flat arguments and delegate to compute_routing."""
     if flowveldepth_interorder:
@@ -2098,6 +2130,7 @@ def compute_nhd_routing_v02(
         compute_func_name=compute_func_name,
         subnetwork_target_size=subnetwork_target_size,
         diversion_da=diversion_da or {},
+        diversion_applied=diversion_applied or {},
     )
     topology = NetworkTopology(
         connections = connections,
@@ -2448,6 +2481,13 @@ class RoutingResultsCollection(Sequence[Any]):
             [result.nudge for result in self.results]
         )
 
+    def diversion_applied(self) -> dict[int, float]:
+        """The amount each donor gave up at the last step, keyed by donor segment id."""
+        out: dict[int, float] = {}
+        for result in self.results:
+            out.update(zip(result.diversion.ids.tolist(), result.diversion.applied.tolist()))
+        return out
+
     def usgs_position_ids(self):
         return np.concatenate(
             [result.usgs_reservoir.ids for result in self.results]
@@ -2468,6 +2508,7 @@ class RoutingResultsCollection(Sequence[Any]):
             merged.rfc_reservoir = RoutingRfc.merge([r.rfc_reservoir for r in self.results])
             merged.nudge = np.concatenate([r.nudge for r in self.results], axis=0)
             merged.great_lakes = RoutingGreatLakes.merge([r.great_lakes for r in self.results])
+            merged.diversion = RoutingDiversion.merge([r.diversion for r in self.results])
             return merged
         return self.results[0]
 
@@ -2497,6 +2538,8 @@ class RoutingResults(_RoutingResultsParser):
         self.usbr_reservoir = self.usbr_reservoir.align_ids(source.usbr_reservoir)
         self.rfc_reservoir = self.rfc_reservoir.align_ids(source.rfc_reservoir)
         self.great_lakes = self.great_lakes.align_ids(source.great_lakes)
+        # The diversion element is state keyed by donor id, not a series in the
+        # source's order: it is kept as the window produced it.
         return self
 
     def append(self, other: RoutingResults):  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -2511,6 +2554,8 @@ class RoutingResults(_RoutingResultsParser):
         # remove leading timestep from other's nudge
         appended.nudge = self._append(self.nudge, other.nudge[:, 1:])
         appended.great_lakes = self.great_lakes.append(other.great_lakes)
+        # State, not a series: the later window's amount is the current one.
+        appended.diversion = other.diversion
         return appended
 
     @property
@@ -2589,6 +2634,18 @@ class RoutingResults(_RoutingResultsParser):
         self._set_index(value, 9)
 
     @property
+    def diversion(self):
+        # Kernels without the element (the diffusive leg) carry no diversion state.
+        if len(self._raw) > 11:
+            return RoutingDiversion(self._raw[11])
+        return RoutingDiversion((np.array([], dtype=np.intp), np.array([], dtype="float32")))
+    @diversion.setter
+    def diversion(self, value):
+        if len(self._raw) <= 11:
+            self._raw = list(self._raw) + [None] * (12 - len(self._raw))
+        self._set_index(list(value), 11)
+
+    @property
     def great_lakes(self):
         return RoutingGreatLakes(self._raw[10])
     @great_lakes.setter
@@ -2604,6 +2661,12 @@ class RoutingLastObs(_RoutingResultsParser):
     @property
     def values(self) -> Float32Array:
         return self._raw[2]
+
+
+class RoutingDiversion(_RoutingResultsParser):
+    @property
+    def applied(self) -> Float32Array:
+        return self._raw[1]
 
 
 class RoutingReservoir(_RoutingResultsParser):

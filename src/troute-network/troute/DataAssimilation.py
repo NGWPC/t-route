@@ -57,6 +57,7 @@ class AbstractDA(ABC):
     'multiple-inheritance' error.
     """
     __slots__ = ["_usgs_df", "_usbr_df", "_last_obs_df", "_da_parameter_dict",
+                 "_diversion_applied",
                  "_reservoir_usgs_df", "_reservoir_usgs_param_df", 
                  "_reservoir_usace_df", "_reservoir_usace_param_df",
                  "_reservoir_usbr_df", "_reservoir_usbr_param_df", 
@@ -244,6 +245,7 @@ class NudgingDA(AbstractDA):
                     self._canada_df = _create_canada_df(data_assimilation_parameters, streamflow_da_parameters, run_parameters, network, da_run)
                     self._canada_is_created = True
 
+        self._diversion_applied = {}
         # Fill diversion gage rows with historical monthly medians where real observations are absent.
         # Real observations always take priority; this only fills NaN gaps (or creates the row if missing).
         diversion_da_parameters = data_assimilation_parameters.get('diversion_da', {}) or {}
@@ -290,6 +292,17 @@ class NudgingDA(AbstractDA):
                 or streamflow_da_parameters.get('streamflow_scaling', False)
             ):
                 self._last_obs_df = new_lastobs(run_results, time_increment)
+        if (self._data_assimilation_parameters.get('diversion_da') or {}).get('diversion_gage_crosswalk'):
+            # The amount each donor gave up at the last step, restored into qdp at
+            # the next window's first step: exact through a clamp or a missing
+            # boundary observation.
+            self._diversion_applied = new_diversion_applied(run_results)
+
+    @property
+    def diversion_applied(self) -> dict:
+        """Donor segment id -> the subtraction applied at the last routed step."""
+        return getattr(self, "_diversion_applied", {}) or {}
+
 
     def update_for_next_loop(self, network, da_run,):
         '''
@@ -1950,6 +1963,15 @@ def new_lastobs(run_results, time_increment):
     df["time_since_lastobs"] = df["time_since_lastobs"] - time_increment
 
     return df
+
+def new_diversion_applied(run_results) -> dict[int, float]:
+    """Donor segment id -> the amount removed at the last step, from the kernel results."""
+    out: dict[int, float] = {}
+    for rr in run_results:
+        if len(rr) > 11 and len(rr[11][0]) > 0:
+            out.update(zip(np.asarray(rr[11][0]).tolist(), np.asarray(rr[11][1]).tolist()))
+    return out
+
 
 def read_reservoir_parameter_file(
     reservoir_parameter_file, 

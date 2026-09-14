@@ -60,6 +60,7 @@ def nwm_route(
     qlat_add_loc: Literal["top", "middle", "bottom"] = "middle",
     diversion_da: dict[int, int] | None = None,
     gage_segments: set | None = None,
+    diversion_applied: dict[int, float] | None = None,
 ):
 
     ################### Main Execution Loop across ordered networks      
@@ -154,6 +155,7 @@ def nwm_route(
         qlat_add_loc=qlat_add_loc,
         diversion_da=diversion_da or {},
         gage_segments=gage_segments,
+        diversion_applied=diversion_applied or {},
     )
     LOG.debug("MC computation complete in %s seconds." % (time.time() - start_time_mc))
     # returns list, first item is run result, second item is subnetwork items
