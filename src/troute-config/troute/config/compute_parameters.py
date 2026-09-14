@@ -586,10 +586,11 @@ class DiversionDA(BaseModel):
     flowpath, measured by a streamgage, as at the Old River Control Structure.
 
     The observed discharge is subtracted from the donor flowpath in the routing
-    kernel. The receiving river gains the same water through ordinary streamflow
-    nudging at the diversion gage, which sits on a headwater flowpath of the
-    receiving system, so ``streamflow_da.streamflow_nudging`` must be enabled for
-    the transfer to conserve mass.
+    kernel. The receiving river gains the same water through the kernel's
+    observation override at the diversion gage, which sits on a headwater flowpath
+    of the receiving system. The gage's record is read from
+    ``usgs_timeslices_folder`` by the diversion itself and held for
+    ``diversion_persist_days`` past its end.
     """
     diversion_gage_crosswalk: Dict[int, str] = {}
     """
@@ -609,18 +610,21 @@ class DiversionDA(BaseModel):
     decomposition, so the condition is reported at WARNING with the volume involved
     rather than enforced. It has not been observed over the available record.
     """
-    persist_historical_median: bool = False
+    diversion_persist_days: Annotated[int, Field(ge=0, le=24855)] = 11
     """
-    Fill gaps in the diversion gage record with hardcoded monthly climatology, so
-    forecast timesteps (which have no observations) still divert. Substituted values
-    are logged; they are climatology, not observations.
-
-    Despite the field name the stored values are monthly MEANS retrieved from NWIS
-    (``_DIVERSION_MONTHLY_MEANS`` in ``troute.DataAssimilation``), and they exist for
-    the Old River gage only. A diversion gage with no entry there is skipped with a
-    warning rather than filled.
+    Days to hold the diversion gage's last observation, unchanged, over routing steps
+    that have no observation of their own, so the transfer keeps running past the end
+    of the record. The same horizon the other DAs use (``reservoir_rfc_forecast_persist_days``,
+    the hybrid reservoir DA's 11-day limit): 0 disables the hold, 24855 never expires it.
+    Requirement 2.2.3.15: "persistence is used in nudging DA rather than exponential
+    decay"; use case 13.2: the final assimilated value "persists instead of transitioning
+    back to the simulated flow". The held value is written into the observation frame,
+    so the receiving node reads it as an observation, and a diversion gage never gets
+    the kernel's decaying nudge. After the horizon both sides stop at once, as the RFC
+    DA hands back to level pool. A run started without a checkpoint finds the last
+    report by scanning ``usgs_timeslices_folder`` back this many days, so the folder
+    must be staged with that much history for the hold to reach it.
     """
-
 
 class ReservoirDA(BaseModel):
     """
@@ -716,24 +720,30 @@ class DataAssimilationParameters(BaseModel):
         The kernel subtracts the observed diversion from the donor flowpath. Nothing
         adds it to the receiving river in code: the gage sits on a headwater of the
         receiving system, so imposing the observed discharge there routes the water
-        down through the existing topology. Either source populates that row,
-        ``streamflow_nudging`` from timeslices or ``persist_historical_median`` from
-        climatology, and both conserve the transfer.
+        down through the existing topology. The record comes from
+        ``usgs_timeslices_folder`` (read by the diversion itself, nudging or not) and
+        is held for ``diversion_persist_days``.
 
-        With neither set the observation frame stays empty, the kernel map resolves
+        Without the folder the observation frame stays empty, the kernel map resolves
         to nothing and the diversion silently does not happen, which is worth saying
         out loud rather than leaving to be discovered in the output.
         """
         diversion = self.diversion_da
         if diversion is None or not diversion.diversion_gage_crosswalk:
             return self
-        nudging = bool(self.streamflow_da and self.streamflow_da.streamflow_nudging)
-        if not nudging and not diversion.persist_historical_median:
+        sites = list(diversion.diversion_gage_crosswalk.values())
+        if len(set(sites)) != len(sites):
+            # Each donor subtracts the gage's full observation and the receiving node
+            # is nudged once, so two donors on one gage remove the transfer twice.
+            raise ValueError(
+                "diversion_da.diversion_gage_crosswalk maps more than one donor "
+                f"flowpath to the same gage ({sites}); each gage may serve one donor."
+            )
+        if not self.usgs_timeslices_folder:
             LOG.warning(
-                "diversion_da.diversion_gage_crosswalk is set but neither "
-                "streamflow_da.streamflow_nudging nor "
-                "diversion_da.persist_historical_median is enabled, so no discharge "
-                "is available at the diversion gage and no flow will be diverted."
+                "diversion_da.diversion_gage_crosswalk is set but usgs_timeslices_folder "
+                "is not, so no discharge is available at the diversion gage and no flow "
+                "will be diverted."
             )
         return self
 

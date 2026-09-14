@@ -120,6 +120,7 @@ def nhf_routing(argv):
         value_dict=None,
         da_run=da_sets[0],
         )
+    data_assimilation.seed_from_record(network)
     
     forcing_end_time = time.time()
 
@@ -249,6 +250,8 @@ def nhf_routing(argv):
                     t0, dt, nts, scaling_da_run
                 ),
                 data_assimilation.usgs_df,
+                # The diversion owns its gage's row: the held values it filled in.
+                protected=(network.diversion_da or {}).values(),
             )
 
         route_start_time = time.time()
@@ -313,6 +316,7 @@ def nhf_routing(argv):
             # flowveldepth_interorder=network.flowveldepth_interorder,
             qlat_add_loc = "bottom",  # All NHF lats go in bottom
             diversion_da=network.diversion_da,
+            diversion_applied=data_assimilation.diversion_applied,
             # Static split points for the cached execution plan: every gage the
             # network carries, not just those with observations this window.
             gage_segments=network_gage_segments(network)

@@ -111,6 +111,38 @@ class TestMergeInjectedObs:
         assert len(out) == 1
         np.testing.assert_allclose(out.loc[100].to_numpy(), [1.0, 2.0, 3.0])
 
+    def test_a_second_window_must_merge_over_the_horizon_frame(self):
+        """The BMI fills its rows once for the whole run and nothing rebuilds them
+        between windows, so Model.run merges into a local. Storing the merge back
+        hands the next window one column of the diversion row."""
+        dt = pd.Timedelta(minutes=5)
+        t0 = pd.Timestamp("2011-05-01")
+        horizon = pd.DataFrame([np.full(49, 9.0)], index=pd.Index([100], name="link"),
+                               columns=pd.date_range(t0, periods=49, freq=dt))
+
+        def window(start):
+            cols = pd.date_range(start, periods=25, freq=dt)
+            return pd.DataFrame([np.full(25, 3.0)], index=pd.Index([200], name="link"),
+                                columns=cols)
+
+        first = merge_injected_obs(window(t0), horizon, protected={100})
+        second = merge_injected_obs(window(t0 + 24 * dt), horizon, protected={100})
+        assert int(second.loc[100].notna().sum()) == 25
+        stored = merge_injected_obs(window(t0 + 24 * dt), first, protected={100})
+        assert int(stored.loc[100].notna().sum()) == 1
+
+    def test_protected_rows_keep_their_existing_values(self, columns):
+        """The diversion owns its gage's row: the held values it
+        filled must survive the scaling injection, which carries only raw
+        observations for the same gage."""
+        injected = pd.DataFrame([[1.0, np.nan, np.nan]], index=pd.Index([100], name="link"),
+                                columns=columns)
+        existing = pd.DataFrame([[9.0, 9.0, 9.0]], index=pd.Index([100], name="link"),
+                                columns=columns)
+        out = merge_injected_obs(injected, existing, protected={100})
+        assert len(out) == 1
+        np.testing.assert_allclose(out.loc[100].to_numpy(), [9.0, 9.0, 9.0])
+
     def test_existing_rows_are_forced_onto_the_injected_column_grid(self, columns):
         """A column union would shift every gage's observations.
 

@@ -484,6 +484,7 @@ def write_usgs_timeslices(
     output_dir: Path | str = Path("usgs_da"),
     discharge_quality: int = 100,
     dv_only: bool = False,
+    end_time_by_station: dict[str, str] | None = None,
 ) -> None:
     """Write 15-min USGS timeslice files using real NWIS observations.
 
@@ -492,6 +493,9 @@ def write_usgs_timeslices(
     Stations with no observations are written as NaN.
     If *dv_only* is True, skip the IV fetch and derive all values from daily
     means interpolated to 15-minute resolution.
+    *end_time_by_station* cuts one station's record short: its values after that
+    time are written as missing while every other station keeps its full record,
+    which is what a forecast looks like at a gage whose feed has stopped.
     """
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -499,6 +503,9 @@ def write_usgs_timeslices(
     discharge_cms, quality_df = _fetch_usgs_observations(
         station_ids, start_time, end_time, dv_only=dv_only
     )
+    for sid, cut in (end_time_by_station or {}).items():
+        cut_utc = pd.Timestamp(cut).tz_localize("UTC")
+        discharge_cms.loc[discharge_cms.index > cut_utc, sid] = np.nan
 
     suffix = DA_SUFFIX["usgs"]
     now_str = _now_utc()

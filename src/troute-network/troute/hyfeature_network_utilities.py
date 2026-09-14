@@ -85,8 +85,11 @@ def build_da_sets(da_params, run_sets, t0):
     # nhd_network_utilities_v02.build_da_sets -- keep both.
     scaling = bool(streamflow_da) and streamflow_da.get('streamflow_scaling', False)
 
+    # The diversion reads its gage from the TimeSlices on its own, nudging or not.
+    diversion = bool((da_params.get('diversion_da') or {}).get('diversion_gage_crosswalk'))
+
     if (not usgs_da and not usace_da and not usbr_da and not GreatLakes_da
-            and not nudging and not scaling):
+            and not nudging and not scaling and not diversion):
         # if all DA capabilities are OFF, return empty dictionary
         da_sets = [{} for _ in run_sets]
     
@@ -130,7 +133,9 @@ def build_da_sets(da_params, run_sets, t0):
             
             # Append an empty dictionary to the loop, which be used to hold
             # lists of USGS and USACE TimeSlice files.
-            da_sets.append({})
+            # The window's length, so the diversion fill can extend its row onto the
+            # routing grid without knowing the run's total.
+            da_sets.append({'nts': set_dict.get('nts')})
 
             # timestamps of TimeSlice files desired for run set i
             timestamps = pd.date_range(
@@ -140,7 +145,7 @@ def build_da_sets(da_params, run_sets, t0):
             )
 
             # identify available USGS TimeSlices in run set i
-            if usgs_timeslices_folder and (nudging or usgs_da or scaling):
+            if usgs_timeslices_folder and (nudging or usgs_da or scaling or diversion):
                 filenames_usgs = (timestamps.strftime('%Y-%m-%d_%H:%M:%S') 
                             + '.15min.usgsTimeSlice.ncdf').to_list()
                 
@@ -280,6 +285,7 @@ def _check_timeslice_exists(filenames, timeslices_folder):
     # and accept any cadence, so an hourly directory is not silently empty.
     filenames_existing = []
     substituted = []
+    missing = []
     for f in filenames:
         J = pathlib.Path(timeslices_folder).joinpath(f)
         if J.is_file():
@@ -289,7 +295,7 @@ def _check_timeslice_exists(filenames, timeslices_folder):
         cadence, _, family = rest.partition(".")
         match = sorted(pathlib.Path(timeslices_folder).glob(f"{stamp}.*.{family}"))
         if not match:
-            LOG.warning("Missing TimeSlice file %s", J)
+            missing.append(f)
             continue
         if len(match) > 1:
             # Two products for one timestamp is not the NWM layout, and picking
@@ -303,6 +309,13 @@ def _check_timeslice_exists(filenames, timeslices_folder):
             substituted.append((cadence, match[0].name.partition(".")[2].partition(".")[0]))
         filenames_existing.append(match[0].name)
 
+    if missing:
+        # One line, not one per file: a forecast window lists every future instant
+        # and none of them exists yet.
+        LOG.warning(
+            "%d of %d TimeSlice files missing in %s (%s to %s)", len(missing),
+            len(filenames), timeslices_folder, missing[0], missing[-1],
+        )
     if substituted:
         # One line, not one per file: a directory written at another cadence
         # substitutes EVERY file, on every window, for every arm. Every DISTINCT

@@ -182,7 +182,7 @@ class TestDaSetsGate:
     """
 
     def _run_sets(self):
-        return [{"final_timestamp": pd.Timestamp("2000-01-01 03:00:00")}]
+        return [{"final_timestamp": pd.Timestamp("2000-01-01 03:00:00"), "nts": 36}]
 
     def test_scaling_da_alone_still_gets_a_file_list(self, builder, obs_dir):
         folder, _, _ = obs_dir
@@ -216,6 +216,45 @@ class TestDaSetsGate:
             pd.Timestamp("2000-01-01"),
         )
         assert not da_sets[0].get("usgs_timeslice_files")
+
+    def test_diversion_alone_gets_a_file_list(self, builder, obs_dir):
+        """The diversion reads its gage from the TimeSlices without nudging."""
+        folder, _, _ = obs_dir
+        da_sets = builder.build_da_sets(
+            {
+                "usgs_timeslices_folder": str(folder),
+                "streamflow_da": {"streamflow_nudging": False, "streamflow_scaling": False},
+                "diversion_da": {"diversion_gage_crosswalk": {1: "01105933"}},
+            },
+            self._run_sets(),
+            pd.Timestamp("2000-01-01"),
+        )
+        assert da_sets[0].get("usgs_timeslice_files"), (
+            "a diversion is configured but no TimeSlice files were enumerated; without "
+            "nudging its gage row would never be read"
+        )
+        # The window's length rides along, so the fill can extend the row onto the
+        # window's grid; without it the fill falls back to the run total.
+        assert da_sets[0]["nts"] == 36
+
+    def test_missing_files_are_reported_once(self, builder, obs_dir, caplog):
+        """A forecast window lists thousands of future instants; one line, not one each."""
+        import logging
+
+        folder, _, _ = obs_dir
+        with caplog.at_level(logging.WARNING):
+            builder.build_da_sets(
+                {
+                    "usgs_timeslices_folder": str(folder),
+                    "streamflow_da": {"streamflow_nudging": False, "streamflow_scaling": False},
+                    "diversion_da": {"diversion_gage_crosswalk": {1: "01105933"}},
+                },
+                [{"final_timestamp": pd.Timestamp("2000-01-02 03:00:00"), "nts": 324}],
+                pd.Timestamp("2000-01-01"),
+            )
+        lines = [r for r in caplog.records if "TimeSlice" in r.getMessage()]
+        assert len(lines) == 1, [r.getMessage() for r in lines]
+        assert "TimeSlice files missing" in lines[0].getMessage()
 
     def test_scaling_and_nudging_get_the_same_window_list(self, builder, obs_dir):
         """The head-to-head comparison this gate exists for.
@@ -331,3 +370,47 @@ def test_span_da_runs_handles_an_absent_list():
     # ...and an ABSENT key stays absent, so the reader keeps its glob fallback rather
     # than silently seeing "no files".
     assert "usgs_timeslice_files" not in span_da_runs([{"other": 1}])
+
+
+class TestDiversionReadsItsOwnGage:
+    """Without nudging the frame has no rows; the diversion must read its gage."""
+
+    def test_missing_row_is_read_from_the_timeslices(self, obs_dir):
+        from troute.DataAssimilation import _read_diversion_observations
+
+        folder, sites, index = obs_dir
+        files = [f"{pd.Timestamp(t).strftime(_FMT)}.15min.usgsTimeSlice.ncdf" for t in index]
+
+        class _Network:
+            t0 = index[0]
+            _diversion_site_to_node = {sites[0]: 101}
+
+        out = _read_diversion_observations(
+            pd.DataFrame(),
+            {"diversion_gage_crosswalk": {7: sites[0]}},
+            {"usgs_timeslices_folder": str(folder)},
+            _Network(),
+            {"dt": 3600, "cpu_pool": 1},
+            {"usgs_timeslice_files": files},
+        )
+        assert 101 in out.index
+        assert out.loc[101].notna().any()
+
+    def test_present_row_is_not_read_again(self, obs_dir):
+        from troute.DataAssimilation import _read_diversion_observations
+
+        folder, sites, index = obs_dir
+        present = pd.DataFrame([[1.0, 2.0]], index=pd.Index([101], dtype="int64"),
+                               columns=index[:2])
+
+        class _Network:
+            t0 = index[0]
+            _diversion_site_to_node = {sites[0]: 101}
+
+        out = _read_diversion_observations(
+            present, {"diversion_gage_crosswalk": {7: sites[0]}},
+            {"usgs_timeslices_folder": str(folder)}, _Network(), {"dt": 3600, "cpu_pool": 1},
+            {"usgs_timeslice_files": ["not-read.ncdf"]},
+        )
+        assert out is present
+

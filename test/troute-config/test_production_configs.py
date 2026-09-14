@@ -49,6 +49,8 @@ def _redirect(cfg: dict, tmp: Path) -> dict:
     rfc["reservoir_rfc_forecasts_time_series_path"] = str(
         root / rfc["reservoir_rfc_forecasts_time_series_path"]
     )
+    da = cfg["compute_parameters"]["data_assimilation_parameters"]
+    da["usgs_timeslices_folder"] = str(root / da["usgs_timeslices_folder"])
     cfg["compute_parameters"]["forcing_parameters"]["qlat_input_folder"] = str(tmp)
     out = cfg["output_parameters"]
     out["lakeout_output"] = str(tmp)
@@ -180,6 +182,45 @@ def test_the_medium_range_run_outlives_a_stale_issue():
     left = (_deadline(cfg, lookback, t0) - t0).total_seconds() / 3600
     assert left < _run_hours(cfg)
     assert _run_hours(cfg) - left == pytest.approx(3)
+
+
+@pytest.mark.parametrize("path", _CONFIGS, ids=_IDS)
+def test_the_old_river_diversion_outlasts_the_range(path):
+    """Every range diverts at the Old River Control Structure, and the hold covers
+    the whole range, so a record that ends at issue time persists to the last hour."""
+    cfg = _load(path)
+    da = cfg["compute_parameters"]["data_assimilation_parameters"]
+    assert da["usgs_timeslices_folder"], "the diversion reads its gage from the TimeSlices"
+    diversion = da["diversion_da"]
+    assert diversion["diversion_gage_crosswalk"] == {1270479816524705: "07381482"}
+    # The last report can be as old at t0 as the RFC window allows (28 h) and the hold
+    # must still reach the last hour, so the horizon covers the range plus that age.
+    assert diversion["diversion_persist_days"] * 24 >= _run_hours(cfg) + 28, (
+        f"{path.stem}: the hold expires inside the range"
+    )
+
+
+@pytest.mark.parametrize("path", _CONFIGS, ids=_IDS)
+def test_a_day_old_report_is_held_to_the_last_hour_of_the_range(path):
+    """The fill on the range's own grid: a report 28 h before t0 holds through nts."""
+    import numpy as np
+    from troute.DataAssimilation import _fill_diversion_row
+
+    cfg = _load(path)
+    fp = cfg["compute_parameters"]["forcing_parameters"]
+    da = cfg["compute_parameters"]["data_assimilation_parameters"]
+    t0 = pd.Timestamp(cfg["compute_parameters"]["restart_parameters"]["start_datetime"])
+
+    class _Network:
+        _diversion_site_to_node = {"07381482": 1}
+
+    _Network.t0 = t0
+    seed = {1: (t0 - timedelta(hours=28), 14484.0)}
+    out, _ = _fill_diversion_row(pd.DataFrame(), da["diversion_da"], _Network,
+                                 {"dt": fp["dt"]}, seed_in=seed, nts=fp["nts"])
+    row = out.loc[1].to_numpy()
+    assert row.shape[0] == fp["nts"] + 1
+    np.testing.assert_array_equal(row, 14484.0)
 
 
 def test_the_run_lengths_are_the_nwm_configurations():

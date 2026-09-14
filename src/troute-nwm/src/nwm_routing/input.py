@@ -590,14 +590,15 @@ def check_inputs(
             LOG.debug(
                 'diversion_da configured with %d diversion(s).', len(crosswalk)
             )
-        persist_historical_median = diversion_da.get('persist_historical_median', False)
-        if not isinstance(persist_historical_median, bool):
+        diversion_persist_days = diversion_da.get('diversion_persist_days', 11)
+        if (isinstance(diversion_persist_days, bool) or not isinstance(diversion_persist_days, int)
+                or diversion_persist_days < 0):
             LOG.error(
-                'persist_historical_median must be a boolean (true/false), but got %s.',
-                type(persist_historical_median).__name__
+                'diversion_persist_days must be a non-negative integer, but got %r.',
+                diversion_persist_days
             )
             quit()
-        LOG.debug('persist_historical_median = %s', persist_historical_median)
+        LOG.debug('diversion_persist_days = %s', diversion_persist_days)
     else:
         LOG.debug('No diversion_da parameters provided. No flow diversions will be applied.')
 
