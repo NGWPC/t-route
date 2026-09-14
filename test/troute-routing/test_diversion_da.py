@@ -29,8 +29,9 @@ from troute import nhd_network
 from troute.DataAssimilation import (
     _DIVERSION_MONTHLY_MEANS,
     _fill_diversion_historical_median,
+    new_diversion_applied,
 )
-from troute.routing.compute import _resolve_diversion_da
+from troute.routing.compute import RoutingResultsCollection, _resolve_diversion_da
 
 DIVERSION_GAGE = "07381482"  # Old River Outflow Channel
 DONOR_FP_ID = 1270479816524705  # Mississippi link at the control structure
@@ -589,3 +590,48 @@ class TestDiffusiveNudgingGate:
             "diffusive_usgs_df = _align_obs_to_model_steps(usgs_df, t0, dt, nts)"
             in compute_src
         )
+
+
+def _kernel_result(ids, donors=(), applied=(), nts=2, with_diversion=True):
+    """A kernel result tuple with empty DA elements and, optionally, element 11."""
+    ids = np.asarray(ids, dtype=np.intp)
+    n = len(ids)
+    fl, ip = np.array([], dtype="float32"), np.array([], dtype=np.intp)
+    r = [
+        ids, np.zeros((n, nts * 4), dtype="float32"), 0,
+        (ip, fl, fl), (ip, fl, fl, fl, fl), (ip, fl, fl, fl, fl), (ip, fl, fl, fl, fl),
+        np.zeros((n, nts), dtype="float32"), (ip, fl, ip),
+        np.zeros((0, nts + 1), dtype="float32"), (ip, fl, ip, ip),
+    ]
+    if with_diversion:
+        r.append((np.asarray(donors, dtype=np.intp), np.asarray(applied, dtype="float32")))
+    return tuple(r)
+
+
+class TestDiversionStateInResults:
+    """The applied amount rides the results as state keyed by donor, not as a series."""
+
+    def test_harvest_keys_the_amount_by_donor_across_jobs(self):
+        raw = [_kernel_result([20, 30], donors=[20], applied=[100.0]),
+               _kernel_result([21], donors=[21], applied=[7.5])]
+        assert RoutingResultsCollection(raw).diversion_applied() == {20: 100.0, 21: 7.5}
+        assert new_diversion_applied(raw) == {20: 100.0, 21: 7.5}
+
+    def test_a_result_without_the_element_carries_no_state(self):
+        """The diffusive leg and the non-routing segments return eleven elements."""
+        raw = [_kernel_result([20], with_diversion=False),
+               _kernel_result([21], donors=[21], applied=[7.5])]
+        assert RoutingResultsCollection(raw).diversion_applied() == {21: 7.5}
+        assert new_diversion_applied(raw) == {21: 7.5}
+
+    @pytest.mark.parametrize(("earlier", "later"), [
+        ([], [20]), ([10], [10, 20]), ([10, 20], [20]),
+    ])
+    def test_appending_windows_keeps_the_later_windows_pairs(self, earlier, later):
+        """Concatenating windows must not align the state to the earlier donor set."""
+        a = RoutingResultsCollection([_kernel_result([10, 20, 40], donors=earlier,
+                                                     applied=[1.0] * len(earlier))])
+        b = RoutingResultsCollection([_kernel_result([10, 20, 40], donors=later,
+                                                     applied=[5.0] * len(later))])
+        assert a.append_timesteps(b).diversion_applied() == {d: 5.0 for d in later}
+

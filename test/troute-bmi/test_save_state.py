@@ -16,6 +16,7 @@ import pickle
 
 import pandas as pd
 import pytest
+from troute.DataAssimilation import NudgingDA
 from troute_nwm_bmi.troute_model import Model
 
 
@@ -41,6 +42,9 @@ class _DataAssimilationStub:
         self._reservoir_usbr_param_df = pd.DataFrame({"e": [7]})
         self._reservoir_rfc_param_df = pd.DataFrame({"c": [3]})
         self._great_lakes_param_df = pd.DataFrame({"d": [4]})
+        self._diversion_applied = {}
+
+    diversion_applied = NudgingDA.diversion_applied
 
 
 class _ScalingDAStub:
@@ -852,3 +856,18 @@ def test_a_matching_roster_is_left_alone():
     state = _no_da_state(); state["last_obs"] = saved
     model.load_state(state)
     pd.testing.assert_frame_equal(model._data_assimilation._last_obs_df, saved)
+
+
+_DIV_LINK = 1269985531956909
+
+
+def test_the_applied_subtraction_rides_the_checkpoint():
+    """The donor's last subtraction is state: the next window restores it into qdp,
+    and a checkpoint that dropped it would seed from column 0 instead."""
+    src = _make_model(3600.0, [None, None, None])
+    src._data_assimilation._diversion_applied = {_DIV_LINK: 123.5}
+    state = pickle.loads(pickle.dumps(src.create_state(), pickle.HIGHEST_PROTOCOL))
+    assert state["diversion_applied"] == {_DIV_LINK: 123.5}
+    dst = _make_model(0.0, [None, None, None])
+    dst.load_state(state)
+    assert dst._data_assimilation.diversion_applied == {_DIV_LINK: 123.5}

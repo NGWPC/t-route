@@ -313,6 +313,7 @@ def nhf_routing(argv):
             # flowveldepth_interorder=network.flowveldepth_interorder,
             qlat_add_loc = "bottom",  # All NHF lats go in bottom
             diversion_da=network.diversion_da,
+            diversion_applied=data_assimilation.diversion_applied,
             # Static split points for the cached execution plan: every gage the
             # network carries, not just those with observations this window.
             gage_segments=network_gage_segments(network)
