@@ -965,3 +965,46 @@ class TestHourlyCycles:
             held_windows += int(row.notna().any())
             seed = _diversion_seed_at(rows, seed)
         assert held_windows == 2, "cycles 0 and 1 reach the deadline, later cycles do not"
+
+
+class TestCrosswalkOnAnotherDomain:
+    """One configuration serves every domain; a domain without the structure routes on."""
+
+    @staticmethod
+    def _network(crosswalk):
+        from troute.nhf_preprocess import NHFPreprocessMixin
+
+        class _Net:
+            data_assimilation_parameters = {"diversion_da": {"diversion_gage_crosswalk": crosswalk}}
+            # Two flowpaths: 1 (links 100, 101) and 2 (link 200); one gage at link 200.
+            _dataframe = pd.DataFrame({"fp_id": [1, 1, 2], "segment_order": [0, 1, 0]},
+                                      index=pd.Index([100, 101, 200], dtype="int64"))
+            _resolve_diversion_da = NHFPreprocessMixin._resolve_diversion_da
+
+            def _gage_selection_rank(self, gages_join):
+                return gages_join
+
+            @staticmethod
+            def _one_link_per_gage(sub, label, quiet=False):
+                return sub
+
+        return _Net()
+
+    def test_a_flowpath_or_gage_outside_the_domain_is_skipped_with_a_warning(self, caplog):
+        gages = pd.DataFrame({"site_no": [DIVERSION_GAGE], "up_node_id": [200]})
+        net = self._network({1: DIVERSION_GAGE, 9: DIVERSION_GAGE, 2: "00000000"})
+        with caplog.at_level(logging.WARNING):
+            net._resolve_diversion_da(gages)
+        assert net.diversion_da == {101: 200}
+        assert "fp_id 9 is not in this domain" in caplog.text
+        assert "gage 00000000 is not in this domain's gages" in caplog.text
+
+    def test_a_gage_whose_donor_is_absent_is_not_a_diversion_gage(self):
+        """The DA reads and holds every gage the site map names, so a gage whose donor
+        is outside the domain must leave the map, or its flow would be imposed with
+        nothing subtracted anywhere."""
+        gages = pd.DataFrame({"site_no": [DIVERSION_GAGE, "11111111"], "up_node_id": [200, 101]})
+        net = self._network({1: DIVERSION_GAGE, 9: "11111111"})
+        net._resolve_diversion_da(gages)
+        assert net.diversion_da == {101: 200}
+        assert net._diversion_site_to_node == {DIVERSION_GAGE: 200}
