@@ -120,6 +120,7 @@ def nhf_routing(argv):
         value_dict=None,
         da_run=da_sets[0],
         )
+    data_assimilation.seed_from_record(network)
     
     forcing_end_time = time.time()
 

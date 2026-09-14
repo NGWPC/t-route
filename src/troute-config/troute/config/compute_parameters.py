@@ -621,7 +621,9 @@ class DiversionDA(BaseModel):
     back to the simulated flow". The held value is written into the observation frame,
     so the receiving node reads it as an observation, and a diversion gage never gets
     the kernel's decaying nudge. After the horizon both sides stop at once, as the RFC
-    DA hands back to level pool.
+    DA hands back to level pool. A run started without a checkpoint finds the last
+    report by scanning ``usgs_timeslices_folder`` back this many days, so the folder
+    must be staged with that much history for the hold to reach it.
     """
 
 class ReservoirDA(BaseModel):
