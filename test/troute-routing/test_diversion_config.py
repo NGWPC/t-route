@@ -1,10 +1,9 @@
 """Configuration contract for diversion data assimilation.
 
-The report accompanying the Old River work documents three usable shapes, and the
-integration cases in ``test/nhf/old_river`` exercise all three. They are pinned here
-because the difference between them is which source supplies the diversion gage's
-discharge, and getting that wrong either silently disables the transfer or breaks a
-supported mode outright.
+The diversion gage's discharge comes from ``usgs_timeslices_folder``, read by the
+diversion itself, and is held for ``diversion_persist_days`` past the record's end.
+The shapes are pinned here because getting the source wrong silently disables the
+transfer.
 """
 
 from __future__ import annotations
@@ -24,13 +23,10 @@ def crosswalk() -> dict:
     return {DONOR_FP_ID: DIVERSION_GAGE}
 
 
-def _params(crosswalk, *, nudging: bool, persist: bool = False) -> dict:
+def _params(crosswalk, *, nudging: bool) -> dict:
     return {
         "streamflow_da": {"streamflow_nudging": nudging},
-        "diversion_da": {
-            "diversion_gage_crosswalk": crosswalk,
-            "persist_historical_median": persist,
-        },
+        "diversion_da": {"diversion_gage_crosswalk": crosswalk},
     }
 
 
@@ -39,25 +35,13 @@ class TestSupportedModes:
         cfg = DataAssimilationParameters(**_params(crosswalk, nudging=True))
         assert cfg.diversion_da.diversion_gage_crosswalk == crosswalk
 
-    def test_historical_median_only_is_supported(self, crosswalk):
-        """Nudging off with climatology on is a documented forecast-mode shape.
-
-        The climatological fill runs outside the nudging branch and writes the
-        diversion gage's row at its own routing link, so the receiving river still
-        gets the water. Rejecting this would break the mode the report describes.
-        """
-        cfg = DataAssimilationParameters(
-            **_params(crosswalk, nudging=False, persist=True)
-        )
-        assert cfg.diversion_da.persist_historical_median is True
-
-    def test_median_fill_alongside_real_observations(self, crosswalk):
-        """Both sources together: observations win, climatology fills the gaps."""
-        cfg = DataAssimilationParameters(
-            **_params(crosswalk, nudging=True, persist=True)
-        )
-        assert cfg.streamflow_da.streamflow_nudging is True
-        assert cfg.diversion_da.persist_historical_median is True
+    def test_timeslice_folder_alone_is_a_source(self, crosswalk, tmp_path):
+        """The diversion reads its gage from the TimeSlices itself; nudging is
+        slated for removal and must not be required."""
+        params = _params(crosswalk, nudging=False)
+        params["usgs_timeslices_folder"] = str(tmp_path)
+        cfg = DataAssimilationParameters(**params)
+        assert cfg.diversion_da.diversion_persist_days == 11
 
 
 class TestGuards:
@@ -79,3 +63,40 @@ class TestGuards:
         # ids stay integral; NHF flowpath ids exceed 32-bit range
         (fp_id,) = cfg.diversion_da.diversion_gage_crosswalk
         assert isinstance(fp_id, int) and fp_id > 2**32
+
+
+class TestPersistenceHorizon:
+    """Requirement 2.2.3.15: hold the last observation, flat, for a configurable
+    number of days, the way the other DAs express persistence."""
+
+    def test_defaults_to_the_rfc_horizon(self, crosswalk):
+        cfg = DataAssimilationParameters(**_params(crosswalk, nudging=True))
+        assert cfg.diversion_da.diversion_persist_days == 11
+
+    def test_parses(self, crosswalk):
+        params = _params(crosswalk, nudging=True)
+        params["diversion_da"]["diversion_persist_days"] = 45
+        cfg = DataAssimilationParameters(**params)
+        assert cfg.diversion_da.diversion_persist_days == 45
+
+    def test_rejects_a_negative_horizon(self, crosswalk):
+        params = _params(crosswalk, nudging=True)
+        params["diversion_da"]["diversion_persist_days"] = -1
+        with pytest.raises(ValueError):
+            DataAssimilationParameters(**params)
+
+    def test_timeslice_folder_is_a_source_without_nudging(self, crosswalk, caplog, tmp_path):
+        """The diversion reads its gage from the TimeSlices itself."""
+        params = _params(crosswalk, nudging=False)
+        params["usgs_timeslices_folder"] = str(tmp_path)
+        with caplog.at_level(logging.WARNING, logger="TROUTE"):
+            DataAssimilationParameters(**params)
+        assert "no flow will be diverted" not in caplog.text
+
+    def test_two_donors_on_one_gage_is_rejected(self):
+        """Two donors would subtract the transfer twice and add it once."""
+        with pytest.raises(ValueError, match="same gage"):
+            DataAssimilationParameters(
+                **_params({DONOR_FP_ID: DIVERSION_GAGE, DONOR_FP_ID + 1: DIVERSION_GAGE},
+                          nudging=True)
+            )
