@@ -1,6 +1,7 @@
 import math
 import troute.nhd_io as nhd_io
 import pandas as pd
+from typing import NamedTuple
 import numpy as np
 import pathlib
 import xarray as xr
@@ -26,25 +27,6 @@ from troute.network import bmi_array2df as a2df
 # not to be used in regular BMI runs any longer, only for debugging
 legacy_bmi_df = False
 
-# Old River Control Structure diversion fallback values
-# Retrieved from NWIS on 7/14/26
-_DIVERSION_MONTHLY_MEANS = {
-    '07381482': {
-        1:  3220,
-        2:  3180,
-        3:  3080,
-        4:  5750,
-        5:  3960,
-        6:  4160,
-        7:  3140,
-        8:  3040,
-        9:  1980,
-        10: 1680,
-        11: 1980,
-        12: 3070,
-    }
-}
-
 # -----------------------------------------------------------------------------
 # Abstract DA Class:
 #   Define all slots and pass function definitions to child classes
@@ -57,7 +39,7 @@ class AbstractDA(ABC):
     'multiple-inheritance' error.
     """
     __slots__ = ["_usgs_df", "_usbr_df", "_last_obs_df", "_da_parameter_dict",
-                 "_diversion_applied",
+                 "_diversion_seed_in", "_diversion_rows", "_diversion_applied",
                  "_reservoir_usgs_df", "_reservoir_usgs_param_df", 
                  "_reservoir_usace_df", "_reservoir_usace_param_df",
                  "_reservoir_usbr_df", "_reservoir_usbr_param_df", 
@@ -245,16 +227,24 @@ class NudgingDA(AbstractDA):
                     self._canada_df = _create_canada_df(data_assimilation_parameters, streamflow_da_parameters, run_parameters, network, da_run)
                     self._canada_is_created = True
 
-        self._diversion_applied = {}
-        # Fill diversion gage rows with historical monthly medians where real observations are absent.
-        # Real observations always take priority; this only fills NaN gaps (or creates the row if missing).
+        # Hold the diversion gage's last observation where the reader left none.
+        # Observations always win.
         diversion_da_parameters = data_assimilation_parameters.get('diversion_da', {}) or {}
-        if diversion_da_parameters.get('persist_historical_median', False):
-            self._usgs_df = _fill_diversion_historical_median(
+        self._diversion_seed_in = {}
+        self._diversion_rows = {}
+        self._diversion_applied = {}
+        if diversion_da_parameters.get('diversion_gage_crosswalk'):
+            self._usgs_df = _read_diversion_observations(
+                self._usgs_df, diversion_da_parameters, data_assimilation_parameters,
+                network, run_parameters, da_run,
+            )
+            self._usgs_df, self._diversion_rows = _fill_diversion_row(
                 self._usgs_df,
                 diversion_da_parameters,
                 network,
                 run_parameters,
+                seed_in=self._diversion_seed_in,
+                nts=(da_run or {}).get('nts'),
             )
         LOG.debug("NudgingDA class is completed in %s seconds." % (time.time() - main_start_time))
         
@@ -303,7 +293,6 @@ class NudgingDA(AbstractDA):
         """Donor segment id -> the subtraction applied at the last routed step."""
         return getattr(self, "_diversion_applied", {}) or {}
 
-
     def update_for_next_loop(self, network, da_run,):
         '''
         Function to update data assimilation object for the next loop iteration. This is assumed
@@ -333,23 +322,56 @@ class NudgingDA(AbstractDA):
             else:
                 self._canada_df = pd.DataFrame()
 
-        # Re-apply historical median fill for next loop iteration
+        # Re-apply the diversion fill for the next loop iteration
         diversion_da_parameters = data_assimilation_parameters.get('diversion_da', {}) or {}
-        if diversion_da_parameters.get('persist_historical_median', False):
+        if diversion_da_parameters.get('diversion_gage_crosswalk'):
+            # The seed for this window is the latest observation seen so far, by time:
+            # the reader's frame is rebuilt per window, so the hold needs memory.
+            self._diversion_seed_in = self.diversion_seed_at()
             if not (streamflow_da_parameters or {}).get('streamflow_nudging', False):
-                # With nudging off this frame holds only the diversion gage's rows and
-                # nothing above rebuilt it, so leaving it in place froze the run on the
-                # FIRST loop's columns: the kernel restarts its timestep index at zero
-                # each loop, so every later loop re-read loop one's values and a run
-                # spanning several months kept diverting the first month's climatology.
-                # Clearing it makes the fill rebuild the index at the advanced t0.
+                # With nudging off nothing above rebuilds this frame, and the kernel
+                # indexes it from zero every loop, so it is cleared and rebuilt at the
+                # advanced t0; the seed carries the last observation across.
                 self._usgs_df = pd.DataFrame()
-            self._usgs_df = _fill_diversion_historical_median(
+            self._usgs_df = _read_diversion_observations(
+                self._usgs_df, diversion_da_parameters, data_assimilation_parameters,
+                network, run_parameters, da_run,
+            )
+            self._usgs_df, self._diversion_rows = _fill_diversion_row(
                 self._usgs_df,
                 diversion_da_parameters,
                 network,
                 run_parameters,
+                seed_in=self._diversion_seed_in,
+                nts=(da_run or {}).get('nts'),
             )
+
+    def diversion_seed_at(self, tau=None):
+        """The last diversion observation known at ``tau`` (all columns when None).
+
+        The latest, by timestamp, of the seed this frame inherited and the finite
+        pre-fill cells of its rows. Time decides, so a lookback report cannot displace
+        a newer inherited seed and a report after ``tau`` is invisible to a checkpoint
+        taken at ``tau``.
+        """
+        return _diversion_seed_at(self._diversion_rows, self._diversion_seed_in, tau)
+
+    def refill_diversion_rows(self):
+        """Re-run the fill from the pre-fill rows and the current seed, in place.
+
+        A BMI restore lands after the frame was filled at init, so restoring the seed
+        alone would change nothing.
+        """
+        params = self._data_assimilation_parameters.get('diversion_da', {}) or {}
+        horizon = _diversion_horizon(params)
+        for link_id, row in self._diversion_rows.items():
+            filled, _ = _hold_and_fill(
+                row.raw, self._diversion_seed_in.get(link_id), horizon=horizon,
+            )
+            # On the frame's own columns: the raw row keeps the reader's lookback,
+            # which the frame no longer has once trimmed to t0, and writing it back
+            # would append those columns out of order.
+            self._usgs_df.loc[link_id, :] = filled.reindex(self._usgs_df.columns).to_numpy()
 
 
 class PersistenceDA(AbstractDA):
@@ -590,7 +612,7 @@ class PersistenceDA(AbstractDA):
             if usgs_persistence:
                 # if usgs_df is already created, make reservoir_usgs_df from that rather than reading in data again.
                 # Gate on nudging actually being on, not merely on the frame being
-                # non-empty: with nudging off the diversion's climatological fill also
+                # non-empty: with nudging off the diversion's fill also
                 # populates this frame, and it holds only the diversion gage's row, so
                 # taking this shortcut derived reservoir observations from it and left
                 # USGS reservoir persistence with nothing.
@@ -829,7 +851,7 @@ class PersistenceDA(AbstractDA):
         streamflow_da_parameters = data_assimilation_parameters.get('streamflow_da', {})
         reservoir_da_parameters = data_assimilation_parameters.get('reservoir_da', {})
         
-        # Same gate as in __init__: the diversion's climatological fill can make this
+        # Same gate as in __init__: the diversion's fill can make this
         # frame non-empty while holding only the diversion gage's row.
         if (streamflow_da_parameters or {}).get('streamflow_nudging', False) and not self.usgs_df.empty:
 
@@ -1347,96 +1369,219 @@ class DataAssimilation(NudgingDA, PersistenceDA, RFCDA):
 # --------------------------------------------------------------
 
 
-def _fill_diversion_historical_median(
+class _DiversionRow(NamedTuple):
+    """One diversion gage's row before any fill, on the routing grid."""
+    raw: pd.Series
+    site_no: str
+
+
+def _diversion_horizon(diversion_da_parameters: dict) -> pd.Timedelta:
+    """How long the last observation is held; 0 days holds nothing past its instant."""
+    return pd.Timedelta(days=int(diversion_da_parameters.get('diversion_persist_days', 11)))
+
+
+def _read_diversion_observations(
+    usgs_df: pd.DataFrame,
+    diversion_da_parameters: dict,
+    data_assimilation_parameters: dict,
+    network,
+    run_parameters: dict,
+    da_run: dict | None,
+) -> pd.DataFrame:
+    """Read the diversion gages' rows from the TimeSlices when nothing else did.
+
+    Streamflow nudging reads every gage's row, the diversion gage's included, so only a
+    row that is still missing is read here, which is the case with nudging off. Rows
+    already present win.
+    """
+    site_to_node = getattr(network, "_diversion_site_to_node", {})
+    crosswalk = diversion_da_parameters.get("diversion_gage_crosswalk", {})
+    wanted = {
+        int(site_to_node[str(site)]): str(site)
+        for site in crosswalk.values() if str(site) in site_to_node
+    }
+    present = set() if usgs_df.empty else set(usgs_df.index)
+    missing = {link: site for link, site in wanted.items() if link not in present}
+    folder = data_assimilation_parameters.get("usgs_timeslices_folder")
+    files = (da_run or {}).get("usgs_timeslice_files") or []
+    if not missing or not folder or not files:
+        return usgs_df
+    link_gage_df = pd.DataFrame({"gages": pd.Series(missing)})
+    link_gage_df.index.name = "link"
+    try:
+        obs = nhd_io.get_obs_from_timeslices(
+            link_gage_df,
+            "gages",
+            "link",
+            [pathlib.Path(folder).joinpath(f) for f in files],
+            data_assimilation_parameters.get("qc_threshold", 1),
+            data_assimilation_parameters.get("interpolation_limit_min", 59),
+            run_parameters.get("dt"),
+            network.t0,
+            run_parameters.get("cpu_pool", None),
+        )
+    except (OSError, ValueError, KeyError) as exc:
+        # A file removed or still being written between discovery and this read.
+        # The hold carries the last known report; the run goes on.
+        LOG.warning(
+            "diversion DA: this window's TimeSlices could not be read (%s); holding the "
+            "last known report instead", exc,
+        )
+        return usgs_df
+    if obs.empty:
+        return usgs_df
+    obs = obs.loc[obs.index.intersection(list(missing))]
+    if usgs_df.empty or usgs_df.shape[1] == 0:
+        return obs
+    return usgs_df.combine_first(obs)
+
+
+def _hold_and_fill(
+    raw: pd.Series,
+    seed: tuple | None,
+    *,
+    horizon: pd.Timedelta,
+) -> tuple[pd.Series, int]:
+    """Fill one row: the reader's value, else the last observation held.
+
+    The hold is causal: a cell takes the latest finite cell BEFORE it, never a later
+    one; the inherited seed outranks raw cells older than it and covers its own
+    instant, and a report at that same instant wins over it. A held value expires
+    ``horizon`` after the observation it came from. Returns the row and the held count.
+    """
+    filled = raw.copy()
+    n_held = 0
+    if isinstance(raw.index, pd.DatetimeIndex):
+        held = raw.ffill()
+        # The time of the observation each column holds from.
+        source_time = raw.index.to_series().where(raw.notna()).ffill()
+        if seed is not None:
+            t_seed, q_seed = seed
+            t_seed = pd.Timestamp(t_seed)
+            from_seed = (
+                raw.isna()
+                & (raw.index >= t_seed)
+                & (source_time.isna() | (source_time < t_seed)).to_numpy()
+            )
+            held[from_seed] = float(q_seed)
+            source_time[from_seed] = t_seed
+        age = raw.index.to_series() - source_time
+        expired = raw.isna() & held.notna() & (age > horizon).to_numpy()
+        held[expired] = np.nan
+        n_held = int(held.notna().sum() - raw.notna().sum())
+        filled = held
+    return filled, n_held
+
+
+def _fill_diversion_row(
     usgs_df: pd.DataFrame,
     diversion_da_parameters: dict,
     network,
     run_parameters: dict,
-) -> pd.DataFrame:
-    """Fill nan values in usgs_df for diversion gages (if necessary)."""
-    diversion_gage_crosswalk = diversion_da_parameters.get(
-        "diversion_gage_crosswalk", {}
-    )
-    if not diversion_gage_crosswalk:
-        return usgs_df
+    seed_in: dict | None = None,
+    nts: int | None = None,
+) -> tuple[pd.DataFrame, dict[int, _DiversionRow]]:
+    """Put every diversion gage's row on the routing grid and hold its last observation.
 
-    # Build time columns if usgs_df has none (nudging is off)
+    Returns the frame and the pre-fill rows, from which the next window's seed and a
+    BMI restart's re-fill are derived. The reader's columns stop at the record's end
+    and alignment would add the missing routing steps as NaN, out of the hold's reach,
+    so the row is extended onto the window's grid here.
+    """
+    crosswalk = diversion_da_parameters.get("diversion_gage_crosswalk", {})
+    if not crosswalk:
+        return usgs_df, {}
+    horizon = _diversion_horizon(diversion_da_parameters)
+    seed_in = seed_in or {}
+
+    # One column per routing step of the window plus column 0 for t0: the kernel indexes
+    # the frame by routing step, so the spacing is dt whatever it is. nts is the window's
+    # length when the caller knows it, the run's total otherwise.
+    dt = run_parameters.get("dt", 300)
+    steps = nts if nts is not None else run_parameters.get("nts", 0)
+    grid = pd.date_range(
+        network.t0, periods=max(1, int(steps or 0) + 1), freq=pd.Timedelta(seconds=dt)
+    )
     if usgs_df.empty or usgs_df.shape[1] == 0:
-        t0 = network.t0
-        dt = run_parameters.get("dt", 300)  # seconds
-        nts = run_parameters.get("nts", 0)
-        # One column per ROUTING timestep, not a fixed 5-minute grid. The kernel
-        # indexes this frame as usgs_values[gage_i, timestep], where timestep is the
-        # routing step, so a 5-minute grid only lines up when dt happens to be 300.
-        # With dt=60 the columns ran out about a fifth of the way through the run;
-        # with dt=900 the timestamps advanced three times too slowly.
-        n_obs = max(1, nts + 1)
-        time_index = pd.date_range(t0, periods=n_obs, freq=pd.Timedelta(seconds=dt))
-        usgs_df = pd.DataFrame(
-            index=pd.Index([], dtype="int64"), columns=time_index, dtype=float
-        )
+        usgs_df = pd.DataFrame(index=pd.Index([], dtype="int64"), columns=grid, dtype=float)
+    elif isinstance(usgs_df.columns, pd.DatetimeIndex):
+        usgs_df = usgs_df.reindex(columns=usgs_df.columns.union(grid))
 
-    diversion_site_to_node: dict[str, int] = getattr(
-        network, "_diversion_site_to_node", {}
-    )
-
-    # crosswalk maps fp_id (int) -> site_no (str)
-    for fp_id, gage_id in diversion_gage_crosswalk.items():
-        gage_id = str(gage_id)
-        if gage_id not in diversion_site_to_node:
-            # Happens when the gage never resolved to a routing link, e.g. the
-            # network carries no waterbodies and preprocessing returned early.
-            # Filling would raise KeyError, and silently skipping would leave the
-            # donor subtraction running with no fallback.
+    site_to_node: dict[str, int] = getattr(network, "_diversion_site_to_node", {})
+    rows: dict[int, _DiversionRow] = {}
+    for fp_id, site_no in crosswalk.items():
+        site_no = str(site_no)
+        if site_no not in site_to_node:
+            # The gage never resolved to a routing link, e.g. the network carries no
+            # waterbodies and preprocessing returned early. Filling would raise
+            # KeyError; skipping silently would leave the donor with no fallback.
             LOG.warning(
-                "persist_historical_median: gage %s has no routing link; the "
-                "diversion for flowpath %s will not be applied.", gage_id, fp_id,
+                "diversion DA: gage %s has no routing link; the diversion for "
+                "flowpath %s will not be applied.", site_no, fp_id,
             )
             continue
-        link_id = int(diversion_site_to_node[gage_id])
-
-        monthly_means = _DIVERSION_MONTHLY_MEANS.get(gage_id)
-        if monthly_means is None:
-            LOG.warning(
-                "persist_historical_median: no monthly means defined for gage %s - skipping.",
-                gage_id,
-            )
-            continue
-
-        # Fill value at each column using the monthly median by calendar month.
-        historical = pd.Series(
-            {col: monthly_means[col.month] for col in usgs_df.columns},
-            dtype=float,
-        )
-
-        # Get the existing row or create a blank one.
+        link_id = int(site_to_node[site_no])
         if link_id in usgs_df.index:
-            row = usgs_df.loc[link_id].copy()
+            raw = usgs_df.loc[link_id].astype(float).copy()
         else:
-            row = pd.Series(np.nan, index=usgs_df.columns, dtype=float)
-
-        nan_mask = row.isna()
-        if nan_mask.any():
-            row[nan_mask] = historical[nan_mask]
-            # A substituted climatological value is not an observation. Say so, and
-            # say how much of the window it covers, so an operator can tell a short
-            # gap from a sustained gage outage being papered over indefinitely.
-            n_filled = int(nan_mask.sum())
-            n_total = int(len(nan_mask))
+            raw = pd.Series(np.nan, index=usgs_df.columns, dtype=float)
+        filled, _ = _hold_and_fill(raw, seed_in.get(link_id), horizon=horizon)
+        rows[link_id] = _DiversionRow(raw, site_no)
+        # Counted over the window's steps, not the reader's lookback columns.
+        in_window = filled.index.isin(grid)
+        n_total = int(in_window.sum())
+        n_held = int((filled.notna() & raw.isna())[in_window].sum())
+        if not filled[in_window].notna().any():
+            # A run that completes with nothing to divert must say so: a misnamed
+            # site, a folder without the station, or a record that has not started.
             LOG.warning(
-                "persist_historical_median: gage %s substituted monthly climatology "
-                "for %d of %d timesteps (%.0f%%) in this window; these are not "
-                "observations", gage_id, n_filled, n_total, 100.0 * n_filled / n_total,
+                "diversion gage %s: no observation in this window and nothing held; "
+                "no flow will be diverted", site_no,
             )
-
+        elif n_held:
+            # A held value is not an observation. Say how much of the window it
+            # covers, so a short gap can be told from a gage outage being papered
+            # over up to the horizon.
+            LOG.warning(
+                "diversion gage %s: %d of %d timesteps held at the last observation "
+                "in this window (%.0f%% not observed)",
+                site_no, n_held, n_total, 100.0 * n_held / max(n_total, 1),
+            )
         if link_id in usgs_df.index:
-            usgs_df.loc[link_id] = row
+            usgs_df.loc[link_id] = filled
         else:
-            new_row = row.to_frame().T
+            new_row = filled.to_frame().T
             new_row.index = pd.Index([link_id], dtype="int64")
             usgs_df = pd.concat([usgs_df, new_row])
 
-    return usgs_df
+    return usgs_df, rows
+
+
+def _diversion_seed_at(
+    rows: dict[int, _DiversionRow],
+    seed_in: dict | None,
+    tau=None,
+) -> dict[int, tuple[pd.Timestamp, float]]:
+    """Latest observation per gage at or before ``tau``, inherited seed included.
+
+    A report at the inherited seed's own instant wins over it: the TimeSlice is the
+    current record, the seed a checkpoint's copy of it.
+    """
+    out = dict(seed_in or {})
+    for link_id, row in rows.items():
+        raw = row.raw
+        if not isinstance(raw.index, pd.DatetimeIndex):
+            continue
+        if tau is not None:
+            raw = raw[raw.index <= pd.Timestamp(tau)]
+        finite = raw.dropna()
+        if finite.empty:
+            continue
+        candidate = (finite.index[-1], float(finite.iloc[-1]))
+        previous = out.get(link_id)
+        if previous is None or candidate[0] >= pd.Timestamp(previous[0]):
+            out[link_id] = candidate
+    return out
 
 
 def _reindex_link_to_lake_id(target_df, crosswalk):

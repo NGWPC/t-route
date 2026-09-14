@@ -49,6 +49,8 @@ def test_da_sets(
     with temporarily_change_dir(nhd_test_network["path"]):
         da_sets = nnu.build_da_sets(data_assimilation_parameters, run_sets, t0)
 
+    # Each DA set carries its window's length for the diversion fill.
+    da_test_data[0]["nts"] = nhd_qlat_data["nts"]
     assert da_sets == da_test_data
 
 

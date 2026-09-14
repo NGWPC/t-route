@@ -111,6 +111,18 @@ class TestMergeInjectedObs:
         assert len(out) == 1
         np.testing.assert_allclose(out.loc[100].to_numpy(), [1.0, 2.0, 3.0])
 
+    def test_protected_rows_keep_their_existing_values(self, columns):
+        """The diversion owns its gage's row: the held values it
+        filled must survive the scaling injection, which carries only raw
+        observations for the same gage."""
+        injected = pd.DataFrame([[1.0, np.nan, np.nan]], index=pd.Index([100], name="link"),
+                                columns=columns)
+        existing = pd.DataFrame([[9.0, 9.0, 9.0]], index=pd.Index([100], name="link"),
+                                columns=columns)
+        out = merge_injected_obs(injected, existing, protected={100})
+        assert len(out) == 1
+        np.testing.assert_allclose(out.loc[100].to_numpy(), [9.0, 9.0, 9.0])
+
     def test_existing_rows_are_forced_onto_the_injected_column_grid(self, columns):
         """A column union would shift every gage's observations.
 

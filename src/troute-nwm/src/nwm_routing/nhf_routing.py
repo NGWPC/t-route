@@ -249,6 +249,8 @@ def nhf_routing(argv):
                     t0, dt, nts, scaling_da_run
                 ),
                 data_assimilation.usgs_df,
+                # The diversion owns its gage's row: the held values it filled in.
+                protected=(network.diversion_da or {}).values(),
             )
 
         route_start_time = time.time()

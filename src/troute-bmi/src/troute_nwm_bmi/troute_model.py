@@ -251,11 +251,8 @@ class Model:
         self._data_assimilation = DataAssimilation(
             network=self._network,
             data_assimilation_parameters=self.data_assimilation_parameters,
-            # Not an empty dict: the observation readers need dt and nts. With them
-            # missing, file-based nudging computed its resampling frequency from
-            # dt=None, and the climatological diversion fallback fell back to
-            # dt=300/nts=0 and built a single column, which the kernel (indexing from
-            # timestep 1) never reads.
+            # Not an empty dict: the readers need dt and nts, or nudging resamples from
+            # dt=None and the diversion grid collapses to one column the kernel never reads.
             run_parameters={
                 "dt": self.dt,
                 "nts": self.nts,
@@ -358,6 +355,8 @@ class Model:
                         run["t0"], self.dt, run["nts"], scaling_da_run
                     ),
                     self._data_assimilation.usgs_df,
+                    # The diversion owns its gage's row: the held values it filled in.
+                    protected=(getattr(self._network, "diversion_da", {}) or {}).values(),
                 )
 
             usgs_df = self._data_assimilation.usgs_df
