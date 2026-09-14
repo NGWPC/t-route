@@ -1436,6 +1436,16 @@ def _read_diversion_observations(
     return usgs_df.combine_first(obs)
 
 
+def _newer_seed(a: dict | None, b: dict | None) -> dict:
+    """Per gage, the later of two seeds by time; a tie goes to ``b``."""
+    out = dict(a or {})
+    for link_id, cand in (b or {}).items():
+        prev = out.get(link_id)
+        if prev is None or pd.Timestamp(cand[0]) >= pd.Timestamp(prev[0]):
+            out[link_id] = cand
+    return out
+
+
 def _hold_and_fill(
     raw: pd.Series,
     seed: tuple | None,
