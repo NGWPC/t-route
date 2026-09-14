@@ -572,6 +572,9 @@ class Model:
             "t0": self._network._t0,
             # updated data stored on DataAssimilation
             "last_obs": self._data_assimilation._last_obs_df,
+            # As of the checkpoint time, not the next window's: the raw rows may hold
+            # reports past t0 that this checkpoint has not assimilated.
+            "diversion_seed": self._data_assimilation.diversion_seed_at(self._network._t0),
             "diversion_applied": dict(self._data_assimilation.diversion_applied),
             "usgs": self._data_assimilation._reservoir_usgs_param_df,
             "usace": self._data_assimilation._reservoir_usace_param_df,
@@ -828,6 +831,11 @@ class Model:
         self._seeded_q0 = seeded
         self._network._t0 = data["t0"]
         da._last_obs_df = self._compatible_lastobs(resolved["last_obs"])
+        # The checkpoint's seed as it is: a rollback to an earlier checkpoint must not
+        # keep a later one's. The rows were filled at init, before this restore, so
+        # the seed alone would change nothing: re-run the fill from the pre-fill rows.
+        da._diversion_seed_in = data.get("diversion_seed") or {}
+        da.refill_diversion_rows()
         da._diversion_applied = data.get("diversion_applied") or {}
         da._reservoir_usgs_param_df = resolved["usgs"]
         da._reservoir_usace_param_df = resolved["usace"]
