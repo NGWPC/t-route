@@ -257,6 +257,7 @@ cpdef object compute_network_structured(
     bint from_files=True,
     int qlat_add_loc = QlatLocation.MIDDLE,
     dict diversion_da = {},
+    tuple diversion_gages = (),
     dict diversion_applied = {}
     ):
     
@@ -274,6 +275,8 @@ cpdef object compute_network_structured(
         diversion_da (dict): maps segment position in data_idx (int) -> gage index in usgs_values (int).
             Represents reaches where diverted flow (observed at a gage) must be subtracted from
             MC-routed flow, e.g., Mississippi R. losses at the Old River Control Structure.
+        diversion_gages (tuple): gage indices in usgs_values that are diversion gages. With no
+            observation such a gage keeps its routed flow instead of a decaying nudge.
         diversion_applied (dict): gage index -> the amount removed at the previous window's
             last step, carried as state; a gage absent here is seeded from column 0.
     Notes:
@@ -446,6 +449,9 @@ cpdef object compute_network_structured(
     # what was removed per gage and restore it when loading qdp, as qdpp does for qlat.
     cdef float[:] div_applied = np.zeros(max(usgs_values.shape[0], 1), dtype="float32")
     cdef float div_now
+    # A diversion gage persists or stops, never decays: with no observation the
+    # receiving node keeps its routed flow, as the donor keeps its own.
+    cdef char[:] div_gage_mask = np.zeros(max(usgs_values.shape[0], 1), dtype="int8")
     cdef int gage_i, usgs_position_i
     cdef float a, da_decay_minutes, da_weighted_shift, replacement_val  # , original_val, lastobs_val,
     cdef float [:] lastobs_values, lastobs_times
@@ -464,6 +470,8 @@ cpdef object compute_network_structured(
                 div_applied[gage_i] = diversion_applied[gage_i]
             elif not isnan(usgs_values[gage_i, 0]):
                 div_applied[gage_i] = usgs_values[gage_i, 0]
+    for gage_i in diversion_gages:
+        div_gage_mask[gage_i] = 1
     if gages_size:
         # if da_check_gage > 0:
         #     print(f"gage_i     usgs_positions[gage_i]  usgs_positions_reach[gage_i]  usgs_positions_gage[gage_i]   list(usgs_positions)")
@@ -933,35 +941,39 @@ cpdef object compute_network_structured(
             # exactly one gage which is relevant for the reach ...
                 gage_i = reach_has_gage[i]
                 usgs_position_i = usgs_positions[gage_i]
-                da_buf = simple_da(
-                    timestep,
-                    routing_period,
-                    da_decay_coefficient,
-                    gage_maxtimestep,
-                    NAN if timestep >= gage_maxtimestep else usgs_values[gage_i,timestep],
-                    flowveldepth[usgs_position_i, timestep, 0],
-                    lastobs_times[gage_i],
-                    lastobs_values[gage_i],
-                    gage_i == da_check_gage,
-                )
-                if gage_i == da_check_gage:
-                    printf("ts: %d\t", timestep)
-                    printf("gmxt: %d\t", gage_maxtimestep)
-                    printf("gage: %d\t", gage_i)
-                    printf("old: %g\t", flowveldepth[usgs_position_i, timestep, 0])
-                    printf("exp_gage_val: %g\t", 
-                    NAN if timestep >= gage_maxtimestep else usgs_values[gage_i,timestep],)
+                # A diversion gage with no observation keeps its routed flow; its nudge
+                # stays at the zero the array was created with.
+                if not div_gage_mask[gage_i] or (timestep < gage_maxtimestep
+                                                 and not isnan(usgs_values[gage_i, timestep])):
+                    da_buf = simple_da(
+                        timestep,
+                        routing_period,
+                        da_decay_coefficient,
+                        gage_maxtimestep,
+                        NAN if timestep >= gage_maxtimestep else usgs_values[gage_i,timestep],
+                        flowveldepth[usgs_position_i, timestep, 0],
+                        lastobs_times[gage_i],
+                        lastobs_values[gage_i],
+                        gage_i == da_check_gage,
+                    )
+                    if gage_i == da_check_gage:
+                        printf("ts: %d\t", timestep)
+                        printf("gmxt: %d\t", gage_maxtimestep)
+                        printf("gage: %d\t", gage_i)
+                        printf("old: %g\t", flowveldepth[usgs_position_i, timestep, 0])
+                        printf("exp_gage_val: %g\t", 
+                        NAN if timestep >= gage_maxtimestep else usgs_values[gage_i,timestep],)
 
-                flowveldepth[usgs_position_i, timestep, 0] = da_buf[0]
+                    flowveldepth[usgs_position_i, timestep, 0] = da_buf[0]
 
-                if gage_i == da_check_gage:
-                    printf("new: %g\t", flowveldepth[usgs_position_i, timestep, 0])
-                    printf("repl: %g\t", da_buf[0])
-                    printf("nudg: %g\n", da_buf[1])
+                    if gage_i == da_check_gage:
+                        printf("new: %g\t", flowveldepth[usgs_position_i, timestep, 0])
+                        printf("repl: %g\t", da_buf[0])
+                        printf("nudg: %g\n", da_buf[1])
 
-                nudge[gage_i, timestep] = da_buf[1]
-                lastobs_times[gage_i] = da_buf[2]
-                lastobs_values[gage_i] = da_buf[3]
+                    nudge[gage_i, timestep] = da_buf[1]
+                    lastobs_times[gage_i] = da_buf[2]
+                    lastobs_values[gage_i] = da_buf[3]
 
         # TODO: Address remaining TODOs (feels existential...), Extra commented material, etc.
 

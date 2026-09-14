@@ -553,6 +553,7 @@ class ComputeInputs:
     from_files: bool = True
     qlat_add_loc: int = 1
     diversion_da: dict = field(default_factory=dict)
+    diversion_gages: tuple = ()
     diversion_applied: dict = field(default_factory=dict)
 
 
@@ -1707,6 +1708,21 @@ def _resolve_diversion_da(
     return kernel_map
 
 
+def _resolve_diversion_gages(
+    diversion_da: dict[ReachId, int],
+    usgs_df_sub: pd.DataFrame,
+) -> tuple[int, ...]:
+    """Kernel indices of the diversion gages in this job's observation set.
+
+    Keyed on the gage, not the donor: the receiving node is usually in another job
+    than the donor, and it is the one that must not decay.
+    """
+    return tuple(
+        int(usgs_df_sub.index.get_loc(gage_id))
+        for gage_id in set(diversion_da.values()) if gage_id in usgs_df_sub.index
+    )
+
+
 def _resolve_diversion_applied(
     diversion_applied: dict[ReachId, float],
     kernel_map: dict[int, int],
@@ -1984,6 +2000,7 @@ def build_compute_package(
         from_files=config.from_files,
         qlat_add_loc=config.qlat_add_loc_c,
         diversion_da=kernel_map,
+        diversion_gages=_resolve_diversion_gages(config.diversion_da, usgs_df_sub),
         diversion_applied=_resolve_diversion_applied(
             config.diversion_applied, kernel_map, job.river_reaches
         ),
