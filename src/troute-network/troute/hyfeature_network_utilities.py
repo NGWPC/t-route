@@ -85,8 +85,11 @@ def build_da_sets(da_params, run_sets, t0):
     # nhd_network_utilities_v02.build_da_sets -- keep both.
     scaling = bool(streamflow_da) and streamflow_da.get('streamflow_scaling', False)
 
+    # The diversion reads its gage from the TimeSlices on its own, nudging or not.
+    diversion = bool((da_params.get('diversion_da') or {}).get('diversion_gage_crosswalk'))
+
     if (not usgs_da and not usace_da and not usbr_da and not GreatLakes_da
-            and not nudging and not scaling):
+            and not nudging and not scaling and not diversion):
         # if all DA capabilities are OFF, return empty dictionary
         da_sets = [{} for _ in run_sets]
     
@@ -130,7 +133,9 @@ def build_da_sets(da_params, run_sets, t0):
             
             # Append an empty dictionary to the loop, which be used to hold
             # lists of USGS and USACE TimeSlice files.
-            da_sets.append({})
+            # The window's length, so the diversion fill can extend its row onto the
+            # routing grid without knowing the run's total.
+            da_sets.append({'nts': set_dict.get('nts')})
 
             # timestamps of TimeSlice files desired for run set i
             timestamps = pd.date_range(
@@ -140,7 +145,7 @@ def build_da_sets(da_params, run_sets, t0):
             )
 
             # identify available USGS TimeSlices in run set i
-            if usgs_timeslices_folder and (nudging or usgs_da or scaling):
+            if usgs_timeslices_folder and (nudging or usgs_da or scaling or diversion):
                 filenames_usgs = (timestamps.strftime('%Y-%m-%d_%H:%M:%S') 
                             + '.15min.usgsTimeSlice.ncdf').to_list()
                 

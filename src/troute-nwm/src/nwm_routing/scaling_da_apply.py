@@ -88,7 +88,9 @@ def span_da_runs(da_runs: "Iterable[Mapping[str, Any] | None]") -> dict | None:
 
 
 def merge_injected_obs(
-    injected: pd.DataFrame, existing: pd.DataFrame | None
+    injected: pd.DataFrame,
+    existing: pd.DataFrame | None,
+    protected: Iterable[int] = (),
 ) -> pd.DataFrame:
     """Overlay the scaling DA's rows on the existing observation frame.
 
@@ -96,12 +98,21 @@ def merge_injected_obs(
     injection must overlay its own rows and leave the rest intact. Surviving rows
     are reindexed onto the injected frame's columns because the kernel reads the
     frame positionally -- a column union of two grids would shift observations.
+
+    ``protected`` names rows the existing frame owns: the diversion's gage links,
+    whose rows carry the held values the diversion filled in.
+    The scaling gage set is the network's, so it includes those gages, and its copy
+    of the row holds only the raw observations; letting it win would silently undo
+    the persistence.
     """
     if injected.empty:
         # Nothing injected this call; do not wipe the diversion/nudging rows.
         return existing if existing is not None else injected
     if existing is None or existing.empty:
         return injected
+    owned = set(protected) & set(existing.index)
+    if owned:
+        injected = injected.drop(index=list(owned), errors="ignore")
     kept = existing.drop(index=injected.index, errors="ignore")
     if kept.empty:
         return injected
