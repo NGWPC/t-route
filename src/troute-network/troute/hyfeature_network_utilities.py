@@ -285,6 +285,7 @@ def _check_timeslice_exists(filenames, timeslices_folder):
     # and accept any cadence, so an hourly directory is not silently empty.
     filenames_existing = []
     substituted = []
+    missing = []
     for f in filenames:
         J = pathlib.Path(timeslices_folder).joinpath(f)
         if J.is_file():
@@ -294,7 +295,7 @@ def _check_timeslice_exists(filenames, timeslices_folder):
         cadence, _, family = rest.partition(".")
         match = sorted(pathlib.Path(timeslices_folder).glob(f"{stamp}.*.{family}"))
         if not match:
-            LOG.warning("Missing TimeSlice file %s", J)
+            missing.append(f)
             continue
         if len(match) > 1:
             # Two products for one timestamp is not the NWM layout, and picking
@@ -308,6 +309,13 @@ def _check_timeslice_exists(filenames, timeslices_folder):
             substituted.append((cadence, match[0].name.partition(".")[2].partition(".")[0]))
         filenames_existing.append(match[0].name)
 
+    if missing:
+        # One line, not one per file: a forecast window lists every future instant
+        # and none of them exists yet.
+        LOG.warning(
+            "%d of %d TimeSlice files missing in %s (%s to %s)", len(missing),
+            len(filenames), timeslices_folder, missing[0], missing[-1],
+        )
     if substituted:
         # One line, not one per file: a directory written at another cadence
         # substitutes EVERY file, on every window, for every arm. Every DISTINCT

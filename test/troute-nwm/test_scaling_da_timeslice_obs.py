@@ -237,6 +237,25 @@ class TestDaSetsGate:
         # window's grid; without it the fill falls back to the run total.
         assert da_sets[0]["nts"] == 36
 
+    def test_missing_files_are_reported_once(self, builder, obs_dir, caplog):
+        """A forecast window lists thousands of future instants; one line, not one each."""
+        import logging
+
+        folder, _, _ = obs_dir
+        with caplog.at_level(logging.WARNING):
+            builder.build_da_sets(
+                {
+                    "usgs_timeslices_folder": str(folder),
+                    "streamflow_da": {"streamflow_nudging": False, "streamflow_scaling": False},
+                    "diversion_da": {"diversion_gage_crosswalk": {1: "01105933"}},
+                },
+                [{"final_timestamp": pd.Timestamp("2000-01-02 03:00:00"), "nts": 324}],
+                pd.Timestamp("2000-01-01"),
+            )
+        lines = [r for r in caplog.records if "TimeSlice" in r.getMessage()]
+        assert len(lines) == 1, [r.getMessage() for r in lines]
+        assert "TimeSlice files missing" in lines[0].getMessage()
+
     def test_scaling_and_nudging_get_the_same_window_list(self, builder, obs_dir):
         """The head-to-head comparison this gate exists for.
 
