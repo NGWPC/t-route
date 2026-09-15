@@ -13,7 +13,7 @@ from troute.scaling_da import build_scaling_da_setup
 
 from troute.nhf_preprocess import (
     LAKE_ID_FIELD,
-    WATERBODY_DF_FIELDS,
+    LEVEL_POOL_PARAMS,
     NHFPreprocessMixin,
     read_geo_file,
     read_qlat_file,
@@ -745,7 +745,7 @@ def _force_headwater_routing(
     # Force routing on headwater vfps with waterbodies
     numeric_lake_id = pd.to_numeric(waterbodies[LAKE_ID_FIELD], errors="coerce")
     _waterbodies = waterbodies.loc[numeric_lake_id.notna()].copy()
-    _required_lp_fields = list(set(WATERBODY_DF_FIELDS).difference(["fp_id"]))
+    _required_lp_fields = [*LEVEL_POOL_PARAMS, "virtual_fp_id"]
     waterbody_vfps = _waterbodies.dropna(subset=_required_lp_fields)["virtual_fp_id"].astype(int).values
     forced_vfps.extend(list(set(headwater_vfps).intersection(waterbody_vfps)))
 

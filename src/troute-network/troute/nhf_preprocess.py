@@ -46,6 +46,13 @@ WATERBODY_DF_FIELDS = [
                 "WeirE",
                 "WeirL",
             ]
+# Columns the level-pool kernel reads (compute.py's LakeData view). Completeness gates
+# name these explicitly rather than requiring every column present: the waterbody frame
+# also carries identity columns (`lake_id`, null for a dam with no NHD 2.1 match) and,
+# under lakeout, crs/lat/lon, none of which decide whether a lake can be routed.
+LEVEL_POOL_PARAMS = (
+    "LkArea", "LkMxE", "OrificeA", "OrificeC", "OrificeE", "WeirC", "WeirE", "WeirL", "ifd",
+)
 RESERVOIR_DA_SITE_ID_FIELD = "site_no"
 RESERVOIR_DA_SITE_TYPE_FIELD = "da_type"
 
@@ -703,7 +710,7 @@ def _clean_waterbodies(
 
     # 6. parameter completeness
     n_before = len(waterbody_df)
-    waterbody_df = waterbody_df.dropna()
+    waterbody_df = waterbody_df.dropna(subset=[*LEVEL_POOL_PARAMS, "fp_id"])
     n_no_param = n_before - len(waterbody_df)
     if n_no_param:
         LOG.warning(
