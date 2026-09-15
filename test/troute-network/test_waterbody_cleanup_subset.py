@@ -17,6 +17,7 @@ from troute.nhf_preprocess import (
     NATIVE_LAKE_ID_FIELD,
     _clean_waterbodies,
 )
+from troute.routing.compute import WATERBODY_INITIAL_CONDITIONS, WATERBODY_VIEW_COLS
 
 
 def _lakes(**overrides: object) -> pd.DataFrame:
@@ -60,3 +61,16 @@ def test_a_missing_level_pool_parameter_still_drops_the_lake(param: str) -> None
     """The gate must keep working for the parameters the kernel actually reads."""
     clean, _ = _clean_waterbodies(_lakes(**{param: float("nan")}), LAKE_ID_FIELD)
     assert clean.empty
+
+
+def test_the_gate_covers_every_hydrofabric_column_the_kernel_reads() -> None:
+    """The two lists are maintained independently and must agree.
+
+    Parametrizing the cases above over LEVEL_POOL_PARAMS cannot catch a parameter
+    left out of it; only comparing against the kernel-facing view can. A column the
+    kernel reads but the gate omits is the silent failure: it reaches the level-pool
+    kernel as NaN and produces plausible wrong numbers rather than an error.
+    """
+    from_kernel = set(WATERBODY_VIEW_COLS) - set(WATERBODY_INITIAL_CONDITIONS)
+    assert set(LEVEL_POOL_PARAMS) == from_kernel
+    assert len(LEVEL_POOL_PARAMS) == len(from_kernel)

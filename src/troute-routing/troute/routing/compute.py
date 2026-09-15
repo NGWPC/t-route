@@ -366,6 +366,17 @@ class ReachData:
         return self._view.take(positions)
 
 
+# Initial conditions, attached at warmstate rather than read from the hydrofabric.
+WATERBODY_INITIAL_CONDITIONS = ("qd0", "h0")
+# What WaterbodyData hands the level-pool kernel. The hydrofabric-sourced half must stay
+# in step with nhf_preprocess.LEVEL_POOL_PARAMS, the completeness gate that guarantees
+# they are non-null; test_waterbody_cleanup_subset pins the two together.
+WATERBODY_VIEW_COLS = (
+    "LkArea", "LkMxE", "OrificeA", "OrificeC", "OrificeE", "WeirC", "WeirE", "WeirL", "ifd",
+    *WATERBODY_INITIAL_CONDITIONS,
+)
+
+
 @dataclass
 class WaterbodyData:
     """Concise package of waterbody data."""
@@ -380,9 +391,9 @@ class WaterbodyData:
         # .loc / pandas Index.intersection on the full frame each time made plan
         # construction O(jobs x frame). A precomputed view + positional take, and a
         # set intersection, are O(len(reaches)) per call.
-        cols = ["LkArea", "LkMxE", "OrificeA", "OrificeC", "OrificeE",
-                "WeirC", "WeirE", "WeirL", "ifd", "qd0", "h0"]
-        self._view = None if self.dataframe.empty else self.dataframe[cols]
+        self._view = (
+            None if self.dataframe.empty else self.dataframe[list(WATERBODY_VIEW_COLS)]
+        )
         self._index_set: set[ReachId] = set(self.dataframe.index)
 
     def generate_view(
