@@ -175,14 +175,15 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             )
 
     def initial_warmstate_preprocess(self, from_files, value_dict):
-        """Read the warm state, then broadcast an fp-keyed restart onto routing links.
+        """Read the warm state, then put a lite channel restart onto the routing links.
 
-        A lite channel restart pickle stores q0 at flowpath level, keyed by a
-        'feature_id' column, but routing is indexed by 'up_node_id', so every link
-        belonging to a flowpath takes that flowpath's value. Links whose fp_id is
-        absent from the restart (e.g. synthetic waterbody headwaters) are zero-filled
-        rather than left NaN. This lives here, not in nhf_routing, so the BMI gets the
-        same treatment as the CLI: both build the network through this class.
+        A restart the driver wrote (``write_lite_restart``) is q0 keyed by routing link
+        and is used as it is, links it lacks cold-started at zero. A flowpath-level
+        restart, keyed by a 'feature_id' column, is broadcast: every link of a flowpath
+        takes that flowpath's value, and flowpaths absent from it (e.g. synthetic
+        waterbody headwaters) are zero-filled rather than left NaN. This lives here, not
+        in nhf_routing, so the BMI gets the same treatment as the CLI: both build the
+        network through this class.
         """
         super().initial_warmstate_preprocess(from_files, value_dict)
 
@@ -191,7 +192,10 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
         restart_file = self.restart_parameters["lite_channel_restart_file"]
         restart = self._q0
-        missing = [c for c in ("feature_id", *Q0_COLUMNS) if c not in restart]
+        if "feature_id" not in restart:
+            self._q0 = self._link_keyed_restart(restart, restart_file)
+            return
+        missing = [c for c in Q0_COLUMNS if c not in restart]
         if missing:
             raise ValueError(
                 f"lite_channel_restart_file {restart_file} is missing column(s) {missing}. "
@@ -235,6 +239,36 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
         self._q0 = (
             q0.set_index("up_node_id")[list(Q0_COLUMNS)].fillna(0).astype("float32")
+        )
+
+    def _link_keyed_restart(self, restart: pd.DataFrame, restart_file: str) -> pd.DataFrame:
+        """q0 the driver wrote for this network's routing links; links it lacks start at zero."""
+        missing = [c for c in Q0_COLUMNS if c not in restart]
+        if missing:
+            raise ValueError(
+                f"lite_channel_restart_file {restart_file} is missing column(s) {missing}."
+            )
+        links = self._dataframe.index
+        known = restart.index.isin(links)
+        if not known.any():
+            raise ValueError(
+                f"lite_channel_restart_file {restart_file} is keyed by neither this network's "
+                "routing links nor a 'feature_id' column."
+            )
+        if restart.index[known].duplicated().any():
+            raise ValueError(
+                f"lite_channel_restart_file {restart_file} has duplicate link ids, "
+                "so a link would take whichever row the reindex happened to pick."
+            )
+        covered = int(links.isin(restart.index).sum())
+        if covered < len(links):
+            LOG.warning(
+                "channel restart %s covers %d of %d routing links; the rest are cold-started "
+                "at zero. Check that the restart matches this hydrofabric.",
+                restart_file, covered, len(links),
+            )
+        return (
+            restart.loc[known, list(Q0_COLUMNS)].reindex(links, fill_value=0.0).astype("float32")
         )
 
     def extract_waterbody_connections(rows, target_col, waterbody_null=-9999):
