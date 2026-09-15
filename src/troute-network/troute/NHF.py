@@ -27,6 +27,11 @@ __verbose__ = False
 __showtiming__ = False
 
 
+# The kernel reads q0 by position: the previous step's flow, velocity, depth, and
+# bottom-added lateral, in this order.
+Q0_COLUMNS = ("qu0", "qd0", "h0", "ql0")
+
+
 class NHF(NHFPreprocessMixin, AbstractNetwork):
     """ """
 
@@ -186,7 +191,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
         restart_file = self.restart_parameters["lite_channel_restart_file"]
         restart = self._q0
-        missing = [c for c in ("feature_id", "qd0", "h0", "qu0", "ql0") if c not in restart]
+        missing = [c for c in ("feature_id", *Q0_COLUMNS) if c not in restart]
         if missing:
             raise ValueError(
                 f"lite_channel_restart_file {restart_file} is missing column(s) {missing}. "
@@ -229,7 +234,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             )
 
         self._q0 = (
-            q0.set_index("up_node_id")[["qd0", "h0", "qu0", "ql0"]].fillna(0).astype("float32")
+            q0.set_index("up_node_id")[list(Q0_COLUMNS)].fillna(0).astype("float32")
         )
 
     def extract_waterbody_connections(rows, target_col, waterbody_null=-9999):
