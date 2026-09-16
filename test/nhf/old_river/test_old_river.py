@@ -97,8 +97,17 @@ FP_IDS = [
     1271022201616581,
     1270999001416760,
 ]
-START_TIME = "2011-04-14 00:00"
+# The retrospective hot start at SPINUP_START carries neither the Vicksburg nudge nor the
+# transfer, and the two take 25 h and 111 h to reach Baton Rouge; each case spins up from
+# it to START_TIME and the demonstration runs start there from the state that run wrote.
+SPINUP_START = "2011-04-14 00:00"
+START_TIME = "2011-04-19 00:00"
 END_TIME = "2011-06-30 00:00"
+HOT_START = "restart.pkl"  # retrospective at SPINUP_START
+RESTART_DIVERSION = "spinup_diversion.pkl"
+RESTART_NO_DIVERSION = "spinup_no_diversion.pkl"
+WATERBODY_DIVERSION = "spinup_diversion_waterbody.pkl"
+WATERBODY_NO_DIVERSION = "spinup_no_diversion_waterbody.pkl"
 FORCING_MODE = "retro"
 
 RUNOUT_PERIOD = int(
@@ -114,6 +123,8 @@ CFG_DIVERSION = Config(
     START_TIME,
     END_TIME_WITH_RUNOUT,
     restart_dir_name="restart",
+    restart_file_name=RESTART_DIVERSION,
+    waterbody_restart_file_name=WATERBODY_DIVERSION,
     data_assimilation_parameters=DataAssimilationParameters(
         usgs_timeslices_folder="usgs_da",
         streamflow_nudging=True,
@@ -126,6 +137,8 @@ CFG_NO_DIVERSION = Config(
     START_TIME,
     END_TIME_WITH_RUNOUT,
     restart_dir_name="restart",
+    restart_file_name=RESTART_NO_DIVERSION,
+    waterbody_restart_file_name=WATERBODY_NO_DIVERSION,
     config_file_name="config_no_diversion.yaml",
     output_dir_name="output_no_diversion",
     data_assimilation_parameters=DataAssimilationParameters(
@@ -142,6 +155,8 @@ CFG_PERSIST = Config(
     START_TIME,
     END_TIME_WITH_RUNOUT,
     restart_dir_name="restart",
+    restart_file_name=RESTART_DIVERSION,
+    waterbody_restart_file_name=WATERBODY_DIVERSION,
     config_file_name="config_persist.yaml",
     output_dir_name="output_persist",
     data_assimilation_parameters=DataAssimilationParameters(
@@ -162,6 +177,8 @@ CFG_PERSIST_NO_NUDGING = Config(
     START_TIME,
     END_TIME_WITH_RUNOUT,
     restart_dir_name="restart",
+    restart_file_name=RESTART_DIVERSION,
+    waterbody_restart_file_name=WATERBODY_DIVERSION,
     config_file_name="config_persist_no_nudging.yaml",
     output_dir_name="output_persist_no_nudging",
     data_assimilation_parameters=DataAssimilationParameters(
@@ -177,9 +194,34 @@ CFG_CONTROL_NO_NUDGING = Config(
     START_TIME,
     END_TIME_WITH_RUNOUT,
     restart_dir_name="restart",
+    restart_file_name=RESTART_NO_DIVERSION,
+    waterbody_restart_file_name=WATERBODY_NO_DIVERSION,
     config_file_name="config_control_no_nudging.yaml",
     output_dir_name="output_control_no_nudging",
     data_assimilation_parameters=DataAssimilationParameters(streamflow_nudging=False),
+)
+# Five-day runs from the retrospective hot start that write the states above.
+CFG_SPINUP = Config(
+    DATA_DIR,
+    SPINUP_START,
+    START_TIME,
+    restart_dir_name="restart",
+    restart_file_name=HOT_START,
+    lite_restart_dir_name="restart",
+    config_file_name="config_spinup.yaml",
+    output_dir_name="output_spinup",
+    data_assimilation_parameters=CFG_DIVERSION.data_assimilation_parameters,
+)
+CFG_SPINUP_NO_DIVERSION = Config(
+    DATA_DIR,
+    SPINUP_START,
+    START_TIME,
+    restart_dir_name="restart",
+    restart_file_name=HOT_START,
+    lite_restart_dir_name="restart",
+    config_file_name="config_spinup_no_diversion.yaml",
+    output_dir_name="output_spinup_no_diversion",
+    data_assimilation_parameters=CFG_NO_DIVERSION.data_assimilation_parameters,
 )
 
 GAGES_PATCH = {
@@ -198,16 +240,10 @@ def patch_gages(domain_path: Path) -> None:
 def setup(source_gpkg: str | Path, refresh: bool = True):
     """Subset the NHF domain and generate forcing for a standard test case."""
     offnetwork_upstreams = None
-    if refresh or not CFG_DIVERSION.config_path.exists():
-        CFG_DIVERSION.write_yaml()
-    if refresh or not CFG_NO_DIVERSION.config_path.exists():
-        CFG_NO_DIVERSION.write_yaml()
-    if refresh or not CFG_PERSIST.config_path.exists():
-        CFG_PERSIST.write_yaml()
-    if refresh or not CFG_PERSIST_NO_NUDGING.config_path.exists():
-        CFG_PERSIST_NO_NUDGING.write_yaml()
-    if refresh or not CFG_CONTROL_NO_NUDGING.config_path.exists():
-        CFG_CONTROL_NO_NUDGING.write_yaml()
+    # Cheap, and a stale file would run the notebook on settings the tests do not use.
+    for cfg in (CFG_DIVERSION, CFG_NO_DIVERSION, CFG_PERSIST, CFG_PERSIST_NO_NUDGING,
+                CFG_CONTROL_NO_NUDGING):
+        cfg.write_yaml()
 
     if refresh or not CFG_DIVERSION.domain_path.exists():
         offnetwork_upstreams = get_offnetwork_upstreams(source_gpkg, FP_IDS)
@@ -220,7 +256,7 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
             offnetwork_upstreams = get_offnetwork_upstreams(source_gpkg, FP_IDS)
         build_forcing_dataset(
             FORCING_MODE,
-            START_TIME,
+            SPINUP_START,
             END_TIME,
             CFG_DIVERSION.channel_forcing_dir,
             CFG_DIVERSION.domain_path,
@@ -228,12 +264,12 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
             offnetwork_upstreams=offnetwork_upstreams,
         )
 
-    restart_file = CFG_DIVERSION.root_dir / CFG_DIVERSION.restart_dir_name / "restart.pkl"
+    restart_file = CFG_DIVERSION.root_dir / CFG_DIVERSION.restart_dir_name / HOT_START
     if refresh or not restart_file.exists():
         if offnetwork_upstreams is None:
             offnetwork_upstreams = get_offnetwork_upstreams(source_gpkg, FP_IDS)
         create_hot_start_file(
-            t_start=START_TIME,
+            t_start=SPINUP_START,
             restart_dir=str(CFG_DIVERSION.root_dir / CFG_DIVERSION.restart_dir_name),
             hydrofabric_path=str(CFG_DIVERSION.domain_path),
             offnetwork_upstreams=offnetwork_upstreams
@@ -252,7 +288,7 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
         refresh or not has_files(CFG_DIVERSION.usgs_timeslices_dir, "*.usgsTimeSlice.ncdf")
     ):
         lookback_hours = CFG_DIVERSION.data_assimilation_parameters.timeslice_lookback_hours or 0
-        da_start = (pd.Timestamp(START_TIME) - pd.Timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
+        da_start = (pd.Timestamp(SPINUP_START) - pd.Timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
         write_usgs_timeslices(
             station_ids=["07381482", "07289000"],
             start_time=da_start,
@@ -264,7 +300,7 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
         refresh or not has_files(CFG_NO_DIVERSION.usgs_timeslices_dir, "*.usgsTimeSlice.ncdf")
     ):
         lookback_hours = CFG_NO_DIVERSION.data_assimilation_parameters.timeslice_lookback_hours or 0
-        da_start = (pd.Timestamp(START_TIME) - pd.Timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
+        da_start = (pd.Timestamp(SPINUP_START) - pd.Timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
         write_usgs_timeslices(
             station_ids=["07289000"],
             start_time=da_start,
@@ -277,7 +313,7 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
         refresh or not has_files(CFG_PERSIST.usgs_timeslices_dir, "*.usgsTimeSlice.ncdf")
     ):
         lookback_hours = CFG_PERSIST.data_assimilation_parameters.timeslice_lookback_hours or 0
-        da_start = (pd.Timestamp(START_TIME) - pd.Timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
+        da_start = (pd.Timestamp(SPINUP_START) - pd.Timedelta(hours=lookback_hours)).strftime("%Y-%m-%d %H:%M")
         write_usgs_timeslices(
             station_ids=["07381482", "07289000"],
             start_time=da_start,
@@ -286,6 +322,23 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
             dv_only=True,
             end_time_by_station={"07381482": OBS_CUT},
         )
+
+    # The demonstration's warm states: each case run from the retrospective hot start to
+    # START_TIME, the lite restart the driver writes at that hour kept under the case's name.
+    restart_dir = CFG_DIVERSION.root_dir / CFG_DIVERSION.restart_dir_name
+    stamp = pd.Timestamp(START_TIME).strftime("%Y%m%d%H%M")
+    for cfg, channel_name, waterbody_name in (
+        (CFG_SPINUP, RESTART_DIVERSION, WATERBODY_DIVERSION),
+        (CFG_SPINUP_NO_DIVERSION, RESTART_NO_DIVERSION, WATERBODY_NO_DIVERSION),
+    ):
+        if refresh or not (restart_dir / channel_name).exists():
+            cfg.write_yaml()
+            delete_outputs(cfg.output_dir)
+            run_troute(cfg.config_path)
+            (restart_dir / f"channel_restart_{stamp}").replace(restart_dir / channel_name)
+            (restart_dir / f"waterbody_restart_{stamp}").replace(restart_dir / waterbody_name)
+            for earlier_window in restart_dir.glob("*_restart_????????????"):
+                earlier_window.unlink()
 
 # Gages bracketing the control structure, with the routing link each resolves to.
 # Taken from the diagnostics behind the Old River report (its Figure 7).
@@ -423,7 +476,7 @@ def test_persistence_holds_the_last_observation(persist, control, request):
     assert observed.sum() >= 24 * 30 and held.sum() >= 24 * 29, (observed.sum(), held.sum())
 
     # 13.1: assimilated as an addition at the receiving node and a subtraction at
-    # the donor, every written hour, once the cold start has settled.
+    # the donor, every written hour, after the first day.
     np.testing.assert_allclose(head[observed], obs.reindex(index)[observed], rtol=0.01)
     np.testing.assert_allclose(diverted[observed], obs.reindex(index)[observed], rtol=0.03)
     # 13.2: the last specified value persists at both nodes.

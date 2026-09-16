@@ -44,11 +44,11 @@ def built_case(request):
     Returns the config so the test reads as a single statement, and clears any
     outputs left by a previous run so assertions cannot pass on stale files.
 
-    The YAML is rewritten from the in-code Config on every run. Prep only writes
-    it when it is missing, so editing a Config here otherwise left the old file on
-    disk and the run silently used settings the test no longer describes. That is
-    not a visible failure, it is a test that quietly measures the wrong thing. The
-    expensive inputs, domain and forcing and timeslices, are still reused.
+    The YAML is rewritten from the in-code Config on every run, so a Config edited
+    after prep cannot leave a stale file on disk and have the run silently use
+    settings the test does not describe. That is not a visible failure, it is a
+    test that quietly measures the wrong thing. The expensive inputs, domain and
+    forcing and timeslices, are still reused.
     """
 
     def _use(cfg, *, clear=()):

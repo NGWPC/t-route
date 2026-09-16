@@ -93,6 +93,9 @@ class Config:
     max_loop_size: int = 288
     lakeout_output: Optional[str] = None
     restart_dir_name: Optional[str] = None
+    restart_file_name: str = "restart.pkl"
+    waterbody_restart_file_name: Optional[str] = None
+    lite_restart_dir_name: Optional[str] = None
 
     def __post_init__(self):
         """Create the expected directory structure."""
@@ -104,6 +107,8 @@ class Config:
             self.lakeout_dir.mkdir(parents=True, exist_ok=True)
         if self.restart_dir_name:
             (self.root_dir / self.restart_dir_name).mkdir(parents=True, exist_ok=True)
+        if self.lite_restart_dir_name:
+            (self.root_dir / self.lite_restart_dir_name).mkdir(parents=True, exist_ok=True)
         if self.usgs_timeslices_dir:
             self.usgs_timeslices_dir.mkdir(parents=True, exist_ok=True)
         if self.usace_timeslices_dir:
@@ -263,7 +268,14 @@ class Config:
             config["output_parameters"]["lakeout_output"] = self.lakeout_output
 
         if self.restart_dir_name:
-            config["compute_parameters"]["restart_parameters"]["lite_channel_restart_file"] = str(Path(self.restart_dir_name) / "restart.pkl")
+            restart = config["compute_parameters"]["restart_parameters"]
+            restart["lite_channel_restart_file"] = str(Path(self.restart_dir_name) / self.restart_file_name)
+            if self.waterbody_restart_file_name:
+                restart["lite_waterbody_restart_file"] = str(Path(self.restart_dir_name) / self.waterbody_restart_file_name)
+        if self.lite_restart_dir_name:
+            config["output_parameters"]["lite_restart"] = {
+                "lite_restart_output_directory": str(Path(self.lite_restart_dir_name)),
+            }
 
         with open(self.config_path, "w") as f:
             yaml.dump(config, f)
