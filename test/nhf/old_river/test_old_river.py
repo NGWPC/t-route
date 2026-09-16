@@ -433,6 +433,16 @@ def test_persistence_holds_the_last_observation(persist, control, request):
     after, before = cut + pd.Timedelta(hours=1), cut - pd.Timedelta(hours=1)
     step = abs(float(diverted[after]) - float(diverted[before]))
     assert step < 0.02 * last, f"diverted amount stepped by {step:.0f} cms at the cut"
+    # The receiving reach routes the imposed flow smoothly: a link of the creek that
+    # carries it settling on the depth search's degenerate root shows up here within a
+    # day as a drop of more than half in an hour.
+    # Checked through END_TIME only: the hold expires 45 days after the cut and both
+    # sides stop at once, which is a step by design.
+    _, simmesport = ATCHAFALAYA_SIMMESPORT
+    downstream = _flow_at(persist_case.output_dir, simmesport)
+    settled = downstream[observed | held]
+    hourly_change = (settled.diff().abs() / settled.shift()).dropna()
+    assert hourly_change.max() < 0.10, f"Simmesport moved {100 * hourly_change.max():.0f}% in one hour"
     # Elsewhere unchanged: the upstream gage's flow is the control's.
     _, vicksburg = MISSISSIPPI_VICKSBURG
     np.testing.assert_allclose(
