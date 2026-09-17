@@ -967,6 +967,73 @@ class TestHourlyCycles:
         assert held_windows == 2, "cycles 0 and 1 reach the deadline, later cycles do not"
 
 
+class TestDiversionOnlyConfiguration:
+    """A configuration with only the diversion block: the schema hands every omitted DA
+    section over as None, and the DA objects must read them as empty."""
+
+    @staticmethod
+    def _params(tmp_path):
+        from troute.config.compute_parameters import DataAssimilationParameters
+
+        return DataAssimilationParameters(
+            usgs_timeslices_folder=str(tmp_path),
+            diversion_da={"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE}},
+        ).model_dump()
+
+    def test_persistence_da_initializes_with_the_sections_omitted(self, tmp_path):
+        from troute.DataAssimilation import PersistenceDA
+
+        params = self._params(tmp_path)
+        assert params["reservoir_da"] is None and params["streamflow_da"] is None
+
+        class _Network:
+            t0 = pd.Timestamp("2011-06-01")
+            _diversion_site_to_node = {}
+            waterbody_dataframe = pd.DataFrame()
+
+        da = PersistenceDA.__new__(PersistenceDA)
+        da._data_assimilation_parameters = params
+        da._run_parameters = {"dt": 300, "nts": 12}
+        da._usgs_df = pd.DataFrame()  # what NudgingDA leaves for it in the real order
+        PersistenceDA.__init__(da, _Network(), True, None, da_run={})
+        assert da._reservoir_usgs_df.empty
+
+    def test_the_rollover_runs_with_the_sections_omitted(self, tmp_path):
+        params = self._params(tmp_path)
+
+        class _Network:
+            t0 = pd.Timestamp("2011-06-01 02:00")
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        class _DA:
+            _data_assimilation_parameters = params
+            _run_parameters = {"dt": 900, "nts": 4}
+            _diversion_seed_in = {GAGE_LINK: (pd.Timestamp("2011-06-01 00:00"), 5.0)}
+            _diversion_scan_empty_before = {}
+            _diversion_rows = {}
+            _usgs_df = pd.DataFrame()
+            diversion_seed_at = NudgingDA.diversion_seed_at
+            update_for_next_loop = NudgingDA.update_for_next_loop
+
+        da = _DA()
+        da.update_for_next_loop(_Network(), {})
+        np.testing.assert_allclose(da._usgs_df.loc[GAGE_LINK].to_numpy(), 5.0)
+
+    def test_the_persistence_rollover_runs_with_the_sections_omitted(self, tmp_path):
+        from troute.DataAssimilation import PersistenceDA
+
+        class _Network:
+            t0 = pd.Timestamp("2011-06-01 02:00")
+            waterbody_types_dataframe = pd.DataFrame()
+
+        da = PersistenceDA.__new__(PersistenceDA)
+        da._data_assimilation_parameters = self._params(tmp_path)
+        da._run_parameters = {"dt": 900, "nts": 4}
+        da._usgs_df = pd.DataFrame()
+        PersistenceDA.update_for_next_loop(da, _Network(), {})
+        assert da._usgs_df.empty
+
+
 class TestCrosswalkOnAnotherDomain:
     """One configuration serves every domain; a domain without the structure routes on."""
 

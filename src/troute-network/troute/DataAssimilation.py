@@ -90,7 +90,7 @@ class NudgingDA(AbstractDA):
         run_parameters = self._run_parameters
         
         # isolate user-input parameters for streamflow data assimilation
-        streamflow_da_parameters = data_assimilation_parameters.get('streamflow_da', None)
+        streamflow_da_parameters = data_assimilation_parameters.get('streamflow_da') or {}
 
         da_parameter_dict = {"da_decay_coefficient": data_assimilation_parameters.get("da_decay_coefficient", 120),
                              "diffusive_streamflow_nudging": False}
@@ -200,7 +200,7 @@ class NudgingDA(AbstractDA):
                         )
                 else:
                     # lastobs Dataframe for HYfeature HYdrofabric
-                    lastobs_file = data_assimilation_parameters.get('streamflow_da', {}).get('lastobs_file', False)              
+                    lastobs_file = (data_assimilation_parameters.get('streamflow_da') or {}).get('lastobs_file', False)              
                     if lastobs_file:
                         lastobs_df = _read_lastobs_file(lastobs_file)
                         lastobs_df = lastobs_df.set_index('gages')
@@ -274,7 +274,7 @@ class NudgingDA(AbstractDA):
         - data_assimilation               (Object): Object containing all data assimilation information
             - lastobs_df               (DataFrame): Last gage observations data for DA
         '''
-        streamflow_da_parameters = self._data_assimilation_parameters.get('streamflow_da', None)
+        streamflow_da_parameters = self._data_assimilation_parameters.get('streamflow_da') or {}
 
         if streamflow_da_parameters:
             # Scaling drives the same override, so the kernel records the same
@@ -315,7 +315,8 @@ class NudgingDA(AbstractDA):
         run_parameters = self._run_parameters
 
         # update usgs_df if it is not empty
-        streamflow_da_parameters = data_assimilation_parameters.get('streamflow_da', None)
+        # A section the configuration omits arrives as None from the schema.
+        streamflow_da_parameters = data_assimilation_parameters.get('streamflow_da') or {}
         
         if streamflow_da_parameters.get('streamflow_nudging', False):
             self._usgs_df = _create_usgs_df(data_assimilation_parameters, streamflow_da_parameters, run_parameters, network, da_run)
@@ -410,8 +411,8 @@ class PersistenceDA(AbstractDA):
         run_parameters = self._run_parameters
 
         # isolate user-input parameters for reservoir data assimilation
-        reservoir_da_parameters = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_persistence_da', None)
-        streamflow_da_parameters = data_assimilation_parameters.get('streamflow_da', None)
+        reservoir_da_parameters = (data_assimilation_parameters.get('reservoir_da') or {}).get('reservoir_persistence_da', None)
+        streamflow_da_parameters = data_assimilation_parameters.get('streamflow_da') or {}
 
         # check if user explictly requests USGS and/or USACE reservoir DA
         usgs_persistence  = False
@@ -873,14 +874,15 @@ class PersistenceDA(AbstractDA):
         run_parameters = self._run_parameters
 
         # update usgs_df if it is not empty
-        streamflow_da_parameters = data_assimilation_parameters.get('streamflow_da', {})
-        reservoir_da_parameters = data_assimilation_parameters.get('reservoir_da', {})
+        streamflow_da_parameters = data_assimilation_parameters.get('streamflow_da') or {}
+        reservoir_da_parameters = data_assimilation_parameters.get('reservoir_da') or {}
+        reservoir_persistence = reservoir_da_parameters.get('reservoir_persistence_da') or {}
         
         # Same gate as in __init__: the diversion's fill can make this
         # frame non-empty while holding only the diversion gage's row.
         if (streamflow_da_parameters or {}).get('streamflow_nudging', False) and not self.usgs_df.empty:
 
-            if reservoir_da_parameters.get('reservoir_persistence_da',{}).get('reservoir_persistence_usgs', False):
+            if reservoir_persistence.get('reservoir_persistence_usgs', False):
                 
                 gage_lake_df = (
                     network.usgs_lake_gage_crosswalk.
@@ -929,7 +931,7 @@ class PersistenceDA(AbstractDA):
         # branch never fired, so whenever the frame above was not refreshed the
         # type-2 reservoir observations stayed frozen on the first window's values
         # while the kernel kept recomputing offsets against the current t0.
-        elif reservoir_da_parameters.get('reservoir_persistence_da', {}).get('reservoir_persistence_usgs', False):
+        elif reservoir_persistence.get('reservoir_persistence_usgs', False):
             (
                 self._reservoir_usgs_df,
                 _,
@@ -950,7 +952,7 @@ class PersistenceDA(AbstractDA):
                 self._usgs_df = _reindex_link_to_lake_id(self.usgs_df, network.link_lake_crosswalk)
         
         # USACE
-        if reservoir_da_parameters.get('reservoir_persistence_da').get('reservoir_persistence_usace', False):
+        if reservoir_persistence.get('reservoir_persistence_usace', False):
             
             (
                 self._reservoir_usace_df,
@@ -967,7 +969,7 @@ class PersistenceDA(AbstractDA):
 
         # USBR. Without this, type-7 reservoirs kept the first window's observations
         # for the whole run: the next loop's usbr timeslices were never read.
-        if reservoir_da_parameters.get('reservoir_persistence_da').get('reservoir_persistence_usbr', False):
+        if reservoir_persistence.get('reservoir_persistence_usbr', False):
 
             (
                 self._reservoir_usbr_df,
@@ -1036,7 +1038,7 @@ class great_lake(AbstractDA):
         greatLake = False
         data_assimilation_parameters = self._data_assimilation_parameters
         run_parameters = self._run_parameters
-        reservoir_persistence_da = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_persistence_da', {})
+        reservoir_persistence_da = (data_assimilation_parameters.get('reservoir_da') or {}).get('reservoir_persistence_da', {})
 
         self._great_lakes_df = pd.DataFrame()
         self._great_lakes_param_df = pd.DataFrame()
@@ -1124,7 +1126,7 @@ class great_lake(AbstractDA):
         greatLake = False
         data_assimilation_parameters = self._data_assimilation_parameters
         run_parameters = self._run_parameters
-        reservoir_persistence_da = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_persistence_da', {})
+        reservoir_persistence_da = (data_assimilation_parameters.get('reservoir_da') or {}).get('reservoir_persistence_da', {})
 
         if reservoir_persistence_da:
             greatLake = reservoir_persistence_da.get('reservoir_persistence_greatLake', False)
@@ -1154,7 +1156,7 @@ class RFCDA(AbstractDA):
     def __init__(self, network, from_files, value_dict):
         LOG.info("RFCDA class is started.")
         RFCDA_start_time = time.time()
-        rfc_parameters = self._data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_rfc_da', None)
+        rfc_parameters = (self._data_assimilation_parameters.get('reservoir_da') or {}).get('reservoir_rfc_da', None)
 
         # check if user explictly requests RFC reservoir DA
         rfc  = False
