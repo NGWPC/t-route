@@ -50,7 +50,9 @@ jobs:
           # which the suite imports. matplotlib and psutil match the image's base
           # layer; the nhf diagnostics helpers import them.
           python -m pip install .[test]
-          python -m pip install matplotlib psutil
+          # matplotlib's extras resolve to a numpy 2 wheel over the project's pin;
+          # naming the pin keeps the build and the tests on the numpy the project targets.
+          python -m pip install "numpy==1.26.4" matplotlib psutil
 
       # Builds the Fortran kernels and the Cython extensions, then reinstalls the
       # packages non-editable, as the production image does.

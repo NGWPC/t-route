@@ -48,7 +48,7 @@ RUN --mount=type=cache,target=/root/.cache/pip,id=pip-cache \
     set -eux && \
     python -m pip install --upgrade pip && \
     python -m pip install -r requirements.txt && \
-    python -m pip install matplotlib psutil
+    python -m pip install "numpy==1.26.4" matplotlib psutil
 
 ### DEV IMAGE ###
 FROM base AS dev

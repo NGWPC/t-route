@@ -46,6 +46,13 @@ WATERBODY_DF_FIELDS = [
                 "WeirE",
                 "WeirL",
             ]
+# Columns the level-pool kernel reads (compute.py's LakeData view). Completeness gates
+# name these explicitly rather than requiring every column present: the waterbody frame
+# also carries identity columns (`lake_id`, null for a dam with no NHD 2.1 match) and,
+# under lakeout, crs/lat/lon, none of which decide whether a lake can be routed.
+LEVEL_POOL_PARAMS = (
+    "LkArea", "LkMxE", "OrificeA", "OrificeC", "OrificeE", "WeirC", "WeirE", "WeirL", "ifd",
+)
 RESERVOIR_DA_SITE_ID_FIELD = "site_no"
 RESERVOIR_DA_SITE_TYPE_FIELD = "da_type"
 
@@ -703,7 +710,7 @@ def _clean_waterbodies(
 
     # 6. parameter completeness
     n_before = len(waterbody_df)
-    waterbody_df = waterbody_df.dropna()
+    waterbody_df = waterbody_df.dropna(subset=[*LEVEL_POOL_PARAMS, "fp_id"])
     n_no_param = n_before - len(waterbody_df)
     if n_no_param:
         LOG.warning(
@@ -1621,18 +1628,30 @@ class NHFPreprocessMixin:
 
         # Create updated diversion_da dict
         for fp_id, site_no in _crosswalk.items():
+            # One configuration serves every domain; a domain without the structure
+            # routes on without the diversion, and says so.
             from_id = fp_outlet_nodes.get(fp_id)
             if from_id is None:
-                raise ValueError(
-                    f"diversion_gage_crosswalk: fp_id {fp_id} not found in network."
+                LOG.warning(
+                    "diversion_gage_crosswalk: fp_id %s is not in this domain; the "
+                    "diversion to gage %s is not applied here.", fp_id, site_no,
                 )
+                continue
             gage_node = self._diversion_site_to_node.get(site_no)
             if gage_node is None:
-                raise ValueError(
-                    f"diversion_gage_crosswalk: site_no '{site_no}' not found in gages."
+                LOG.warning(
+                    "diversion_gage_crosswalk: gage %s is not in this domain's gages; the "
+                    "diversion from fp_id %s is not applied here.", site_no, fp_id,
                 )
+                continue
             self.diversion_da[from_id] = gage_node
             LOG.debug(
                 "Diversion configured: fp_id %s (node %s) -> gage %s (node %s)",
                 fp_id, from_id, site_no, gage_node,
             )
+        # Only a gage paired with a donor here is a diversion gage: the DA reads,
+        # holds and exempts from decay what this map names.
+        resolved = set(self.diversion_da.values())
+        self._diversion_site_to_node = {
+            site: node for site, node in self._diversion_site_to_node.items() if node in resolved
+        }

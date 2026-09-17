@@ -251,11 +251,8 @@ class Model:
         self._data_assimilation = DataAssimilation(
             network=self._network,
             data_assimilation_parameters=self.data_assimilation_parameters,
-            # Not an empty dict: the observation readers need dt and nts. With them
-            # missing, file-based nudging computed its resampling frequency from
-            # dt=None, and the climatological diversion fallback fell back to
-            # dt=300/nts=0 and built a single column, which the kernel (indexing from
-            # timestep 1) never reads.
+            # Not an empty dict: the readers need dt and nts, or nudging resamples from
+            # dt=None and the diversion grid collapses to one column the kernel never reads.
             run_parameters={
                 "dt": self.dt,
                 "nts": self.nts,
@@ -340,6 +337,8 @@ class Model:
         # unwritten output -- recovery is checkpoint-restart (load_state), the
         # same contract a mid-update failure already had before the deferral.
         pending = None
+        # After any load_state: a checkpointed cycle carries its seed and never scans.
+        self._data_assimilation.seed_from_record(self._network)
         for run in run_sets:
             LOG.debug("Starting routing function")
             route_start_time = time.time()
@@ -347,20 +346,24 @@ class Model:
             # below (nwm_route gets the local binding, so injecting later leaves the
             # kernel on the previous window's frame). The injected gage set is fixed,
             # keeping the cached execution plan valid across runs.
+            usgs_df = self._data_assimilation.usgs_df
             if self._scaling_da is not None:
                 from nwm_routing.scaling_da_apply import merge_injected_obs
 
                 # One list spanning this update: t0 advances every update_until
                 # call, and a per-window list would tie the observations to
-                # max_loop_size.
-                self._data_assimilation._usgs_df = merge_injected_obs(  # pyright: ignore[reportPrivateUsage]
+                # max_loop_size. Merged into the local, never back onto the DA
+                # object: the merge reindexes surviving rows onto this window's
+                # columns, and nothing rebuilds the run-spanning rows between windows.
+                usgs_df = merge_injected_obs(
                     self._scaling_da.build_usgs_df(
                         run["t0"], self.dt, run["nts"], scaling_da_run
                     ),
-                    self._data_assimilation.usgs_df,
+                    usgs_df,
+                    # The diversion owns its gage's row: the held values it filled in.
+                    protected=(getattr(self._network, "diversion_da", {}) or {}).values(),
                 )
 
-            usgs_df = self._data_assimilation.usgs_df
             if not usgs_df.empty:
                 # Trims run-spanning nudging/diversion frames; no-op for the
                 # injected frame, whose columns already start at t0.
@@ -432,6 +435,7 @@ class Model:
                 # diversion is silently disabled under BMI, which is the path ngen
                 # drives. NHF only: other network types do not resolve this map.
                 diversion_da=getattr(self._network, "diversion_da", {}) or {},
+                diversion_applied=self._data_assimilation.diversion_applied,
                 # Same static split points as the -V5 driver: the plan is cached
                 # across updates, so it must not depend on this window's data. Same
                 # helper as the -V5 driver so both plans split at an identical set.
@@ -572,6 +576,10 @@ class Model:
             "t0": self._network._t0,
             # updated data stored on DataAssimilation
             "last_obs": self._data_assimilation._last_obs_df,
+            # As of the checkpoint time, not the next window's: the raw rows may hold
+            # reports past t0 that this checkpoint has not assimilated.
+            "diversion_seed": self._data_assimilation.diversion_seed_at(self._network._t0),
+            "diversion_applied": dict(self._data_assimilation.diversion_applied),
             "usgs": self._data_assimilation._reservoir_usgs_param_df,
             "usace": self._data_assimilation._reservoir_usace_param_df,
             # USBR persistence state is updated every window alongside USGS and
@@ -827,6 +835,12 @@ class Model:
         self._seeded_q0 = seeded
         self._network._t0 = data["t0"]
         da._last_obs_df = self._compatible_lastobs(resolved["last_obs"])
+        # The checkpoint's seed as it is: a rollback to an earlier checkpoint must not
+        # keep a later one's. The rows were filled at init, before this restore, so
+        # the seed alone would change nothing: re-run the fill from the pre-fill rows.
+        da._diversion_seed_in = data.get("diversion_seed") or {}
+        da.refill_diversion_rows()
+        da._diversion_applied = data.get("diversion_applied") or {}
         da._reservoir_usgs_param_df = resolved["usgs"]
         da._reservoir_usace_param_df = resolved["usace"]
         if "usbr" in resolved:

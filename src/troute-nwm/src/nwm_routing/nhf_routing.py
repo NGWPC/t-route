@@ -4,6 +4,7 @@ import time
 
 import numpy as np
 import pandas as pd
+from datetime import timedelta
 
 from .scaling_da_apply import span_da_runs
 from .flow_scaling_utils import append_nonrouting_to_run_results
@@ -22,6 +23,7 @@ from troute.DataAssimilation import DataAssimilation
 
 import troute.nhd_network_utilities_v02 as nnu
 import troute.hyfeature_network_utilities as hnu
+import troute.nhd_io as nhd_io
 
 import logging
 LOG = logging.getLogger("TROUTE")
@@ -120,6 +122,7 @@ def nhf_routing(argv):
         value_dict=None,
         da_run=da_sets[0],
         )
+    data_assimilation.seed_from_record(network)
     
     forcing_end_time = time.time()
 
@@ -249,6 +252,8 @@ def nhf_routing(argv):
                     t0, dt, nts, scaling_da_run
                 ),
                 data_assimilation.usgs_df,
+                # The diversion owns its gage's row: the held values it filled in.
+                protected=(network.diversion_da or {}).values(),
             )
 
         route_start_time = time.time()
@@ -313,6 +318,7 @@ def nhf_routing(argv):
             # flowveldepth_interorder=network.flowveldepth_interorder,
             qlat_add_loc = "bottom",  # All NHF lats go in bottom
             diversion_da=network.diversion_da,
+            diversion_applied=data_assimilation.diversion_applied,
             # Static split points for the cached execution plan: every gage the
             # network carries, not just those with observations this window.
             gage_segments=network_gage_segments(network)
@@ -325,8 +331,6 @@ def nhf_routing(argv):
         # POSITION differs. The prognostic arm places it BEFORE the warmstate snapshot
         # so the corrected discharge lands in q0, but only on the FINAL window -- see
         # should_seed_state() for why re-seeding every window degrades the correction.
-        # NOTE: this driver keeps no restart of its own (write_lite_restart below is
-        # commented out); forecast restarts go through the BMI driver, which persists q0.
         seed_state = should_seed_state(scaling_da, run_set_iterator, len(run_sets))
         # HALO: this window's innovation is what the PREVIOUS window's backward shift
         # needs to read past its own end. Flush the pending window now that we have it,
@@ -352,15 +356,13 @@ def nhf_routing(argv):
         # update reservoir parameters and lastobs_df
         data_assimilation.update_after_compute(run_results, dt*nts)
 
-        # TODO move the conditional call to write_lite_restart to nwm_output_generator.
-        # if output_parameters:
-        #     if output_parameters['lite_restart'] is not None:
-        #         nhd_io.write_lite_restart(
-        #             network.q0, 
-        #             network._waterbody_df, 
-        #             t0 + timedelta(seconds = dt * nts), 
-        #             output_parameters['lite_restart']
-        #         )                    
+        if output_parameters.get("lite_restart"):
+            nhd_io.write_lite_restart(
+                network.q0,
+                network._waterbody_df,
+                t0 + timedelta(seconds=dt * nts),
+                output_parameters["lite_restart"],
+            )
 
         # Prepare input forcing for next time loop simulation when mutiple time loops are presented.
         if run_set_iterator < len(run_sets) - 1:

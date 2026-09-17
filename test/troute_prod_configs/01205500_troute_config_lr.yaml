@@ -26,6 +26,11 @@ compute_parameters:
             streamflow_nudging: false
             streamflow_scaling: false
             diffusive_streamflow_nudging: false
+        usgs_timeslices_folder: test/LowerColorado_TX_v4/usgs_timeslices
+        diversion_da:
+            diversion_gage_crosswalk:
+                1270479816524705: '07381482'
+            diversion_persist_days: 32
         reservoir_da:
             reservoir_persistence_da:
                 reservoir_persistence_greatLake: false

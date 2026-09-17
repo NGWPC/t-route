@@ -41,6 +41,8 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
     integer :: maxiter, tries
     logical :: converged, stalled
     real(prec) :: mindepth, aerror, rerror
+    real(prec) :: qref, h_seed, h_low, h_last, qmc
+    logical :: collapsed
     real(prec) :: R, twl, h_1, h, h_0, Qj, Qj_0
 
     ! qdc = 0.0
@@ -92,6 +94,12 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
     ! Ck formula. These are constants across the Secant iteration.
     sqrt_s0_over_n   = sqrt_s0 / n
     sqrt_s0_over_ncc = sqrt_s0 / ncc
+
+    !* Restart depths for a collapsed search, computed only when one collapses.
+    qref = max(qup, quc, qdp, ql)
+    h_seed = 0.0_prec
+    h_low  = 0.0_prec
+    h_last = 0.0_prec
     two_sqrt_1pz2    = 2.0_prec * sqrt_1pz2
     bw_plus_2bfdz    = bw + 2.0_prec * bfd * z
 
@@ -174,6 +182,45 @@ subroutine muskingcungenwm(dt, qup, quc, qdp, ql, dx, bw, tw, twcc,&
             endif
         end do !*do while (rerror .gt. 0.01 .and. ....
 111    continue
+
+        !* Seeded near zero depth the search settles on the equation's degenerate
+        !* root (celerity about zero, C3 = 1), where the segment passes its own
+        !* previous outflow whatever arrives. The step tests accept that root; the
+        !* residual does not, since at a root the Muskingum estimate and the Manning
+        !* flow agree. Restart from wide-rectangle normal depths, widest section
+        !* first. A repeat landing is a steep root, not a collapse, only if the
+        !* Manning flow there carries at least half the estimate.
+        qmc = (C1*qup) + (C2*quc) + (C3*qdp) + C4
+        collapsed = (qref .gt. 0.0_prec) .and. (abs(Qj) .gt. 0.1_prec * abs(qmc)) .and. &
+                    (abs(Qj) .gt. 0.01_prec)
+        if (h_last .gt. 0.0_prec .and. abs(h - h_last) .le. 0.05_prec * max(h, mindepth) &
+            .and. Qj .le. 0.5_prec * abs(qmc)) then
+            collapsed = .false.
+        endif
+        if (collapsed .and. tries .le. 4) then
+            tries = tries + 1
+            h_last = h
+            if (h_seed .eq. 0.0_prec) then
+                h_seed = (qref * n / (bw * sqrt_s0))**0.6_prec
+                h_low  = (qref * n / (max(twcc, tw, bw) * sqrt_s0))**0.6_prec
+            endif
+            select case (tries)
+            case (1)
+                h = h_low
+            case (2)
+                h = sqrt(h_low * h_seed)
+            case (3)
+                h = h_seed
+            case default
+                h = 4.0_prec * h_seed
+            end select
+            h_0   = h * 0.67_prec
+            h     = h * 1.33_prec
+            maxiter = maxiter + 25
+            aerror = 0.01_prec
+            rerror = 1.0_prec
+            goto 110
+        endif
 
         !* iter alone is not failure: the loop can meet its tolerance on the
         !* same pass that takes iter to maxiter. A stall is never convergence.

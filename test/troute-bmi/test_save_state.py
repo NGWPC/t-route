@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import pickle
 
+import numpy as np
 import pandas as pd
 import pytest
 from troute_nwm_bmi.troute_model import Model
+
+from troute.DataAssimilation import NudgingDA, _DiversionRow
 
 
 class _ExecutionPlanLike:
@@ -41,6 +44,16 @@ class _DataAssimilationStub:
         self._reservoir_usbr_param_df = pd.DataFrame({"e": [7]})
         self._reservoir_rfc_param_df = pd.DataFrame({"c": [3]})
         self._great_lakes_param_df = pd.DataFrame({"d": [4]})
+        self._diversion_seed_in = {}
+        self._diversion_rows = {}
+        self._diversion_applied = {}
+        self._usgs_df = pd.DataFrame()
+        self._data_assimilation_parameters = {}
+
+    # The real methods, bound to this stub: they read only the attributes above.
+    diversion_seed_at = NudgingDA.diversion_seed_at
+    refill_diversion_rows = NudgingDA.refill_diversion_rows
+    diversion_applied = NudgingDA.diversion_applied
 
 
 class _ScalingDAStub:
@@ -852,3 +865,128 @@ def test_a_matching_roster_is_left_alone():
     state = _no_da_state(); state["last_obs"] = saved
     model.load_state(state)
     pd.testing.assert_frame_equal(model._data_assimilation._last_obs_df, saved)
+
+
+# --- diversion seed: as of the checkpoint time out, re-filled on the way in ------------
+
+_DIV_LINK = 1269985531956909
+_DIV_T0 = pd.Timestamp("2011-05-01 00:00")
+
+
+def _diversion_row(values: dict) -> _DiversionRow:
+    grid = pd.date_range(_DIV_T0 - pd.Timedelta(hours=1), periods=25, freq="15min")
+    raw = pd.Series(np.nan, index=grid, dtype=float)
+    for when, q in values.items():
+        raw[pd.Timestamp(when)] = q
+    return _DiversionRow(raw, "07381482")
+
+
+def test_create_state_takes_the_diversion_seed_as_of_the_checkpoint_time():
+    """A BMI frame spans the whole horizon; the checkpoint must not see past t0."""
+    model = _make_model(3600.0, [None, None, None])
+    model._network._t0 = _DIV_T0
+    model._data_assimilation._diversion_rows = {
+        _DIV_LINK: _diversion_row({"2011-04-30 23:30": 3.0, "2011-05-01 02:00": 9.0})
+    }
+    seed = model.create_state()["diversion_seed"]
+    assert seed == {_DIV_LINK: (pd.Timestamp("2011-04-30 23:30"), 3.0)}
+
+
+def test_load_state_refills_the_diversion_row_from_the_restored_seed():
+    """Restoring the seed alone changes nothing: the frame was filled at init."""
+    state = _make_model(3600.0, [None, None, None]).create_state()
+    state["diversion_seed"] = {_DIV_LINK: (pd.Timestamp("2011-04-30 12:00"), 4.0)}
+    dst = _make_model(0.0, [None, None, None])
+    da = dst._data_assimilation
+    row = _diversion_row({})
+    da._diversion_rows = {_DIV_LINK: row}
+    da._usgs_df = row.raw.to_frame().T
+    da._usgs_df.index = pd.Index([_DIV_LINK], dtype="int64")
+    da._data_assimilation_parameters = {"diversion_da": {"diversion_persist_days": 11}}
+    dst.load_state(pickle.loads(pickle.dumps(state, pickle.HIGHEST_PROTOCOL)))
+    np.testing.assert_allclose(da._usgs_df.loc[_DIV_LINK].to_numpy(), 4.0)
+
+
+def test_load_state_refills_on_the_frames_own_columns():
+    """The frame was trimmed to t0 at init; the refill must not bring the raw row's
+    lookback columns back, appended after the grid, which breaks the run's t0 slice."""
+    state = _make_model(3600.0, [None, None, None]).create_state()
+    state["diversion_seed"] = {_DIV_LINK: (pd.Timestamp("2011-04-30 12:00"), 4.0)}
+    dst = _make_model(0.0, [None, None, None])
+    da = dst._data_assimilation
+    row = _diversion_row({})
+    da._diversion_rows = {_DIV_LINK: row}
+    da._usgs_df = row.raw.to_frame().T.loc[:, _DIV_T0:]
+    da._usgs_df.index = pd.Index([_DIV_LINK], dtype="int64")
+    trimmed = list(da._usgs_df.columns)
+    da._data_assimilation_parameters = {"diversion_da": {"diversion_persist_days": 11}}
+    dst.load_state(pickle.loads(pickle.dumps(state, pickle.HIGHEST_PROTOCOL)))
+    assert list(da._usgs_df.columns) == trimmed
+    assert da._usgs_df.columns.is_monotonic_increasing
+    np.testing.assert_allclose(da._usgs_df.loc[_DIV_LINK].to_numpy(), 4.0)
+
+
+def test_a_rollback_restores_the_earlier_checkpoints_seed():
+    """Loading a later checkpoint, then an earlier one, must leave the earlier seed."""
+    early = _make_model(3600.0, [None, None, None]).create_state()
+    early["diversion_seed"] = {_DIV_LINK: (pd.Timestamp("2011-04-30 12:00"), 4.0)}
+    late = _make_model(3600.0, [None, None, None]).create_state()
+    late["diversion_seed"] = {_DIV_LINK: (pd.Timestamp("2011-05-01 12:00"), 9.0)}
+    dst = _make_model(0.0, [None, None, None])
+    da = dst._data_assimilation
+    row = _diversion_row({})
+    da._diversion_rows = {_DIV_LINK: row}
+    da._usgs_df = row.raw.to_frame().T
+    da._usgs_df.index = pd.Index([_DIV_LINK], dtype="int64")
+    da._data_assimilation_parameters = {"diversion_da": {"diversion_persist_days": 11}}
+    for state in (late, early):
+        dst.load_state(pickle.loads(pickle.dumps(state, pickle.HIGHEST_PROTOCOL)))
+    assert da._diversion_seed_in == early["diversion_seed"]
+    np.testing.assert_allclose(da._usgs_df.loc[_DIV_LINK].to_numpy(), 4.0)
+
+
+def test_the_applied_subtraction_rides_the_checkpoint():
+    """The donor's last subtraction is state: the next window restores it into qdp,
+    and a checkpoint that dropped it would seed from column 0 instead."""
+    src = _make_model(3600.0, [None, None, None])
+    src._data_assimilation._diversion_applied = {_DIV_LINK: 123.5}
+    state = pickle.loads(pickle.dumps(src.create_state(), pickle.HIGHEST_PROTOCOL))
+    assert state["diversion_applied"] == {_DIV_LINK: 123.5}
+    dst = _make_model(0.0, [None, None, None])
+    dst.load_state(state)
+    assert dst._data_assimilation.diversion_applied == {_DIV_LINK: 123.5}
+
+
+def test_a_newer_report_in_the_record_still_governs_the_fill():
+    """The checkpoint's seed is restored as it is; a report the record holds after it
+    governs the fill anyway, because the fill reads the raw row first."""
+    state = _make_model(3600.0, [None, None, None]).create_state()
+    state["diversion_seed"] = {_DIV_LINK: (pd.Timestamp("2011-04-30 12:00"), 4.0)}
+    dst = _make_model(0.0, [None, None, None])
+    da = dst._data_assimilation
+    row = _diversion_row({"2011-04-30 23:30": 6.0})
+    da._diversion_rows = {_DIV_LINK: row}
+    da._usgs_df = row.raw.to_frame().T
+    da._usgs_df.index = pd.Index([_DIV_LINK], dtype="int64")
+    da._data_assimilation_parameters = {"diversion_da": {"diversion_persist_days": 11}}
+    dst.load_state(pickle.loads(pickle.dumps(state, pickle.HIGHEST_PROTOCOL)))
+    assert da._diversion_seed_in == state["diversion_seed"]
+    filled = da._usgs_df.loc[_DIV_LINK]
+    np.testing.assert_allclose(filled[:"2011-04-30 23:15"].to_numpy(), 4.0)
+    np.testing.assert_allclose(filled["2011-04-30 23:30":].to_numpy(), 6.0)
+
+
+def test_load_state_without_a_diversion_seed_leaves_the_row_as_built():
+    """Older pickles carry no seed; nothing to hold, nothing changes."""
+    state = _make_model(3600.0, [None, None, None]).create_state()
+    del state["diversion_seed"]
+    dst = _make_model(0.0, [None, None, None])
+    da = dst._data_assimilation
+    row = _diversion_row({})
+    da._diversion_rows = {_DIV_LINK: row}
+    da._usgs_df = row.raw.to_frame().T
+    da._usgs_df.index = pd.Index([_DIV_LINK], dtype="int64")
+    da._data_assimilation_parameters = {"diversion_da": {"diversion_persist_days": 11}}
+    dst.load_state(pickle.loads(pickle.dumps(state, pickle.HIGHEST_PROTOCOL)))
+    assert da._usgs_df.loc[_DIV_LINK].isna().all()
+

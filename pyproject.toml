@@ -111,6 +111,7 @@ lint.per-file-ignores."doc/**/*.{py,ipynb}" = [
   "T201",
 ]
 lint.per-file-ignores."test/**/*.py" = [
+  "CPY001",  # the repo carries no copyright notices
   "B015",    # pointless comparison in tests aren't pointless
   "B017",    # pytest.raises(Exception) is fine
   "B018",    # pointless expressions in tests aren't pointless
@@ -156,7 +157,7 @@ skip = "*.inp,*.lock,.pixi/*,*.ipynb"
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
-include = [ "src" ]
+include = [ "src", "test/nhf/old_river/notebook_utils.py" ]
 extraPaths = [ "src/troute-config" ]
 ignore = [
   "docs/*.py",

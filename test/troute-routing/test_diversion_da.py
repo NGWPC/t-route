@@ -11,15 +11,15 @@ The observed discharge at the diversion gage is SUBTRACTED from the donor flowpa
 inside the routing kernel. Nothing adds it to the receiving river in code: the gage
 sits on a headwater flowpath of the receiving system, so ordinary streamflow
 nudging imposes the observed discharge there and the existing topology routes it
-downstream. Either source populates that row and conserves the transfer: nudging
-from timeslices, or the climatological fill in forecast mode.
+downstream. The gage's row is read from the TimeSlices and held for the persistence
+horizon past the end of its record.
 """
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from functools import partial
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -27,10 +27,16 @@ import pytest
 
 from troute import nhd_network
 from troute.DataAssimilation import (
-    _DIVERSION_MONTHLY_MEANS,
-    _fill_diversion_historical_median,
+    NudgingDA,
+    _DiversionRow,
+    _diversion_seed_at,
+    _fill_diversion_row,
+    _last_report_before,
+    _read_diversion_observations,
+    _seed_from_record,
+    new_diversion_applied,
 )
-from troute.routing.compute import _resolve_diversion_da
+from troute.routing.compute import RoutingResultsCollection, _resolve_diversion_da
 
 DIVERSION_GAGE = "07381482"  # Old River Outflow Channel
 DONOR_FP_ID = 1270479816524705  # Mississippi link at the control structure
@@ -99,8 +105,8 @@ class TestResolveDiversionDa:
         assert "gage link" in caplog.text
 
 
-class TestHistoricalMedianFallback:
-    """Climatological fill for timesteps with no observation (forecast mode)."""
+class TestFrameOnTheRoutingGrid:
+    """The diversion's row is built on the window's routing grid."""
 
     @pytest.fixture
     def network(self):
@@ -112,10 +118,7 @@ class TestHistoricalMedianFallback:
 
     @pytest.fixture
     def params(self) -> dict:
-        return {
-            "diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
-            "persist_historical_median": True,
-        }
+        return {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE}}
 
     @pytest.mark.parametrize("dt,nts", [(300, 12), (60, 20), (900, 8)])
     def test_columns_follow_routing_timestep(self, network, params, dt, nts):
@@ -125,116 +128,29 @@ class TestHistoricalMedianFallback:
         ROUTING step, so a hardcoded grid ran out early for a short dt and advanced
         too slowly for a long one.
         """
-        out = _fill_diversion_historical_median(
-            pd.DataFrame(), params, network, {"dt": dt, "nts": nts}
-        )
+        out, _ = _fill_diversion_row(pd.DataFrame(), params, network, {"dt": dt, "nts": nts})
         assert out.shape[1] == nts + 1
         spacing = pd.Series(out.columns).diff().dropna().unique()
         assert list(spacing) == [pd.Timedelta(seconds=dt)]
 
-    def test_fills_with_calendar_month_climatology(self, network, params):
-        out = _fill_diversion_historical_median(
-            pd.DataFrame(), params, network, {"dt": 300, "nts": 3}
-        )
-        june = _DIVERSION_MONTHLY_MEANS[DIVERSION_GAGE][6]
-        np.testing.assert_allclose(out.loc[GAGE_LINK].to_numpy(), june)
-
-    def test_real_observations_are_never_overwritten(self, network, params):
-        """The fallback fills gaps only. An observed value must survive."""
+    def test_hold_is_logged(self, network, params, caplog):
+        """A held value is not an observation; a run must say how much it used."""
         idx = pd.date_range(network.t0, periods=4, freq=pd.Timedelta(seconds=300))
         existing = pd.DataFrame(
-            [[7.0, np.nan, 9.0, np.nan]], index=pd.Index([GAGE_LINK], dtype="int64"),
+            [[7.0, np.nan, np.nan, np.nan]], index=pd.Index([GAGE_LINK], dtype="int64"),
             columns=idx,
         )
-        out = _fill_diversion_historical_median(
-            existing, params, network, {"dt": 300, "nts": 3}
-        )
-        row = out.loc[GAGE_LINK]
-        assert row.iloc[0] == 7.0 and row.iloc[2] == 9.0
-        june = _DIVERSION_MONTHLY_MEANS[DIVERSION_GAGE][6]
-        assert row.iloc[1] == june and row.iloc[3] == june
-
-    def test_substitution_is_logged(self, network, params, caplog):
-        """Climatology is not an observation; a run must say how much it used."""
         with caplog.at_level(logging.WARNING):
-            _fill_diversion_historical_median(
-                pd.DataFrame(), params, network, {"dt": 300, "nts": 3}
-            )
-        assert "climatology" in caplog.text
+            _fill_diversion_row(existing, params, network, {"dt": 300, "nts": 3})
+        assert "held at the last observation" in caplog.text
 
     def test_gage_without_routing_link_is_reported_not_raised(self, network, params, caplog):
         """An unresolved gage used to raise KeyError mid-run."""
         network._diversion_site_to_node = {}
         with caplog.at_level(logging.WARNING):
-            out = _fill_diversion_historical_median(
-                pd.DataFrame(), params, network, {"dt": 300, "nts": 3}
-            )
+            out, _ = _fill_diversion_row(pd.DataFrame(), params, network, {"dt": 300, "nts": 3})
         assert "no routing link" in caplog.text
         assert out.empty or GAGE_LINK not in out.index
-
-    def test_disabled_flag_leaves_frame_untouched(self, network, params):
-        params["persist_historical_median"] = False
-        original = pd.DataFrame()
-        # the caller gates on the flag, so calling with no crosswalk is the no-op path
-        out = _fill_diversion_historical_median(
-            original, {"diversion_gage_crosswalk": {}}, network, {"dt": 300, "nts": 3}
-        )
-        assert out is original
-
-
-class TestMultiWindowFallback:
-    """The climatology must follow the calendar as the run advances.
-
-    A run in median-only mode covers several forcing loops. The kernel restarts its
-    timestep index at zero in each loop, so if the observation frame is not rebuilt
-    at the new t0 every loop re-reads the first loop's columns and a multi-month run
-    keeps diverting the first month's climatology.
-    """
-
-    @staticmethod
-    def _network_at(t0: str):
-        class _Network:
-            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
-
-        n = _Network()
-        n.t0 = pd.Timestamp(t0)
-        return n
-
-    @pytest.fixture
-    def params(self) -> dict:
-        return {
-            "diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
-            "persist_historical_median": True,
-        }
-
-    def test_rebuilt_frame_follows_the_calendar_month(self, params):
-        run = {"dt": 300, "nts": 3}
-        april = _fill_diversion_historical_median(
-            pd.DataFrame(), params, self._network_at("2011-04-14"), run
-        )
-        july = _fill_diversion_historical_median(
-            pd.DataFrame(), params, self._network_at("2011-07-14"), run
-        )
-        means = _DIVERSION_MONTHLY_MEANS[DIVERSION_GAGE]
-        assert means[4] != means[7], "fixture months must differ for this to mean anything"
-        np.testing.assert_allclose(april.loc[GAGE_LINK].to_numpy(), means[4])
-        np.testing.assert_allclose(july.loc[GAGE_LINK].to_numpy(), means[7])
-
-    def test_stale_frame_is_not_refilled(self, params):
-        """A fully populated frame has no gaps, so the fill cannot correct it.
-
-        This is why the caller must clear the frame between loops rather than relying
-        on the fill to notice that the calendar moved.
-        """
-        run = {"dt": 300, "nts": 3}
-        april = _fill_diversion_historical_median(
-            pd.DataFrame(), params, self._network_at("2011-04-14"), run
-        )
-        again = _fill_diversion_historical_median(
-            april.copy(), params, self._network_at("2011-07-14"), run
-        )
-        means = _DIVERSION_MONTHLY_MEANS[DIVERSION_GAGE]
-        np.testing.assert_allclose(again.loc[GAGE_LINK].to_numpy(), means[4])
 
 
 class TestMassBalanceMonitor:
@@ -589,3 +505,573 @@ class TestDiffusiveNudgingGate:
             "diffusive_usgs_df = _align_obs_to_model_steps(usgs_df, t0, dt, nts)"
             in compute_src
         )
+
+
+class TestHoldLastObservation:
+    """Requirement 2.2.3.15 / use case 13.2: the last observation persists, flat.
+
+    The fill works on the window's routing grid, causally: a cell takes the latest
+    finite cell before it, the inherited seed covers cells before the row's first
+    report, a cell with neither stays NaN, and a finite cell is never touched.
+    """
+
+    @pytest.fixture
+    def network(self):
+        class _Network:
+            t0 = pd.Timestamp("2011-06-01 00:00")
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        return _Network()
+
+    @pytest.fixture
+    def params(self) -> dict:
+        return {
+            "diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+            "diversion_persist_days": 11,
+        }
+
+    @staticmethod
+    def _frame(network, values, other=None, freq="5min"):
+        idx = pd.date_range(network.t0, periods=len(values), freq=freq)
+        rows, index = [values], [GAGE_LINK]
+        if other is not None:
+            rows.append(other)
+            index.append(GAGE_LINK + 1)
+        return pd.DataFrame(rows, index=pd.Index(index, dtype="int64"), columns=idx, dtype=float)
+
+    def test_row_is_extended_onto_the_routing_grid(self, network, params):
+        """The reader's columns stop at the record; the window does not."""
+        out, _ = _fill_diversion_row(
+            self._frame(network, [7.0, 8.0, 9.0]), params, network, {"dt": 300}, nts=12
+        )
+        row = out.loc[GAGE_LINK]
+        assert len(row) == 13
+        np.testing.assert_allclose(row.iloc[3:].to_numpy(), 9.0)
+
+    def test_hold_is_causal_across_an_interior_gap(self, network, params):
+        out, _ = _fill_diversion_row(
+            self._frame(network, [7.0, np.nan, np.nan, 9.0]), params, network,
+            {"dt": 300}, nts=3,
+        )
+        np.testing.assert_allclose(out.loc[GAGE_LINK].to_numpy(), [7.0, 7.0, 7.0, 9.0])
+
+    def test_seed_covers_cells_after_its_time_and_before_the_first_report(self, network, params):
+        seed = {GAGE_LINK: (network.t0 + pd.Timedelta(minutes=10), 5.0)}
+        out, _ = _fill_diversion_row(
+            self._frame(network, [np.nan, np.nan, np.nan, np.nan, 8.0, np.nan]), params,
+            network, {"dt": 300}, seed_in=seed, nts=5,
+        )
+        row = out.loc[GAGE_LINK].to_numpy()
+        assert np.isnan(row[:2]).all(), "cells before the seed's time are not the seed's"
+        np.testing.assert_allclose(row[2:], [5.0, 5.0, 8.0, 8.0])
+
+    def test_newer_seed_outranks_a_stale_lookback_report(self, network, params):
+        """A lookback report older than the seed must not hold past it."""
+        seed = {GAGE_LINK: (network.t0 + pd.Timedelta(minutes=10), 9.0)}
+        out, _ = _fill_diversion_row(
+            self._frame(network, [1.0, np.nan, np.nan, np.nan, np.nan]), params, network,
+            {"dt": 300}, seed_in=seed, nts=4,
+        )
+        np.testing.assert_allclose(out.loc[GAGE_LINK].to_numpy(), [1.0, 1.0, 9.0, 9.0, 9.0])
+
+    def test_report_at_the_seeds_instant_wins(self, network, params):
+        """A checkpoint's copy of an instant loses to the record's own cell there."""
+        at = network.t0 + pd.Timedelta(minutes=5)
+        seed = {GAGE_LINK: (at, 9.0)}
+        out, rows = _fill_diversion_row(
+            self._frame(network, [np.nan, 3.0, np.nan, np.nan, np.nan]), params, network,
+            {"dt": 300}, seed_in=seed, nts=4,
+        )
+        np.testing.assert_allclose(out.loc[GAGE_LINK].to_numpy()[1:], 3.0)
+        assert np.isnan(out.loc[GAGE_LINK].to_numpy()[0])
+        assert _diversion_seed_at(rows, seed) == {GAGE_LINK: (at, 3.0)}
+
+    def test_row_with_nothing_to_divert_is_reported(self, network, params, caplog):
+        """A misnamed site or an absent station must not pass as a quiet run."""
+        with caplog.at_level(logging.WARNING):
+            _fill_diversion_row(
+                self._frame(network, [np.nan] * 4), params, network, {"dt": 300}, nts=3
+            )
+        assert "no flow will be diverted" in caplog.text
+
+    def test_hold_counts_cover_the_window_not_the_lookback(self, network, params, caplog):
+        idx = pd.date_range(network.t0 - pd.Timedelta(minutes=10), periods=6, freq="5min")
+        frame = pd.DataFrame([[1.0, 1.0, 1.0, np.nan, np.nan, np.nan]],
+                             index=pd.Index([GAGE_LINK], dtype="int64"), columns=idx)
+        with caplog.at_level(logging.WARNING):
+            _fill_diversion_row(frame, params, network, {"dt": 300}, nts=3)
+        assert "3 of 4 timesteps held" in caplog.text
+
+    def test_seed_at_t0_fills_column_zero(self, network, params):
+        """A restart at the last observation: its instant is column 0, and the kernel
+        seeds the remembered subtraction from that column."""
+        seed = {GAGE_LINK: (network.t0, 4.0)}
+        out, _ = _fill_diversion_row(pd.DataFrame(), params, network, {"dt": 300},
+                                     seed_in=seed, nts=2)
+        np.testing.assert_allclose(out.loc[GAGE_LINK].to_numpy(), [4.0, 4.0, 4.0])
+
+    def test_only_the_crosswalked_row_is_touched(self, network, params):
+        out, _ = _fill_diversion_row(
+            self._frame(network, [7.0, np.nan], other=[3.0, np.nan]), params, network,
+            {"dt": 300}, nts=1,
+        )
+        assert np.isnan(out.loc[GAGE_LINK + 1].iloc[1])
+        assert out.loc[GAGE_LINK].iloc[1] == 7.0
+
+    def test_no_crosswalk_leaves_the_frame_alone(self, network, params):
+        params["diversion_gage_crosswalk"] = {}
+        frame = self._frame(network, [7.0, np.nan])
+        out, rows = _fill_diversion_row(frame, params, network, {"dt": 300}, nts=1)
+        assert out is frame
+        assert rows == {}
+
+    def test_hold_expires_after_the_horizon(self, network, params):
+        """The same horizon idiom as the RFC DA: held for N days, then gone."""
+        params["diversion_persist_days"] = 1
+        out, _ = _fill_diversion_row(
+            self._frame(network, [7.0] + [np.nan] * 3, freq="12h"), params, network,
+            {"dt": 43200}, nts=3,  # 12 h steps: held at +12 h and +24 h, expired at +36 h
+        )
+        np.testing.assert_allclose(out.loc[GAGE_LINK].to_numpy()[:3], 7.0)
+        assert np.isnan(out.loc[GAGE_LINK].to_numpy()[3])
+
+    def test_zero_days_holds_nothing(self, network, params):
+        params["diversion_persist_days"] = 0
+        out, _ = _fill_diversion_row(
+            self._frame(network, [7.0, np.nan, np.nan]), params, network, {"dt": 300}, nts=2
+        )
+        np.testing.assert_allclose(out.loc[GAGE_LINK].to_numpy()[0], 7.0)
+        assert np.isnan(out.loc[GAGE_LINK].to_numpy()[1:]).all()
+
+    def test_seed_at_decides_by_time_and_respects_tau(self, network, params):
+        _, rows = _fill_diversion_row(
+            self._frame(network, [np.nan, 6.0, np.nan]), params, network, {"dt": 300}, nts=2
+        )
+        report_time = network.t0 + pd.Timedelta(minutes=5)
+        newer = {GAGE_LINK: (network.t0 + pd.Timedelta(hours=2), 1.0)}
+        older = {GAGE_LINK: (network.t0 - pd.Timedelta(hours=2), 1.0)}
+        assert _diversion_seed_at(rows, newer) == newer
+        assert _diversion_seed_at(rows, older) == {GAGE_LINK: (report_time, 6.0)}
+        assert _diversion_seed_at(rows, older, tau=network.t0) == older
+
+    def test_partition_invariance_for_the_forecast_tail(self, network, params):
+        """One window over 2N steps equals two windows of N with the seed handed over."""
+        values = [7.0, 8.0, 9.0] + [np.nan] * 9  # record ends in the first half
+        whole, _ = _fill_diversion_row(
+            self._frame(network, values), params, network, {"dt": 300}, nts=11
+        )
+        first, rows = _fill_diversion_row(
+            self._frame(network, values[:6]), params, network, {"dt": 300}, nts=5
+        )
+
+        class _Later:
+            t0 = network.t0 + pd.Timedelta(minutes=30)
+            _diversion_site_to_node = network._diversion_site_to_node
+
+        second, _ = _fill_diversion_row(
+            pd.DataFrame(), params, _Later(), {"dt": 300},
+            seed_in=_diversion_seed_at(rows, {}), nts=5,
+        )
+        stitched = pd.concat([first.loc[GAGE_LINK].iloc[:6], second.loc[GAGE_LINK]])
+        np.testing.assert_allclose(stitched.to_numpy(), whole.loc[GAGE_LINK].to_numpy())
+
+
+
+def _kernel_result(ids, donors=(), applied=(), nts=2, with_diversion=True):
+    """A kernel result tuple with empty DA elements and, optionally, element 11."""
+    ids = np.asarray(ids, dtype=np.intp)
+    n = len(ids)
+    fl, ip = np.array([], dtype="float32"), np.array([], dtype=np.intp)
+    r = [
+        ids, np.zeros((n, nts * 4), dtype="float32"), 0,
+        (ip, fl, fl), (ip, fl, fl, fl, fl), (ip, fl, fl, fl, fl), (ip, fl, fl, fl, fl),
+        np.zeros((n, nts), dtype="float32"), (ip, fl, ip),
+        np.zeros((0, nts + 1), dtype="float32"), (ip, fl, ip, ip),
+    ]
+    if with_diversion:
+        r.append((np.asarray(donors, dtype=np.intp), np.asarray(applied, dtype="float32")))
+    return tuple(r)
+
+
+class TestDiversionStateInResults:
+    """The applied amount rides the results as state keyed by donor, not as a series."""
+
+    def test_harvest_keys_the_amount_by_donor_across_jobs(self):
+        raw = [_kernel_result([20, 30], donors=[20], applied=[100.0]),
+               _kernel_result([21], donors=[21], applied=[7.5])]
+        assert RoutingResultsCollection(raw).diversion_applied() == {20: 100.0, 21: 7.5}
+        assert new_diversion_applied(raw) == {20: 100.0, 21: 7.5}
+
+    def test_a_result_without_the_element_carries_no_state(self):
+        """The diffusive leg and the non-routing segments return eleven elements."""
+        raw = [_kernel_result([20], with_diversion=False),
+               _kernel_result([21], donors=[21], applied=[7.5])]
+        assert RoutingResultsCollection(raw).diversion_applied() == {21: 7.5}
+        assert new_diversion_applied(raw) == {21: 7.5}
+
+    @pytest.mark.parametrize(("earlier", "later"), [
+        ([], [20]), ([10], [10, 20]), ([10, 20], [20]),
+    ])
+    def test_appending_windows_keeps_the_later_windows_pairs(self, earlier, later):
+        """Concatenating windows must not align the state to the earlier donor set."""
+        a = RoutingResultsCollection([_kernel_result([10, 20, 40], donors=earlier,
+                                                     applied=[1.0] * len(earlier))])
+        b = RoutingResultsCollection([_kernel_result([10, 20, 40], donors=later,
+                                                     applied=[5.0] * len(later))])
+        assert a.append_timesteps(b).diversion_applied() == {d: 5.0 for d in later}
+
+
+def _write_timeslice(folder, stamp: pd.Timestamp, values: dict[str, float], quality: int = 100,
+                     content_stamp: pd.Timestamp | None = None):
+    """One TimeSlice file in the reader's schema, named for its instant."""
+    import netCDF4
+
+    stamp_str = stamp.strftime("%Y-%m-%d_%H:%M:%S")
+    content_str = (content_stamp or stamp).strftime("%Y-%m-%d_%H:%M:%S")
+    sites = list(values)
+    with netCDF4.Dataset(str(folder / f"{stamp_str}.15min.usgsTimeSlice.ncdf"), "w") as nc:
+        nc.sliceTimeResolutionMinutes = "15"
+        nc.createDimension("stationIdInd", len(sites))
+        nc.createDimension("stationIdStringLength", 15)
+        nc.createDimension("timeStringLength", 19)
+        v = nc.createVariable("stationId", "S1", ("stationIdInd", "stationIdStringLength"))
+        v[:] = np.array([list(s.ljust(15)) for s in sites], dtype="S1")
+        v = nc.createVariable("time", "S1", ("stationIdInd", "timeStringLength"))
+        v[:] = np.array([list(content_str.ljust(19)) for _ in sites], dtype="S1")
+        v = nc.createVariable("discharge", "f4", ("stationIdInd",))
+        v[:] = np.array([values[s] for s in sites], dtype="f4")
+        v = nc.createVariable("discharge_quality", "i2", ("stationIdInd",))
+        v[:] = np.full(len(sites), quality, dtype="i2")
+
+
+class TestSeedFromTheRecord:
+    """A fresh process holds the last report even when it predates the reader's window."""
+
+    T0 = pd.Timestamp("2011-06-01 00:00")
+
+    @pytest.fixture
+    def folder(self, tmp_path):
+        d = tmp_path / "usgs"
+        d.mkdir()
+        _write_timeslice(d, self.T0 - pd.Timedelta(days=13), {DIVERSION_GAGE: 1.0})
+        _write_timeslice(d, self.T0 - pd.Timedelta(days=5), {DIVERSION_GAGE: 5.0})
+        _write_timeslice(d, self.T0 - pd.Timedelta(days=4), {DIVERSION_GAGE: np.nan})
+        _write_timeslice(d, self.T0 - pd.Timedelta(days=3), {DIVERSION_GAGE: 3.0}, quality=10)
+        _write_timeslice(d, self.T0 + pd.Timedelta(hours=1), {DIVERSION_GAGE: 9.0})
+        return d
+
+    def test_the_newest_finite_report_within_the_horizon_wins(self, folder):
+        found = _last_report_before(folder, DIVERSION_GAGE, self.T0, pd.Timedelta(days=11), 1)
+        assert found == (self.T0 - pd.Timedelta(days=5), 5.0)
+
+    def test_an_unreadable_file_is_skipped_not_fatal(self, folder, caplog):
+        (folder / (self.T0 - pd.Timedelta(days=2)).strftime("%Y-%m-%d_%H:%M:%S")
+         ).with_suffix(".15min.usgsTimeSlice.ncdf").write_bytes(b"not a netcdf")
+        with caplog.at_level(logging.WARNING):
+            found = _last_report_before(folder, DIVERSION_GAGE, self.T0, pd.Timedelta(days=11), 1)
+        assert found == (self.T0 - pd.Timedelta(days=5), 5.0)
+        assert "unreadable TimeSlice" in caplog.text
+
+    def test_the_readers_validity_rules_apply(self, folder):
+        """A newer report the reader would reject must not become the seed."""
+        _write_timeslice(folder, self.T0 - pd.Timedelta(days=1), {DIVERSION_GAGE: -999.0})
+        _write_timeslice(folder, self.T0 - pd.Timedelta(hours=12), {DIVERSION_GAGE: 0.0})
+        found = _last_report_before(folder, DIVERSION_GAGE, self.T0, pd.Timedelta(days=11), 1)
+        assert found == (self.T0 - pd.Timedelta(days=5), 5.0)
+
+    def test_the_reports_own_timestamp_must_be_inside_the_window(self, folder):
+        """A file named inside the window whose report is dated a month back is skipped."""
+        _write_timeslice(folder, self.T0 - pd.Timedelta(hours=6), {DIVERSION_GAGE: 8.0},
+                         content_stamp=self.T0 - pd.Timedelta(days=40))
+        found = _last_report_before(folder, DIVERSION_GAGE, self.T0, pd.Timedelta(days=11), 1)
+        assert found == (self.T0 - pd.Timedelta(days=5), 5.0)
+
+    def test_a_report_beyond_the_horizon_is_not_found(self, folder, caplog):
+        with caplog.at_level(logging.WARNING):
+            found = _last_report_before(folder, DIVERSION_GAGE, self.T0, pd.Timedelta(days=4), 1)
+        assert found is None
+        # The staged history is named, so a folder too shallow for the horizon is visible.
+        assert "oldest file in that span is 2011-05-28" in caplog.text
+
+    def test_seed_only_a_gage_with_nothing_else(self, folder):
+        class _Network:
+            t0 = self.T0
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        params = {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+                  "diversion_persist_days": 11}
+        da_params = {"usgs_timeslices_folder": str(folder)}
+        empty = pd.DataFrame()
+        seeded = _seed_from_record(empty, params, da_params, _Network(), {})
+        assert seeded == {GAGE_LINK: (self.T0 - pd.Timedelta(days=5), 5.0)}
+        # A report at or before t0 in the frame, or a carried seed, means no scan.
+        frame = pd.DataFrame([[7.0, np.nan]], index=pd.Index([GAGE_LINK], dtype="int64"),
+                             columns=pd.date_range(self.T0, periods=2, freq="5min"))
+        assert _seed_from_record(frame, params, da_params, _Network(), {}) == {}
+        carried = {GAGE_LINK: (self.T0, 2.0)}
+        assert _seed_from_record(empty, params, da_params, _Network(), carried) == carried
+        assert _seed_from_record(empty, params, {}, _Network(), {}) == {}
+
+    def test_a_report_after_t0_does_not_suppress_the_scan(self, folder):
+        """A report later in the window is the hold's successor, not its source."""
+        class _Network:
+            t0 = self.T0
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        params = {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+                  "diversion_persist_days": 11}
+        da_params = {"usgs_timeslices_folder": str(folder)}
+        frame = pd.DataFrame([[np.nan, np.nan, 7.0]], index=pd.Index([GAGE_LINK], dtype="int64"),
+                             columns=pd.date_range(self.T0, periods=3, freq="h"))
+        seeded = _seed_from_record(frame, params, da_params, _Network(), {})
+        assert seeded == {GAGE_LINK: (self.T0 - pd.Timedelta(days=5), 5.0)}
+
+    def test_a_zero_horizon_never_scans(self, folder, caplog):
+        class _Network:
+            t0 = self.T0
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        params = {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+                  "diversion_persist_days": 0}
+        with caplog.at_level(logging.WARNING):
+            out = _seed_from_record(pd.DataFrame(), params, {"usgs_timeslices_folder": str(folder)},
+                                    _Network(), {})
+        assert out == {}
+        assert caplog.text == ""
+
+    def test_an_empty_scan_is_not_repeated_for_a_later_t0(self, tmp_path, caplog):
+        """The CLI reseeds every window; a folder with nothing is scanned once."""
+        folder = tmp_path / "empty"
+        folder.mkdir()
+
+        class _Network:
+            t0 = self.T0
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        params = {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+                  "diversion_persist_days": 11}
+        da_params = {"usgs_timeslices_folder": str(folder)}
+        cache: dict = {}
+        with caplog.at_level(logging.WARNING):
+            _seed_from_record(pd.DataFrame(), params, da_params, _Network(), {}, cache)
+            _Network.t0 = self.T0 + pd.Timedelta(hours=2)
+            _seed_from_record(pd.DataFrame(), params, da_params, _Network(), {}, cache)
+        assert cache == {GAGE_LINK: self.T0}
+        assert caplog.text.count("no report in the TimeSlices") == 1
+
+    def test_the_deferred_scan_seeds_and_refills(self, folder):
+        """The drivers call seed_from_record after any checkpoint restore."""
+        from troute.DataAssimilation import NudgingDA, _DiversionRow
+
+        class _Network:
+            t0 = self.T0
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        class _Stub:
+            seed_from_record = NudgingDA.seed_from_record
+            refill_diversion_rows = NudgingDA.refill_diversion_rows
+
+        grid = pd.date_range(self.T0, periods=4, freq="5min")
+        raw = pd.Series(np.nan, index=grid, dtype=float)
+        da = _Stub()
+        da._data_assimilation_parameters = {
+            "usgs_timeslices_folder": str(folder),
+            "diversion_da": {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+                             "diversion_persist_days": 11},
+        }
+        da._usgs_df = raw.to_frame().T
+        da._usgs_df.index = pd.Index([GAGE_LINK], dtype="int64")
+        da._diversion_rows = {GAGE_LINK: _DiversionRow(raw, DIVERSION_GAGE)}
+        da._diversion_seed_in, da._diversion_scan_empty_before = {}, {}
+        da.seed_from_record(_Network())
+        assert da._diversion_seed_in == {GAGE_LINK: (self.T0 - pd.Timedelta(days=5), 5.0)}
+        np.testing.assert_allclose(da._usgs_df.loc[GAGE_LINK].to_numpy(), 5.0)
+        # Already seeded: a second call changes nothing and scans nothing.
+        da.seed_from_record(_Network())
+        assert da._diversion_scan_empty_before == {}
+
+    def test_an_unreadable_window_read_holds_instead_of_raising(self, tmp_path, caplog):
+        """A file removed between discovery and read must not end an hourly cycle."""
+        class _Network:
+            t0 = self.T0
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        params = {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE}}
+        da_params = {"usgs_timeslices_folder": str(tmp_path)}
+        da_run = {"usgs_timeslice_files": ["2011-06-01_00:00:00.15min.usgsTimeSlice.ncdf"]}
+        with caplog.at_level(logging.WARNING):
+            out = _read_diversion_observations(pd.DataFrame(), params, da_params, _Network(),
+                                               {"dt": 300, "cpu_pool": 1}, da_run)
+        assert out.empty
+        assert "could not be read" in caplog.text
+
+
+class TestRollover:
+    """Between CLI windows the seed is the last report at or before the next start."""
+
+    def test_a_report_past_the_next_start_does_not_replace_the_seed(self):
+        """The previous frame reaches past the next window's start; if that window's
+        read then fails, its early hours must still hold the earlier report."""
+        t0 = pd.Timestamp("2011-06-01 00:00")
+        grid = pd.date_range(t0, periods=13, freq="15min")  # to 03:00
+        raw = pd.Series(np.nan, index=grid, dtype=float)
+        raw[t0] = 5.0
+        raw[t0 + pd.Timedelta(hours=3)] = 9.0
+
+        class _Network:
+            t0 = pd.Timestamp("2011-06-01 02:00")  # the next window's start
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        class _DA:
+            _data_assimilation_parameters = {
+                "streamflow_da": {"streamflow_nudging": False},
+                "diversion_da": {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE}},
+            }
+            _run_parameters = {"dt": 900, "nts": 4}
+            _diversion_seed_in = {}
+            _diversion_scan_empty_before = {}
+            diversion_seed_at = NudgingDA.diversion_seed_at
+            update_for_next_loop = NudgingDA.update_for_next_loop
+
+        da = _DA()
+        da._usgs_df = raw.to_frame().T.set_axis(pd.Index([GAGE_LINK], dtype="int64"))
+        da._diversion_rows = {GAGE_LINK: _DiversionRow(raw, DIVERSION_GAGE)}
+        da.update_for_next_loop(_Network(), {})
+        assert da._diversion_seed_in == {GAGE_LINK: (t0, 5.0)}
+        np.testing.assert_allclose(da._usgs_df.loc[GAGE_LINK].to_numpy(), 5.0)
+
+
+class TestHourlyCycles:
+    """Standard AnA: two-hour windows cycling hourly, the seed carried between them."""
+
+    def test_the_hold_expires_at_the_absolute_deadline_not_per_window(self):
+        class _Network:
+            t0 = pd.Timestamp("2011-06-01 00:00")
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        params = {"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE},
+                  "diversion_persist_days": 11}
+        report = (_Network.t0 - pd.Timedelta(days=10, hours=23), 4.0)
+        deadline = report[0] + pd.Timedelta(days=11)
+        seed = {GAGE_LINK: report}
+        held_windows = 0
+        for cycle in range(6):
+            _Network.t0 = pd.Timestamp("2011-06-01 00:00") + pd.Timedelta(hours=cycle)
+            out, rows = _fill_diversion_row(pd.DataFrame(), params, _Network, {"dt": 300},
+                                            seed_in=seed, nts=24)
+            row = out.loc[GAGE_LINK]
+            expected = np.where(row.index <= deadline, 4.0, np.nan)
+            np.testing.assert_array_equal(row.to_numpy(), expected)
+            held_windows += int(row.notna().any())
+            seed = _diversion_seed_at(rows, seed)
+        assert held_windows == 2, "cycles 0 and 1 reach the deadline, later cycles do not"
+
+
+class TestDiversionOnlyConfiguration:
+    """A configuration with only the diversion block: the schema hands every omitted DA
+    section over as None, and the DA objects must read them as empty."""
+
+    @staticmethod
+    def _params(tmp_path):
+        from troute.config.compute_parameters import DataAssimilationParameters
+
+        return DataAssimilationParameters(
+            usgs_timeslices_folder=str(tmp_path),
+            diversion_da={"diversion_gage_crosswalk": {DONOR_FP_ID: DIVERSION_GAGE}},
+        ).model_dump()
+
+    def test_persistence_da_initializes_with_the_sections_omitted(self, tmp_path):
+        from troute.DataAssimilation import PersistenceDA
+
+        params = self._params(tmp_path)
+        assert params["reservoir_da"] is None and params["streamflow_da"] is None
+
+        class _Network:
+            t0 = pd.Timestamp("2011-06-01")
+            _diversion_site_to_node = {}
+            waterbody_dataframe = pd.DataFrame()
+
+        da = PersistenceDA.__new__(PersistenceDA)
+        da._data_assimilation_parameters = params
+        da._run_parameters = {"dt": 300, "nts": 12}
+        da._usgs_df = pd.DataFrame()  # what NudgingDA leaves for it in the real order
+        PersistenceDA.__init__(da, _Network(), True, None, da_run={})
+        assert da._reservoir_usgs_df.empty
+
+    def test_the_rollover_runs_with_the_sections_omitted(self, tmp_path):
+        params = self._params(tmp_path)
+
+        class _Network:
+            t0 = pd.Timestamp("2011-06-01 02:00")
+            _diversion_site_to_node = {DIVERSION_GAGE: GAGE_LINK}
+
+        class _DA:
+            _data_assimilation_parameters = params
+            _run_parameters = {"dt": 900, "nts": 4}
+            _diversion_seed_in = {GAGE_LINK: (pd.Timestamp("2011-06-01 00:00"), 5.0)}
+            _diversion_scan_empty_before = {}
+            _diversion_rows = {}
+            _usgs_df = pd.DataFrame()
+            diversion_seed_at = NudgingDA.diversion_seed_at
+            update_for_next_loop = NudgingDA.update_for_next_loop
+
+        da = _DA()
+        da.update_for_next_loop(_Network(), {})
+        np.testing.assert_allclose(da._usgs_df.loc[GAGE_LINK].to_numpy(), 5.0)
+
+    def test_the_persistence_rollover_runs_with_the_sections_omitted(self, tmp_path):
+        from troute.DataAssimilation import PersistenceDA
+
+        class _Network:
+            t0 = pd.Timestamp("2011-06-01 02:00")
+            waterbody_types_dataframe = pd.DataFrame()
+
+        da = PersistenceDA.__new__(PersistenceDA)
+        da._data_assimilation_parameters = self._params(tmp_path)
+        da._run_parameters = {"dt": 900, "nts": 4}
+        da._usgs_df = pd.DataFrame()
+        PersistenceDA.update_for_next_loop(da, _Network(), {})
+        assert da._usgs_df.empty
+
+
+class TestCrosswalkOnAnotherDomain:
+    """One configuration serves every domain; a domain without the structure routes on."""
+
+    @staticmethod
+    def _network(crosswalk):
+        from troute.nhf_preprocess import NHFPreprocessMixin
+
+        class _Net:
+            data_assimilation_parameters = {"diversion_da": {"diversion_gage_crosswalk": crosswalk}}
+            # Two flowpaths: 1 (links 100, 101) and 2 (link 200); one gage at link 200.
+            _dataframe = pd.DataFrame({"fp_id": [1, 1, 2], "segment_order": [0, 1, 0]},
+                                      index=pd.Index([100, 101, 200], dtype="int64"))
+            _resolve_diversion_da = NHFPreprocessMixin._resolve_diversion_da
+
+            def _gage_selection_rank(self, gages_join):
+                return gages_join
+
+            @staticmethod
+            def _one_link_per_gage(sub, label, quiet=False):
+                return sub
+
+        return _Net()
+
+    def test_a_flowpath_or_gage_outside_the_domain_is_skipped_with_a_warning(self, caplog):
+        gages = pd.DataFrame({"site_no": [DIVERSION_GAGE], "up_node_id": [200]})
+        net = self._network({1: DIVERSION_GAGE, 9: DIVERSION_GAGE, 2: "00000000"})
+        with caplog.at_level(logging.WARNING):
+            net._resolve_diversion_da(gages)
+        assert net.diversion_da == {101: 200}
+        assert "fp_id 9 is not in this domain" in caplog.text
+        assert "gage 00000000 is not in this domain's gages" in caplog.text
+
+    def test_a_gage_whose_donor_is_absent_is_not_a_diversion_gage(self):
+        """The DA reads and holds every gage the site map names, so a gage whose donor
+        is outside the domain must leave the map, or its flow would be imposed with
+        nothing subtracted anywhere."""
+        gages = pd.DataFrame({"site_no": [DIVERSION_GAGE, "11111111"], "up_node_id": [200, 101]})
+        net = self._network({1: DIVERSION_GAGE, 9: "11111111"})
+        net._resolve_diversion_da(gages)
+        assert net.diversion_da == {101: 200}
+        assert net._diversion_site_to_node == {DIVERSION_GAGE: 200}
