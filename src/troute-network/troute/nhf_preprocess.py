@@ -549,6 +549,21 @@ def _normalize_run_of_river(lakes: "pd.DataFrame | None") -> pd.DataFrame:
     return lakes
 
 
+def unrouted_rfc_gages(
+    reservoir_da: pd.DataFrame, routed_record_ids: "set[int]"
+) -> pd.DataFrame:
+    """RFC rows whose lake did not survive into the routable waterbody set.
+
+    ``_clean_waterbodies`` drops a lake with no ``virtual_fp_id``, no level-pool parameters
+    or inconsistent elevations, and its flowpath routes as MC channel. An RFC reservoir's
+    gage still reaches ``rfc_lake_gage_crosswalk``, so its forecast is read and discarded.
+    """
+    if reservoir_da.empty or RESERVOIR_DA_SITE_TYPE_FIELD not in reservoir_da.columns:
+        return reservoir_da.iloc[:0]
+    unrouted = ~reservoir_da[LAKE_ID_FIELD].isin(routed_record_ids)
+    return reservoir_da[unrouted & (reservoir_da[RESERVOIR_DA_SITE_TYPE_FIELD] == RFC_DA_TYPE)]
+
+
 def route_run_of_river_as_channel(
     lakes: pd.DataFrame, reservoir_da: pd.DataFrame
 ) -> pd.DataFrame:
@@ -1323,6 +1338,19 @@ class NHFPreprocessMixin:
         if len(id_diff) > 0:
             raise ValueError(
                 f"Missing {RECORD_LAKE_ID_FIELD} values {id_diff} in reservoir_da table"
+            )
+        routed_ids = set(self.waterbody_dataframe[RECORD_LAKE_ID_FIELD].to_numpy())
+        lost_rfc = unrouted_rfc_gages(reservoir_da, routed_ids)
+        if not lost_rfc.empty:
+            LOG.warning(
+                "reservoir RFC DA: %d RFC reservoir(s) are not in the routable "
+                "waterbody set, so their forecasts are read and discarded while the "
+                "dam routes as MC channel. Gage(s): %s. Lake id(s): %s. A lake is "
+                "dropped for a missing virtual_fp_id, missing level-pool parameters "
+                "or inconsistent elevations; see the waterbodies warnings above.",
+                len(lost_rfc),
+                sorted(lost_rfc[RESERVOIR_DA_SITE_ID_FIELD].dropna().astype(str)),
+                sorted(lost_rfc[LAKE_ID_FIELD]),
             )
         reservoir_da = reservoir_da[
             reservoir_da[LAKE_ID_FIELD].isin(

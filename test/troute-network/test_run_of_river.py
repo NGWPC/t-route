@@ -148,3 +148,36 @@ def test_short_reach_protection_is_computed_before_the_filter():
     assert src.index("wb_fp_ids = ") < src.index("route_run_of_river_as_channel("), (
         "wb_fp_ids must come from the unfiltered lakes"
     )
+
+
+def _da_rows(ids: list[int], da_types: list[int], sites: list[str]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {LAKE_ID_FIELD: ids, "da_type": da_types, "site_no": sites}
+    )
+
+
+def test_an_rfc_reservoir_dropped_from_the_waterbody_set_is_named():
+    """A lake with no virtual_fp_id, no level-pool parameters or inconsistent
+    elevations leaves the routable set and routes as MC channel. Its gage still
+    reaches the crosswalk, so the forecast is read against a lake that is not there."""
+    from troute.nhf_preprocess import unrouted_rfc_gages
+
+    da = _da_rows([1, 2, 3], [4, 4, 1], ["CCKK2", "CHET1", "POND"])
+    lost = unrouted_rfc_gages(da, {1})
+    assert lost[LAKE_ID_FIELD].tolist() == [2]
+    assert lost["site_no"].tolist() == ["CHET1"]
+
+
+def test_a_dropped_level_pool_is_not_named():
+    """Losing a level pool is routine: nothing was going to be assimilated into it."""
+    from troute.nhf_preprocess import unrouted_rfc_gages
+
+    da = _da_rows([1, 2], [1, 1], ["A", "B"])
+    assert unrouted_rfc_gages(da, set()).empty
+
+
+def test_every_rfc_reservoir_routed_names_nothing():
+    from troute.nhf_preprocess import unrouted_rfc_gages
+
+    da = _da_rows([1, 2], [4, 4], ["CCKK2", "CHET1"])
+    assert unrouted_rfc_gages(da, {1, 2}).empty
