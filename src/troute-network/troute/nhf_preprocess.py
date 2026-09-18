@@ -55,6 +55,10 @@ LEVEL_POOL_PARAMS = (
 )
 RESERVOIR_DA_SITE_ID_FIELD = "site_no"
 RESERVOIR_DA_SITE_TYPE_FIELD = "da_type"
+RFC_DA_TYPE = 4
+# Lakes-layer tag for run-of-river and NRCS low-head dams, too small to route as a level pool.
+# A flagged dam routes as Muskingum-Cunge channel unless da_type 4 keeps it for RFC DA.
+RUN_OF_RIVER_FIELD = "run_of_river"
 
 def _sql_in(field: str, values, quote: bool = False) -> str:
     """An OGR ``where`` clause restricting *field* to *values*."""
@@ -369,7 +373,9 @@ LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
     ("virtual_nexus", None, True),
     (
         "lakes",
-        WATERBODY_DF_FIELDS + ["hy_id", "ref_fp_id"],
+        # RUN_OF_RIVER_FIELD is consumed before preprocess_waterbodies, so it stays
+        # outside WATERBODY_DF_FIELDS, the columns the waterbody frame keeps.
+        WATERBODY_DF_FIELDS + ["hy_id", "ref_fp_id", RUN_OF_RIVER_FIELD],
         False),
     ("gages", None, True),
     ("hydrolocations", None, True),
@@ -501,7 +507,93 @@ def read_geo_file(supernetwork_parameters, cpu_pool):
         )
 
     _validate_flowpaths_channel_params(table_dict.get("flowpaths"))
+    table_dict["lakes"] = _normalize_run_of_river(table_dict.get("lakes"))
     return table_dict
+
+
+def _normalize_run_of_river(lakes: "pd.DataFrame | None") -> pd.DataFrame:
+    """Give ``lakes`` a boolean ``run_of_river`` column, whatever the layer holds.
+
+    A NULL means the dam is not run-of-river. Anything neither null nor 0/1 raises, since
+    a misread flag routes a real reservoir as channel or impounds a low-head dam.
+    """
+    if lakes is None:
+        return pd.DataFrame()
+    if lakes.empty:
+        return lakes
+    lakes = lakes.copy()
+    raw = lakes[RUN_OF_RIVER_FIELD]
+    if raw.dtype == bool:
+        return lakes
+    # A GPKG BOOLEAN column comes back from the reader as the strings "True"/"False"
+    # once any row is NULL, so map those before the numeric parse below.
+    if raw.dtype == object:
+        raw = raw.map(
+            {"True": 1, "true": 1, "False": 0, "false": 0}
+        ).where(raw.isin(("True", "true", "False", "false")), raw)
+    # Through float64 with an explicit NaN fill: a nullable dtype (BooleanDtype from a
+    # GPKG BOOLEAN column, Int64 from a nullable integer) survives to_numeric as a
+    # masked array, and fillna(0) on one raises.
+    parsed = pd.Series(
+        pd.to_numeric(raw, errors="coerce").to_numpy(dtype="float64", na_value=np.nan),
+        index=raw.index,
+    )
+    bad = (parsed.isna() & raw.notna()) | (parsed.notna() & ~parsed.isin([0, 1]))
+    if bad.any():
+        preview = raw[bad].unique()[:_BAD_FPID_PREVIEW_LIMIT].tolist()
+        raise ValueError(
+            f"lakes column '{RUN_OF_RIVER_FIELD}' must hold 0, 1 or NULL, but "
+            f"{int(bad.sum())} of {len(raw)} row(s) hold other values: {preview}."
+        )
+    lakes[RUN_OF_RIVER_FIELD] = parsed.fillna(0).astype(bool)
+    return lakes
+
+
+def route_run_of_river_as_channel(
+    lakes: pd.DataFrame, reservoir_da: pd.DataFrame
+) -> pd.DataFrame:
+    """Drop run-of-river dams from the reservoir set so they route as MC channel.
+
+    A flagged dam that ``reservoir_da`` marks ``da_type`` 4 stays a reservoir whether or
+    not RFC DA is on, and Great Lakes are never eligible. The decision reads the
+    hydrofabric only, since ``ExecutionPlan`` is built once for every forcing window. The
+    crosswalk needs no filtering: ``_lake_vfp_clusters`` keeps only rows that resolve to a
+    surviving lake.
+    """
+    if lakes.empty:
+        return lakes
+    flagged = lakes[RUN_OF_RIVER_FIELD].astype(bool)
+    if not flagged.any():
+        return lakes
+
+    rfc_ids: set[int] = set()
+    if not reservoir_da.empty and RESERVOIR_DA_SITE_TYPE_FIELD in reservoir_da.columns:
+        is_rfc_row = reservoir_da[RESERVOIR_DA_SITE_TYPE_FIELD] == RFC_DA_TYPE
+        rfc_ids = set(
+            pd.to_numeric(reservoir_da.loc[is_rfc_row, LAKE_ID_FIELD], errors="coerce")
+            .dropna()
+            .astype(int)
+        )
+    lake_ids = pd.to_numeric(lakes[LAKE_ID_FIELD], errors="coerce")
+    is_rfc = lake_ids.isin(rfc_ids)
+    is_great_lake = (
+        lakes[NATIVE_LAKE_ID_FIELD].astype(str).isin([str(i) for i in GREAT_LAKES_IDS])
+    )
+    to_channel = flagged & ~is_rfc & ~is_great_lake
+    if not to_channel.any():
+        LOG.info(
+            "run-of-river: all %d flagged dam(s) are RFC reservoirs and keep their "
+            "reservoir routing", int(flagged.sum()),
+        )
+        return lakes
+
+    kept_rfc = int((flagged & is_rfc).sum())
+    LOG.warning(
+        "run-of-river: %d of %d flagged dam(s) routed as MC channel; %d kept as RFC "
+        "reservoirs. Their flowpaths stay in the link table and no level pool is "
+        "created for them.", int(to_channel.sum()), int(flagged.sum()), kept_rfc,
+    )
+    return lakes[~to_channel]
 
 
 def load_bmi_data(

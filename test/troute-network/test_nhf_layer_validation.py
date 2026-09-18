@@ -11,12 +11,19 @@ the run was never going to use.
 
 from __future__ import annotations
 
+import pandas as pd
+import pytest
+
 from troute.nhf_preprocess import (
     LAYERS_TO_READ,
+    LEVEL_POOL_PARAMS,
     OPTIONAL_COLUMNS,
     OPTIONAL_LAYERS,
     REQUIRED_COLUMNS,
+    RUN_OF_RIVER_FIELD,
+    WATERBODY_DF_FIELDS,
     _missing_requested_columns,
+    _normalize_run_of_river,
 )
 
 
@@ -95,3 +102,44 @@ def test_absent_gages_layer_is_still_tolerated():
     fields = _full_fields()
     fields.pop("gages")
     assert _missing_requested_columns(fields) == {}
+
+
+# --------------------------------------------------- run-of-river tag
+
+
+def test_run_of_river_is_not_a_level_pool_parameter():
+    """Both completeness gates name LEVEL_POOL_PARAMS, the columns the kernel reads.
+    A tag decides nothing about whether a lake can be routed."""
+    assert RUN_OF_RIVER_FIELD not in LEVEL_POOL_PARAMS
+    assert RUN_OF_RIVER_FIELD not in WATERBODY_DF_FIELDS
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Shapes a GeoPackage reader returns for a nullable INTEGER or BOOLEAN column,
+        # depending on the reader: float64 with NaN, or the strings "True"/"False" and
+        # None.
+        (pd.Series([1.0, 0.0, float("nan")]), [True, False, False]),
+        (pd.Series(["True", "False", None], dtype=object), [True, False, False]),
+        # Shapes a caller can still hand over directly.
+        (pd.Series([0, 1]), [False, True]),
+        (pd.Series([None, 1], dtype=object), [False, True]),
+        (pd.Series([True, False]), [True, False]),
+        (pd.Series([True, pd.NA], dtype="boolean"), [True, False]),
+        (pd.Series([1, pd.NA], dtype="Int64"), [True, False]),
+        (pd.Series([float("nan"), float("nan")]), [False, False]),
+    ],
+)
+def test_run_of_river_parses_to_bool(raw: pd.Series[object], expected: list[bool]):
+    normalized = _normalize_run_of_river(pd.DataFrame({RUN_OF_RIVER_FIELD: raw}))
+    assert normalized[RUN_OF_RIVER_FIELD].dtype == bool
+    assert normalized[RUN_OF_RIVER_FIELD].tolist() == expected
+
+
+@pytest.mark.parametrize("raw", [["yes", "no"], [0, 2]])
+def test_unusable_run_of_river_values_are_rejected(raw: list[object]):
+    """Guessing routes a real reservoir as channel, or leaves a low-head dam
+    impounding water that is not there."""
+    with pytest.raises(ValueError, match="must hold 0, 1 or NULL"):
+        _normalize_run_of_river(pd.DataFrame({RUN_OF_RIVER_FIELD: raw}))
