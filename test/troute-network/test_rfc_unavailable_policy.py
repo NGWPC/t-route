@@ -21,7 +21,11 @@ _FIXTURE = next(_REAL.glob("*.RFCTimeSeries.ncdf"), None)
 needs_fixture = pytest.mark.skipif(_FIXTURE is None, reason="no RFC fixture available")
 _FALLBACK_T0 = pd.Timestamp("2021-10-21 12:00:00")
 
-_PARAMS = {"reservoir_rfc_forecast_persist_days": 11}
+# The default is level_pool, so the error policy is the one to ask for.
+_PARAMS = {
+    "reservoir_rfc_forecast_persist_days": 11,
+    "reservoir_rfc_forecasts_unavailable_action": "error",
+}
 _LEVEL_POOL = {**_PARAMS, "reservoir_rfc_forecasts_unavailable_action": "level_pool"}
 
 
@@ -56,10 +60,26 @@ def _crosswalk_nhf(gages: list[str]) -> pd.DataFrame:
 # --------------------------------------------------------------- no file in the window
 
 @needs_fixture
-def test_an_empty_folder_is_fatal_by_default(tmp_path):
+def test_an_empty_folder_is_fatal_under_error(tmp_path):
     t0 = _t0()
     with pytest.raises(FileNotFoundError, match="no RFC timeseries file"):
-        _read_timeseries_files(str(tmp_path), _dates(t0), t0, t0 + pd.Timedelta(days=11))
+        _read_timeseries_files(
+            str(tmp_path), _dates(t0), t0, t0 + pd.Timedelta(days=11),
+            unavailable_action="error",
+        )
+
+
+@needs_fixture
+def test_an_empty_folder_degrades_by_default(tmp_path, caplog):
+    """The default is level_pool: an hourly AnA cycle that raises on a missing forecast
+    breaks every cycle after it, so the run has to carry on without that reservoir."""
+    t0 = _t0()
+    with caplog.at_level(logging.WARNING):
+        got = _read_timeseries_files(
+            str(tmp_path), _dates(t0), t0, t0 + pd.Timedelta(days=11)
+        )
+    assert got.empty
+    assert "Running level pool there instead" in caplog.text
 
 
 @needs_fixture
@@ -85,10 +105,13 @@ def _stale_folder(tmp_path: Path) -> tuple[Path, pd.Timestamp]:
 
 
 @needs_fixture
-def test_a_forecast_that_misses_t0_is_fatal_by_default(tmp_path):
+def test_a_forecast_that_misses_t0_is_fatal_under_error(tmp_path):
     d, t0 = _stale_folder(tmp_path)
     with pytest.raises(ValueError, match="cover the simulation start"):
-        _read_timeseries_files(str(d), _dates(t0), t0, t0 + pd.Timedelta(days=11))
+        _read_timeseries_files(
+            str(d), _dates(t0), t0, t0 + pd.Timedelta(days=11),
+            unavailable_action="error",
+        )
 
 
 @needs_fixture
@@ -121,9 +144,12 @@ def test_one_stale_gage_does_not_take_down_a_good_one(tmp_path, caplog):
     _stale_copy(tmp_path / f"{stamp:%Y-%m-%d_%H}.60min.STALE1.RFCTimeSeries.ncdf", stamp)
     good = _FIXTURE.name.split(".")[2]
 
-    # Default policy: the one late gage ends the run.
+    # Under the error policy the one late gage ends the run.
     with pytest.raises(ValueError, match="STALE1"):
-        _read_timeseries_files(str(tmp_path), _dates(t0), t0, t0 + pd.Timedelta(days=11))
+        _read_timeseries_files(
+            str(tmp_path), _dates(t0), t0, t0 + pd.Timedelta(days=11),
+            unavailable_action="error",
+        )
 
     with caplog.at_level(logging.WARNING):
         got = _read_timeseries_files(

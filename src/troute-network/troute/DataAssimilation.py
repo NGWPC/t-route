@@ -1245,7 +1245,7 @@ class RFCDA(AbstractDA):
                     rfc_timeseries_path, timeseries_dates, start_datetime, final_persist_datetime,
                     routing_period=self._run_parameters.get('dt', 300),
                     unavailable_action=rfc_parameters.get(
-                        'reservoir_rfc_forecasts_unavailable_action', 'error'),
+                        'reservoir_rfc_forecasts_unavailable_action', 'level_pool'),
                     gages=network.rfc_lake_gage_crosswalk['rfc_gage_id'].dropna(),
                 )
                 self._reservoir_rfc_df, self._reservoir_rfc_param_df = assemble_rfc_dataframes(
@@ -2630,7 +2630,7 @@ def _rfc_unavailable(msg, action, error=ValueError, warn=True):
 
 
 def _read_timeseries_files(filepath, timeseries_dates, t0, final_persist_datetime,
-                           routing_period=300, unavailable_action='error', gages=None):
+                           routing_period=300, unavailable_action='level_pool', gages=None):
     """Newest RFC forecast per gage that actually covers t0, as one long frame.
 
     Newest-first but coverage-gated: the newest issue has the latest slice start, so
@@ -2735,7 +2735,7 @@ def _read_timeseries_files(filepath, timeseries_dates, t0, final_persist_datetim
     return rfc_df
 
 def assemble_rfc_dataframes(rfc_timeseries_df, rfc_lake_gage_crosswalk, t0, rfc_parameters):
-    action = rfc_parameters.get('reservoir_rfc_forecasts_unavailable_action', 'error')
+    action = rfc_parameters.get('reservoir_rfc_forecasts_unavailable_action', 'level_pool')
     # One crosswalk shape from here down: lake id in the INDEX. The NHF builder hands
     # it over reset_index()'d, with the lake id in a column and a RangeIndex, and the
     # gageless lookup below reads the index as lake ids -- so on that path it compared

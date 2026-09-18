@@ -22,14 +22,19 @@ _T0 = pd.Timestamp("2021-10-21 12:00:00")
 _CROSSWALK = pd.DataFrame({"rfc_gage_id": ["KNFC1"], "rfc_lake_id": [17609317]}).set_index(
     "rfc_lake_id"
 )
-_PARAMS = {"reservoir_rfc_forecast_persist_days": 11}
+# The default is level_pool, so a test about the error message asks for it.
+_PARAMS = {
+    "reservoir_rfc_forecast_persist_days": 11,
+    "reservoir_rfc_forecasts_unavailable_action": "error",
+}
 
 
 def test_no_file_in_lookback_window_names_the_window(tmp_path):
     (tmp_path / "2021-10-21_12.60min.KNFC1.RFCTimeSeries.ncdf").touch()
     with pytest.raises(FileNotFoundError, match="lookback window 2099-01-01_00"):
         _read_timeseries_files(
-            str(tmp_path), ["2099-01-01_00"], _T0, _T0 + pd.Timedelta(days=11)
+            str(tmp_path), ["2099-01-01_00"], _T0, _T0 + pd.Timedelta(days=11),
+            unavailable_action="error"
         )
 
 
@@ -88,11 +93,12 @@ _RFC_FILES = Path(__file__).parents[1] / "BMI" / "rfc_timeseries"
 
 def test_selected_file_missing_t0_names_the_file_and_span():
     # The file is dated inside the window, but its slice starts an hour after t0.
-    # With only one candidate there is nothing to fall back to, so this stays fatal.
+    # With only one candidate there is nothing to fall back to.
     with pytest.raises(ValueError, match="cover the simulation start"):
         _read_timeseries_files(
             str(_RFC_FILES), ["2021-10-21_12"], datetime(2021, 10, 19, 11),
             datetime(2021, 11, 1),
+            unavailable_action="error",
         )
 
 

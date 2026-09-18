@@ -78,7 +78,8 @@ def test_a_window_narrower_than_the_issue_interval_names_the_window(tmp_path) ->
     t0 = _issue(_FIXTURE.name) + timedelta(hours=18)
     with pytest.raises(FileNotFoundError, match="lookback window"):
         _read_timeseries_files(
-            str(_folder(tmp_path)), _window(t0, 3, 0), t0, t0 + timedelta(days=11)
+            str(_folder(tmp_path)), _window(t0, 3, 0), t0, t0 + timedelta(days=11),
+            unavailable_action="error",
         )
 
 

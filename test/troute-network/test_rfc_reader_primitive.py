@@ -81,7 +81,10 @@ def test_no_candidate_covering_t0_is_fatal(tmp_path):
     with netCDF4.Dataset(str(dst), "a") as ds:
         ds.sliceStartTimeUTC = "2021-10-22_00:00:00"
     with pytest.raises(ValueError, match="cover the simulation start"):
-        _read_timeseries_files(str(tmp_path), _window(_T0), _T0, _T0 + timedelta(days=11))
+        _read_timeseries_files(
+            str(tmp_path), _window(_T0), _T0, _T0 + timedelta(days=11),
+            unavailable_action="error",
+        )
 
 
 @pytest.mark.parametrize(("routing_period", "expected"), [(300, True), (7200, False)])

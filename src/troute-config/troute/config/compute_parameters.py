@@ -566,13 +566,13 @@ class ReservoirRfcParameters(BaseModel):
     """
     Days to persist an observation when no new, good observations can be found.
     """
-    reservoir_rfc_forecasts_unavailable_action: Literal['error', 'level_pool'] = 'error'
+    reservoir_rfc_forecasts_unavailable_action: Literal['error', 'level_pool'] = 'level_pool'
     """
     What to do when a forecast a reservoir needs is missing or does not cover the run.
-    'error' ends the run naming the reason, on the grounds that enabling RFC DA asserts
-    the forecasts are provisioned. 'level_pool' runs that reservoir as level pool and
-    warns, which is what an operational cycle wants: one late gage should not break a
-    chain of runs.
+    'level_pool' runs that reservoir as level pool and warns, which is what an
+    operational cycle wants: one late gage should not break a chain of runs, and an
+    hourly AnA cycle that raises breaks every cycle after it. 'error' ends the run
+    naming the reason, for a configuration that treats the forecasts as provisioned.
     """
 
 
