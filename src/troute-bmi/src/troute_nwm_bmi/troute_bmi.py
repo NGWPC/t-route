@@ -421,8 +421,10 @@ class BmiTroute(Bmi):
 
     def _deserialize(self, data):
         deserialized = pickle.loads(bytes(data))
-        self._values = deserialized["values"]
+        # The model checks the checkpoint's network before installing anything; values
+        # installed first would leave a caller that catches the refusal with mixed state.
         self._model.load_state(deserialized["model"])
+        self._values = deserialized["values"]
         self._free_serialized()
 
     def _free_serialized(self):

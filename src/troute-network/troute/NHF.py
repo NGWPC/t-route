@@ -262,6 +262,12 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
                 f"lite_channel_restart_file {restart_file} is keyed by neither this network's "
                 "routing links nor a 'feature_id' column."
             )
+        # Only the link-keyed shape needs this. Link ids are positional, so a
+        # relabeled id passes the coverage count below and loads a neighbor's state;
+        # a feature_id restart is keyed by the hydrofabric's own flowpath id.
+        self._check_state_fingerprint(
+            restart, f"lite_channel_restart_file {restart_file}"
+        )
         if restart.index[known].duplicated().any():
             raise ValueError(
                 f"lite_channel_restart_file {restart_file} has duplicate link ids, "

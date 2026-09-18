@@ -235,3 +235,19 @@ def test_clusters_degenerate_to_the_declared_outlet_without_a_crosswalk(crosswal
     # Lakes sharing a declared outlet merge; the third stays on its own.
     assert lake_cluster[100] == lake_cluster[101] != lake_cluster[102]
     assert set(vfp_cluster) == {10, 12}
+
+
+def test_the_fingerprint_sees_where_a_lake_drains():
+    """A lake's outlet edge lives only in ``connections``: its absorbed links leave the
+    link table and the synthetic headwater points at the lake. Two networks differing
+    only in where the lake drains must still fingerprint apart."""
+    from troute.AbstractNetwork import AbstractNetwork
+
+    def drained_through(outlet: int) -> tuple[list[int], str]:
+        net = _Net(_links([(10, outlet, 1), (20, 0, 2), (30, 0, 3)]), _lakes({100: (7001, 1)}))
+        net._refactor_reservoirs()
+        return net.connections[100], AbstractNetwork.fingerprint(net)
+
+    to_20, to_30 = drained_through(20), drained_through(30)
+    assert (to_20[0], to_30[0]) == ([20], [30])
+    assert to_20[1] != to_30[1]

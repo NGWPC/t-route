@@ -15,6 +15,11 @@ import xarray as xr
 
 from troute.nhd_network import extract_connections, replace_waterbodies_connections, reverse_network, reachable_network, split_at_waterbodies_and_junctions, split_at_junction, dfs_decomposition
 from troute.nhd_network_utilities_v02 import organize_independent_networks
+from troute.network_fingerprint import (
+    FINGERPRINT_KEY,
+    check_fingerprint,
+    network_fingerprint,
+)
 from troute.window_plan import plan_windows, resolve_window
 import troute.nhd_io as nhd_io 
 from .AbstractRouting import MCOnly, MCwithDiffusive, MCwithDiffusiveNatlXSectionNonRefactored, MCwithDiffusiveNatlXSectionRefactored
@@ -712,6 +717,88 @@ class AbstractNetwork(ABC):
         
         LOG.debug("reach organization complete in %s seconds." % (time.time() - start_time))
 
+    def fingerprint(self) -> str:
+        """This run's network identity, for stamping and checking state files."""
+        return network_fingerprint(
+            self.dataframe,
+            self.waterbody_dataframe,
+            nhd_io.WBODY_RECORD_ID_FIELD,
+            self.connections,
+        )
+
+    def _check_state_fingerprint(self, frame: pd.DataFrame, source: str) -> None:
+        """Refuse a state file built on a different network."""
+        check_fingerprint(frame.attrs.get(FINGERPRINT_KEY), self.fingerprint(), source)
+
+    def _reindex_waterbody_restart(
+        self, restart_df: pd.DataFrame, restart_file: str
+    ) -> pd.DataFrame:
+        """Re-key a lite waterbody restart onto this run's waterbody index.
+
+        NHF waterbody ids are positional, so dropping one lake would hand every later
+        lake its neighbor's state. The restart is keyed by the hydrofabric lake id, and
+        one keyed otherwise is refused.
+        """
+        id_field = nhd_io.WBODY_RESTART_ID_FIELD
+        record_field = nhd_io.WBODY_RECORD_ID_FIELD
+        index_name = self.waterbody_dataframe.index.name
+        # NHD and HYFeatures key waterbodies by the ids they came with and carry no
+        # record column; their restart index is already the stable id.
+        synthetic = record_field in self.waterbody_dataframe.columns
+        if not synthetic:
+            return restart_df.rename_axis(index_name)
+
+        if restart_df.index.name != id_field:
+            raise ValueError(
+                f"lite_waterbody_restart_file {restart_file} is indexed by "
+                f"'{restart_df.index.name}', not '{id_field}'. This network keys "
+                "waterbodies by synthetic ids allocated from the routable lake set, "
+                "so a restart carrying those ids cannot be matched and would load "
+                "each lake's state into a different lake. Regenerate the restart."
+            )
+
+        record_to_index = pd.Series(
+            self.waterbody_dataframe.index.to_numpy(),
+            index=self.waterbody_dataframe[record_field].to_numpy(),
+        )
+        mapped = record_to_index.reindex(restart_df.index.to_numpy())
+        known = mapped.notna().to_numpy()
+        n_unknown = int((~known).sum())
+        if n_unknown:
+            # Harmless: lakes the restart carries that this run does not route.
+            LOG.debug(
+                "waterbody restart: ignoring %d lake(s) absent from this network",
+                n_unknown,
+            )
+        restart_df = restart_df[known].copy()
+        # astype: reindex above introduces NaN when the restart carries a lake this
+        # network lacks, which floats the whole column.
+        restart_df.index = pd.Index(
+            mapped[known].to_numpy().astype(np.int64), name=index_name
+        )
+
+        missing = self.waterbody_dataframe.index.difference(restart_df.index)
+        if len(missing):
+            preview = self.waterbody_dataframe.loc[missing[:10], record_field].tolist()
+            total = len(self.waterbody_dataframe)
+            # Matching no lake at all means the writer named its index lake_id while
+            # keying it by synthetic ids.
+            cause = (
+                "no lake matched at all, so the file is keyed by something other "
+                "than the hydrofabric lake id despite naming its index for it"
+                if len(missing) == total
+                else "this network routes lakes the restart does not carry, so it "
+                "was written for a different lake set"
+            )
+            raise ValueError(
+                f"lite_waterbody_restart_file {restart_file} is missing "
+                f"{len(missing)} of this network's {total} waterbodies: {cause}. "
+                "The join is an inner one, so those lakes would leave routing with "
+                f"no warm state. Missing lake ids (first 10): {preview}. Regenerate "
+                "the restart for this hydrofabric and configuration."
+            )
+        return restart_df
+
     def initial_warmstate_preprocess(self, from_files, value_dict):
 
         '''
@@ -750,9 +837,33 @@ class AbstractNetwork(ABC):
                     waterbodies_initial_states_df, _ = nhd_io.read_lite_restart(
                         restart_parameters['lite_waterbody_restart_file']
                     )
+                    # Only a synthetic index needs the stamp: NHD and HYFeatures key waterbodies
+                    # by the stable ids they came with, and their writers (-V3, -V4) stamp none.
+                    if nhd_io.WBODY_RECORD_ID_FIELD in self.waterbody_dataframe.columns:
+                        self._check_state_fingerprint(
+                            waterbodies_initial_states_df,
+                            f"lite_waterbody_restart_file "
+                            f"{restart_parameters['lite_waterbody_restart_file']}",
+                        )
+                    waterbodies_initial_states_df = self._reindex_waterbody_restart(
+                        waterbodies_initial_states_df,
+                        restart_parameters['lite_waterbody_restart_file'],
+                    )
                     
                 # read waterbody initial states from WRF-Hydro type restart file
                 elif restart_parameters.get("wrf_hydro_waterbody_restart_file", None):
+                    if nhd_io.WBODY_RECORD_ID_FIELD in self.waterbody_dataframe.columns:
+                        # The merge below joins the file's crosswalk ids onto positional
+                        # routed ids by numeric equality, and the file names no network.
+                        msg = (
+                            "wrf_hydro_waterbody_restart_file "
+                            f"{restart_parameters['wrf_hydro_waterbody_restart_file']} "
+                            "cannot be used on a network whose waterbody ids are "
+                            "allocated by position: its crosswalk names lakes in "
+                            "another id space, so its states would join onto whichever "
+                            "routed ids happen to match. Use a lite waterbody restart."
+                        )
+                        raise ValueError(msg)
                     waterbodies_initial_states_df = nhd_io.get_reservoir_restart_from_wrf_hydro(
                         restart_parameters["wrf_hydro_waterbody_restart_file"],
                         restart_parameters["wrf_hydro_waterbody_ID_crosswalk_file"],
