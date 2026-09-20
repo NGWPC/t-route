@@ -36,7 +36,7 @@ contains
             real,    intent(in)    :: weir_elevation            ! bottom of weir elevation (meters AMSL)
             real,    intent(in)    :: weir_coeffecient          ! weir coefficient
             real,    intent(in)    :: weir_length               ! weir length (meters)
-            real,    intent(in)    :: dam_length                ! dam length (meters)
+            real,    intent(in)    :: dam_length                ! dam length, a multiplier on weir length
             real,    intent(in)    :: orifice_elevation         ! orifice elevation (meters AMSL)
             real,    intent(in)    :: orifice_coefficient       ! orifice coefficient
             real,    intent(in)    :: orifice_area              ! orifice area (meters^2)
