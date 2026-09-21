@@ -423,8 +423,8 @@ class StreamflowScalingParams(BaseModel):
     construction -- the hand-off instant is always seeded UNTIMED, so the
     forecast equals the untimed arm's. Off for runnability, not skill: the
     span must fit the opening update (fail-closed) and operational 3-28 h
-    lookbacks cannot host the 48 h default, plus ~5% runtime. Enable where
-    the cadence hosts the span and record timing matters.
+    lookbacks cannot host the 48 h default. Enable where the cadence hosts the
+    span and record timing matters.
 
     On, an upstream segment at time ``t`` is corrected by ``dQ_o(t + tau)``: a
     correction placed there routes down and reaches the gage at ``t + tau``, so
