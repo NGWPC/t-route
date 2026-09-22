@@ -60,7 +60,7 @@ contains
         orifice_area, max_depth, lake_number, wbody_type_code)
         implicit none
         class(levelpool), intent(inout) :: this ! object being initialized
-        real, intent(inout) :: water_elevation           ! meters AMSL
+        double precision, intent(inout) :: water_elevation ! meters AMSL
         real, intent(in)    :: lake_area                 ! area of lake (km^2)
         real, intent(in)    :: weir_elevation            ! bottom of weir elevation (meters AMSL)
         real, intent(in)    :: weir_coeffecient          ! weir coefficient
@@ -147,8 +147,8 @@ contains
     subroutine assimilate_water_elevation(this, updated_elevation, water_elevation)
         implicit none
         class(levelpool), intent(inout) :: this
-        real, intent(in)  :: updated_elevation ! meters
-        real, intent(out) :: water_elevation   ! meters
+        double precision, intent(in)  :: updated_elevation ! meters
+        double precision, intent(out) :: water_elevation   ! meters
         
         ! set reservoir depth state to update value
         water_elevation = updated_elevation
@@ -168,7 +168,7 @@ contains
         real, intent(in)    :: previous_timestep_inflow ! cubic meters per second (cms)
         real, intent(in)    :: inflow                   ! cubic meters per second (cms)
         real, intent(in)    :: lateral_inflow           ! cubic meters per second (cms)
-        real, intent(inout) :: water_elevation          ! meters
+        double precision, intent(inout) :: water_elevation ! meters
         real, intent(out)   :: outflow                  ! cubic meters per second (cms)
         real, intent(in)    :: routing_period           ! seconds
         integer, intent(out):: dynamic_reservoir_type   ! dynamic reservoir type sent to lake out files
@@ -236,7 +236,7 @@ contains
         !! ----------------------------  argument variables
         !! All elevations should be relative to a common base (often belev(k))
 
-        real, intent(INOUT) :: H       ! water elevation height (m)
+        double precision, intent(INOUT) :: H ! water elevation height (m)
         real, intent(IN)    :: dt      ! routing period [s]
         real, intent(IN)    :: qi0     ! inflow at previous timestep (cms)
         real, intent(IN)    :: qi1     ! inflow at current timestep (cms)
@@ -255,7 +255,7 @@ contains
 
         !!DJG Add lake option switch here...move up to namelist in future versions...
         integer :: LAKE_OPT            ! Lake model option (move to namelist later)
-        real    :: Htmp                ! Temporary assign of incoming lake el. (m)
+        double precision :: Htmp       ! Temporary assign of incoming lake el. (m)
 
         !! ----------------------------  local variables
         real :: sap                    ! local surface area values
@@ -278,10 +278,10 @@ contains
         real :: net                    ! mean inflow less discharge at the starting elevation
         real :: threshold(3)           ! the elevations an outlet opens at
         integer :: k
-        ! Single precision resolves a quarter of a millimeter near 3000 m, and a sub-step
-        ! below that would round away while its discharge is published. The sub-steps
-        ! accumulate in double and the elevation is rounded once per call.
+        ! The elevation is carried in double between calls: in single precision a storage
+        ! change under half an ulp, about 4 cms on a 300 km2 lake near 100 m, rounds away.
         double precision :: h_acc
+        real :: h_now                  ! the elevation discharge is evaluated at (m)
         integer :: nsub, isub
         ! A sub-step stays stable while short against tau = sap / (dQ/dH), and is sized on
         ! dQ/dH since the net flux vanishes near equilibrium. SAFETY is its share of tau;
@@ -313,9 +313,10 @@ contains
 
            ! A non-finite elevation from a state file fails every comparison below and would
            ! publish zero for the rest of the run, so the pool restarts at its orifice invert.
-           if (.not. (H >= -huge(1.0) .and. H <= huge(1.0))) then
+           if (.not. (H >= -huge(H) .and. H <= huge(H))) then
               H = oe
            endif
+           h_now = real(H)
 
            ! Lateral inflow runs for the whole step, so every stage carries it. t-route passes
            ! no lateral inflow and one inflow as both endpoints, so neither path is live there.
@@ -332,7 +333,7 @@ contains
            ! elevation and publishes its own discharge.
            if (.not. (abs(qi0) <= huge(1.0) .and. abs(qi1) <= huge(1.0) .and. &
                       abs(ql) <= huge(1.0))) then
-              qo1 = lp_discharge(H)
+              qo1 = lp_discharge(h_now)
               return
            endif
 
@@ -343,12 +344,12 @@ contains
            threshold = [oe, we, maxh]
            nsub = 1
            if (sap > 0.0) then
-              net = 0.5 * (qi0 + qi1) + lateral - lp_discharge(H)
-              reach = H + (net / sap) * dt
-              dqdh = max(lp_sensitivity(H), lp_sensitivity(reach))
+              net = 0.5 * (qi0 + qi1) + lateral - lp_discharge(h_now)
+              reach = h_now + (net / sap) * dt
+              dqdh = max(lp_sensitivity(h_now), lp_sensitivity(reach))
               do k = 1, size(threshold)
-                 if (threshold(k) >= min(H, reach) .and. &
-                     threshold(k) <= max(H, reach)) then
+                 if (threshold(k) >= min(h_now, reach) .and. &
+                     threshold(k) <= max(h_now, reach)) then
                     dqdh = max(dqdh, lp_sensitivity(threshold(k) + PROBE_HEAD))
                  endif
               end do
@@ -368,7 +369,7 @@ contains
            endif
            dt_sub = dt / real(nsub)
            qo_sum = 0.0
-           h_acc = dble(H)
+           h_acc = H
 
            do isub = 1, nsub
 
@@ -380,7 +381,7 @@ contains
 
               !-- determine Q(dh) from elevation-discharge relationship
               !-- and dh1
-              q1 = lp_discharge(H)
+              q1 = lp_discharge(h_now)
               if (sap > 0) then
                  dh1 = ((It - q1)/sap)*dt_sub
               else
@@ -389,7 +390,7 @@ contains
 
               !-- determine Q(H + dh1/3) from elevation-discharge relationship
               !-- dh2
-              discharge = lp_discharge(H + dh1/3.)
+              discharge = lp_discharge(h_now + dh1/3.)
               if (sap > 0.0) then
                  dh2 = ((Itdt_3 - discharge)/sap)*dt_sub
               else
@@ -398,7 +399,7 @@ contains
 
               !-- determine Q(H + 2/3 dh2) from elevation-discharge relationship
               !-- dh3
-              q3 = lp_discharge(H + dh2*0.667)
+              q3 = lp_discharge(h_now + dh2*0.667)
               if (sap > 0.0) then
                  dh3 = ((Itdt_2_3 - q3)/sap)*dt_sub
               else
@@ -412,28 +413,23 @@ contains
 
               ! A pool cannot release water it does not hold. A step at NSUB_MAX can still
               ! overdraw, and below the lowest outlet there is nothing to draw on.
-              if (sap > 0.0 .and. H + dh < h_floor) then
-                 available = (H - h_floor) * sap + ((It/4.) + (0.75*Itdt_2_3)) * dt_sub
+              if (sap > 0.0 .and. h_now + dh < h_floor) then
+                 available = (h_now - h_floor) * sap + ((It/4.) + (0.75*Itdt_2_3)) * dt_sub
                  if (available < 0.0) available = 0.0
                  drawdown = q_eff * dt_sub
                  if (drawdown > available) then
                     q_eff = available / dt_sub
-                    dh = h_floor - H
+                    dh = h_floor - h_now
                  endif
               endif
 
               h_acc = h_acc + dble(dh)
-              H = real(h_acc)
+              h_now = real(h_acc)
               qo_sum = qo_sum + q_eff
 
            end do
 
-           H = real(h_acc)
-
-           ! Rounding the elevation back to single precision drops up to ulp(H)*sap/2 of
-           ! storage per call, so a net flux below that never moves a large pool: about
-           ! 4 cms on a 300 km2 lake near 100 m at a 300 s step. Reconciling the flux
-           ! against the rounded elevation would send that volume downstream.
+           H = h_acc
            qo1  = qo_sum / real(nsub)  ! return the flow rate from reservoir
 
         !#ifdef HYDRO_D

@@ -281,12 +281,20 @@ class AbstractNetwork(ABC):
         self._q0 = pd.concat(
             [
                 pd.DataFrame(
-                    r[1][:, [-4, -4, -2, -1]], index=r[0], columns=["qu0", "qd0", "h0", "ql0"]
+                    r[1][:, [-4, -4, -2, -1]].astype(np.float64),
+                    index=r[0],
+                    columns=["qu0", "qd0", "h0", "ql0"],
                 )
                 for r in run_results
             ],
             copy=False,
         )
+        # A reservoir's elevation is state the kernel carries in double; its float32
+        # copy in r[1] would drop storage changes below half an ulp every window.
+        for r in run_results:
+            if len(r) > 12:
+                ids, elevations = r[12]
+                self._q0.loc[ids, "h0"] = elevations
         return self._q0
     
     def update_waterbody_water_elevation(self):           
@@ -936,6 +944,11 @@ class AbstractNetwork(ABC):
             if len(self.waterbody_dataframe) > 0:
                 self._waterbody_df = pd.merge(
                     self.waterbody_dataframe, waterbodies_initial_states_df, on=index_id
+                )
+                # float64: update_waterbody_water_elevation writes the double h0 new_q0
+                # carries, and a float32 column would round it.
+                self._waterbody_df = self._waterbody_df.astype(
+                    {"qd0": np.float64, "h0": np.float64}
                 )
             else:
                 self._waterbody_df = pd.DataFrame(columns=["qd0", "h0"])

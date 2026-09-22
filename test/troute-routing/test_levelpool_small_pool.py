@@ -307,3 +307,21 @@ def test_an_orifice_above_the_weir_crest_creates_no_water() -> None:
     outflow, elevation = pool.run(inflow, 0.0, int(DT))
     stored = (float(elevation) - start) * area_km2 * 1.0e6
     assert inflow * DT - float(outflow) * DT - stored == pytest.approx(0.0, abs=20.0)
+
+
+def test_a_large_pool_keeps_a_small_net_inflow() -> None:
+    """A day of 1 cms into a closed 300 km2 pool raises it 0.29 mm. Carried in single
+    precision near 100 m the elevation cannot move by less than 7.6e-6 m a step, so
+    every step's storage change would round away and the pool would stay put."""
+    area_km2, start, inflow, steps = 300.0, 100.0, 1.0, 288
+    args = [
+        area_km2, 103.0, 1.0, 0.1, 101.0,
+        WEIR_COEFFICIENT, 102.0, 10.0, INITIAL_FRACTIONAL_DEPTH, 0.0, start,
+    ]
+    pool = MC_Levelpool(0, LAKE_NUMBER, array("l", []), args, 1)
+    elevation = start
+    for _ in range(steps):
+        outflow, elevation = pool.run(inflow, 0.0, int(DT))
+        assert outflow == 0.0
+    stored = (float(elevation) - start) * area_km2 * 1.0e6
+    assert stored == pytest.approx(inflow * DT * steps, rel=1e-6)

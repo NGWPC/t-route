@@ -9,7 +9,7 @@ This one runs the production path. A three-node network with one type-4 reservoi
 through ``compute_nhd_routing_v02`` twice over the same timeline, once continuously and
 once in windows, carrying state between windows exactly as the drivers do:
 
-    q0   <- the kernel's own returned state, applied to the waterbody frame
+    q0   <- AbstractNetwork.new_q0 on the kernel's results, applied to the waterbody frame
     rfc  <- _set_rfc_reservoir_da_params(param_df, results)
     t0   <- advanced by the window length
 
@@ -25,6 +25,7 @@ import pandas as pd
 import pytest
 
 from troute import nhd_network
+from troute.AbstractNetwork import AbstractNetwork
 from troute.DataAssimilation import (
     _read_timeseries_files,
     _set_rfc_reservoir_da_params,
@@ -101,6 +102,12 @@ def _route(t0, nts, reaches, waterbodies, types, qlats, q0, rfc_df, rfc_params, 
     )
 
 
+class _Carry:
+    """Holds the q0 that AbstractNetwork.new_q0 writes, so the drivers' carry runs as is."""
+
+    _q0: pd.DataFrame | None = None
+
+
 def _lake_outflow(results, nts):
     for r in results:
         ids = np.asarray(r[0])
@@ -132,11 +139,7 @@ def _continuous_and_chunked(days: int, window_hours: int, persist_days: float,
             carried_q0, rfc_df, params, plan, method, cpu_pool,
         )
         chunks.append(_lake_outflow(results, n * _QTS))
-        carried_q0 = pd.concat([
-            pd.DataFrame(np.asarray(r[1])[:, [-4, -4, -2, -1]], index=r[0],
-                         columns=["qu0", "qd0", "h0", "ql0"])
-            for r in results
-        ])
+        carried_q0 = AbstractNetwork.new_q0(_Carry(), results)
         wb.update(carried_q0)
         params = _set_rfc_reservoir_da_params(params, results)
         window_t0 += timedelta(hours=n)
@@ -180,3 +183,26 @@ def test_every_parallel_method_gives_the_same_answer():
             reference = continuous
         else:
             assert np.array_equal(continuous, reference), method
+
+
+def test_rfc_da_keeps_a_storage_change_below_float32_resolution():
+    """The RFC DA moves the pool from the elevation it is handed each step. Near 1000 m
+    single precision resolves 6.1e-5 m, so a 300 km2 lake releasing a 15 cms forecast
+    (1.5e-5 m a step) and handed a float32 copy of its state would never go down."""
+    hours = 24
+    nts = hours * _QTS
+    reaches, _, types, qlats, q0 = _base_frames(hours, inflow=0.0)
+    waterbodies = pd.DataFrame(
+        [[300.0, 1005.0, 1.0, 0.1, 1000.0, 0.4, 1003.0, 10.0, 0.9, 1.0, 1002.0]],
+        index=[_LAKE], columns=_WB_COLS,
+    )
+    rfc_df, rfc_params = _rfc_frames(persist_days=2)
+    results, _ = _route(
+        _T0, nts, reaches, waterbodies, types, qlats, q0, rfc_df, rfc_params,
+        [None, None, None],
+    )
+    released = float(_lake_outflow(results, nts).sum()) * _DT
+    ids, elevations = next(r[12] for r in results if _LAKE in np.asarray(r[12][0]))
+    lowered = (1002.0 - float(elevations[list(ids).index(_LAKE)])) * 300.0e6
+    assert released > 1.0e5
+    assert lowered == pytest.approx(released, rel=1e-4)

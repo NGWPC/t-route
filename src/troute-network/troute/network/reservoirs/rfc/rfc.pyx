@@ -13,14 +13,14 @@ cdef extern from "rfc_structs.c":
                             float dam_length, float area, float max_depth,
                             float orifice_area, float orifice_coefficient, float orifice_elevation,
                             float weir_coefficient, float weir_elevation, float weir_length,
-                            float initial_fractional_depth, float water_elevation,
+                            float initial_fractional_depth, double water_elevation,
                             int reservoir_type, char *reservoir_parameter_file, char *start_date,
                             char *time_series_path, int forecast_lookback_hours
   )
   void free_rfc_reach(_Reach* reach)
-  void route(_Reach* reach, float routing_period, float inflow, float lateral_inflow, float* outflow,  float* water_elevation) nogil
+  void route(_Reach* reach, float routing_period, float inflow, float lateral_inflow, float* outflow,  double* water_elevation) nogil
 
-cdef void run_rfc_c(_Reach* reach, float inflow, float lateral_inflow, float routing_period, float* outflow, float* water_elevation) nogil:
+cdef void run_rfc_c(_Reach* reach, float inflow, float lateral_inflow, float routing_period, float* outflow, double* water_elevation) nogil:
     route(reach, inflow, lateral_inflow, routing_period, outflow, water_elevation)
 
 cdef class MC_RFC(Reach):
@@ -103,7 +103,7 @@ cdef class MC_RFC(Reach):
     """
     free_rfc_reach(&self._reach)
 
-  cpdef (float,float) run(self, float inflow, float lateral_inflow, float routing_period):
+  cpdef (float,double) run(self, float inflow, float lateral_inflow, float routing_period):
     """
       Run the rfc routing function
       Params:
@@ -120,7 +120,7 @@ cdef class MC_RFC(Reach):
           reservoir water surface elevation after routing_period seconds
     """
     cdef float outflow = 0.0
-    cdef float water_elevation = 0.0
+    cdef double water_elevation = 0.0
     with nogil:
       route(&self._reach, inflow, lateral_inflow, routing_period, &outflow,  &water_elevation)
       #printf("outflow: %f\n", outflow)

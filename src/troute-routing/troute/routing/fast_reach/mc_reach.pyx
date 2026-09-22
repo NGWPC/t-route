@@ -589,7 +589,8 @@ cpdef object compute_network_structured(
     # zeros, not empty: only reservoir rows are written, so any other row reaches
     # the LAKEOUT inflow column as uninitialized heap, varying run to run.
     cdef np.ndarray[float, ndim=3] upstream_array = np.zeros((data_idx.shape[0], nsteps+1, 1), dtype='float32')
-    cdef float reservoir_outflow, reservoir_water_elevation
+    cdef float reservoir_outflow
+    cdef double reservoir_water_elevation, initial_water_elevation
     cdef int id = 0
     
     cdef float qlat
@@ -981,6 +982,19 @@ cpdef object compute_network_structured(
 
     #pr.disable()
     #pr.print_stats(sort='time')
+    # The reservoirs' elevation state in double, for the next window's h0. flowveldepth
+    # holds it as float32, which would drop storage changes below half an ulp at every
+    # window boundary. Great Lakes publish no elevation, so they carry none.
+    reservoir_ids = []
+    reservoir_elevations = []
+    for i in range(num_reaches):
+        r = &reach_structs[i]
+        if r.type == compute_type.RESERVOIR_LP and r.reach.lp.wbody_type_code != 6:
+            reservoir_ids.append(data_idx[r.id])
+            reservoir_elevations.append(r.reach.lp.water_elevation)
+        elif r.type == compute_type.RESERVOIR_RFC:
+            reservoir_ids.append(data_idx[r.id])
+            reservoir_elevations.append(r.reach.rfc.water_elevation)
     #IMPORTANT, free the dynamic array created
     free(reach_structs)
     #slice off the initial condition timestep and return
@@ -1038,5 +1052,9 @@ cpdef object compute_network_structured(
         (
             np.asarray([data_idx[pos] for pos in diversion_da], dtype=np.intp),
             np.asarray([div_applied[gage_i] for gage_i in diversion_da.values()], dtype="float32"),
-        )
+        ),
+        (
+            np.asarray(reservoir_ids, dtype=np.intp),
+            np.asarray(reservoir_elevations, dtype=np.float64),
+        ),
     )
