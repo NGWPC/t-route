@@ -371,7 +371,7 @@ WATERBODY_INITIAL_CONDITIONS = ("qd0", "h0")
 # The overtopping crest in weir lengths (WRF-Hydro's Dam_Length). NWM's LAKEPARM sets 10
 # for every lake, and a lake with no crest length of its own takes it.
 NWM_DAM_LENGTH_MULTIPLIER = 10.0
-# Set per lake by the network after the completeness gate, so never null.
+# The NHF reader sets it per lake and WaterbodyData fills NWM's 10 otherwise, so never null.
 WATERBODY_DERIVED = ("dam_length_multiplier",)
 # What WaterbodyData hands the level-pool kernel, read by position (qd0 at 9, h0 at 10, the
 # multiplier at 11). The hydrofabric part matches nhf_preprocess.LEVEL_POOL_PARAMS, the gate

@@ -10,6 +10,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pyogrio
 from troute.rfc_lake_gage_crosswalk import get_great_lakes_climatology
+from troute.routing.compute import NWM_DAM_LENGTH_MULTIPLIER
 import xarray as xr
 from joblib import Parallel, delayed
 
@@ -31,6 +32,10 @@ _BAD_FPID_PREVIEW_LIMIT = 10
 LAKE_ID_FIELD = "nhf_lake_id"
 RECORD_LAKE_ID_FIELD = "og_" + LAKE_ID_FIELD
 NATIVE_LAKE_ID_FIELD = "lake_id"  # Index of lake in its source dataset
+# NID dam geometry on the lakes layer, in meters, NULL where NID reports none: the length
+# along the top of the dam, and the spillway width at the maximum design pool.
+DAM_CREST_LENGTH_FIELD = "dam_crest_length_m"
+SPILLWAY_WIDTH_FIELD = "spillway_width_m"
 WATERBODY_DF_FIELDS = [
                 LAKE_ID_FIELD,
                 NATIVE_LAKE_ID_FIELD,
@@ -45,6 +50,8 @@ WATERBODY_DF_FIELDS = [
                 "WeirC",
                 "WeirE",
                 "WeirL",
+                DAM_CREST_LENGTH_FIELD,
+                SPILLWAY_WIDTH_FIELD,
             ]
 # Columns the level-pool kernel reads (compute.py's LakeData view). Completeness gates
 # name these explicitly rather than requiring every column present: the waterbody frame
@@ -491,8 +498,46 @@ def read_geo_file(supernetwork_parameters, cpu_pool):
         )
 
     _validate_flowpaths_channel_params(table_dict.get("flowpaths"))
+    _validate_nid_geometry(table_dict["lakes"])
     table_dict["lakes"] = _normalize_run_of_river(table_dict.get("lakes"))
     return table_dict
+
+
+def _validate_nid_geometry(lakes: pd.DataFrame) -> None:
+    """Raise unless every NID crest length and spillway width is NULL or positive.
+
+    NULL means NID reports none and the lake keeps NWM's proportions; zero, a negative
+    or a non-number would size a weir wrong.
+    """
+    for col in (DAM_CREST_LENGTH_FIELD, SPILLWAY_WIDTH_FIELD):
+        raw = lakes[col]
+        value = pd.to_numeric(raw, errors="coerce")
+        bad = raw.notna() & ~(np.isfinite(value) & (value > 0))
+        if bad.any():
+            preview = raw[bad].unique()[:_BAD_FPID_PREVIEW_LIMIT].tolist()
+            msg = (
+                f"lakes column '{col}' must be NULL or a positive length in meters, but "
+                f"{int(bad.sum())} of {len(raw)} row(s) hold other values: {preview}."
+            )
+            raise ValueError(msg)
+
+
+def overtopping_geometry(
+    weir_length: "pd.Series[float]",
+    crest_length: "pd.Series[float]",
+    spillway_width: "pd.Series[float]",
+) -> tuple["pd.Series[float]", "pd.Series[float]"]:
+    """The service weir length and the kernel's dam-length multiplier for each lake.
+
+    The weir is the NID spillway width, else ``WeirL``, else a tenth of the NID crest;
+    where NID has a crest and no spillway width, ``WeirL`` spans the whole crest, closer to
+    NID's reported spillway capacity than a tenth of it. The overtopping crest is the NID
+    crest, else NWM's 10 weir lengths.
+    """
+    weir = spillway_width.where(spillway_width.notna(), weir_length)
+    weir = weir.where(weir.notna(), crest_length / NWM_DAM_LENGTH_MULTIPLIER)
+    multiplier = (crest_length / weir).where(crest_length.notna(), NWM_DAM_LENGTH_MULTIPLIER)
+    return weir, multiplier
 
 
 def _normalize_run_of_river(lakes: "pd.DataFrame | None") -> pd.DataFrame:
@@ -953,9 +998,16 @@ class NHFPreprocessMixin:
             else:
                 lake_cols = WATERBODY_DF_FIELDS
 
+            # The weir and crest are set first, so the completeness gate below judges
+            # the WeirL the kernel reads.
+            weir, multiplier = overtopping_geometry(
+                lakes["WeirL"], lakes[DAM_CREST_LENGTH_FIELD], lakes[SPILLWAY_WIDTH_FIELD]
+            )
             # Step-by-step cleanup; every dropped category is counted and logged
             # as a warning (see _clean_waterbodies).
-            self.waterbody_dataframe = lakes[lake_cols]
+            self.waterbody_dataframe = lakes[lake_cols].assign(
+                WeirL=weir, dam_length_multiplier=multiplier
+            )
             self._waterbody_df, gl_df = _clean_waterbodies(
                 self._waterbody_df, LAKE_ID_FIELD
             )
