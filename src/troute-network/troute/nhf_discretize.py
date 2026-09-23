@@ -512,20 +512,17 @@ def _interpolate_segment_area(df: pd.DataFrame) -> pd.Series:
 
 def _format_link_df(links: LinkArrays, flowpaths: pd.DataFrame) -> pd.DataFrame:
     """Conform to AbstractNetwork format and build mapping from link id to fp_id."""
-    # Carry total_da_sqkm (per flowpath) onto every routed segment when present,
-    # so the simple-scaling DA can read per-reach drainage area off the routed
+    # Carry total_da_sqkm (per flowpath) onto every routed segment, so the
+    # simple-scaling DA can read per-reach drainage area off the routed
     # dataframe. Each split segment inherits its parent flowpath's cumulative
     # total; the outlet (max segment_order) segment holds the gage's A_o.
-    extra_cols = ["total_da_sqkm"] if "total_da_sqkm" in flowpaths.columns else []
     _dataframe = pd.merge(
         links.to_df(),
-        flowpaths[CHANNEL_PARAMS + [FIELD_FP_ID] + extra_cols],
+        flowpaths[[*CHANNEL_PARAMS, FIELD_FP_ID, "total_da_sqkm"]],
         on=FIELD_FP_ID,
         how="left",
     )
-
-    if extra_cols:
-        _dataframe["total_da_sqkm"] = _interpolate_segment_area(_dataframe)
+    _dataframe["total_da_sqkm"] = _interpolate_segment_area(_dataframe)
 
     # Conform to abstractnetwork _dataframe
     _dataframe["alt"] = 0

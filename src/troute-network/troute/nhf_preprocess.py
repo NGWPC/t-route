@@ -72,13 +72,12 @@ def _sql_in(field: str, values, quote: bool = False) -> str:
 
 def _lake_vfp_clusters(
     waterbody_df: pd.DataFrame,
-    crosswalk: "pd.DataFrame | None",
+    crosswalk: pd.DataFrame,
 ) -> tuple["pd.Series[int]", dict[int, int]]:
     """Cluster lakes that share a virtual flowpath; returns lake and vfp labels.
 
     Lakes sharing a vfp must collapse together: a vfp belongs to one absorbed link
     set, and two claims would pop the same link out of ``connections`` twice.
-    Without a crosswalk this degenerates to ``groupby("virtual_fp_id")``.
     """
     lakes = waterbody_df["virtual_fp_id"].dropna()
     edges = list(
@@ -87,22 +86,20 @@ def _lake_vfp_clusters(
             lakes.to_numpy().astype(int).tolist(),
         )
     )
-    if crosswalk is not None and not crosswalk.empty:
-        # Crosswalk is keyed on the ORIGINAL nhf_lake_id; the waterbody table has
-        # synthetic ids by now. Great Lakes carry their native lake_id and so do
-        # not match -- they stay anchored on their declared vfp alone.
-        record_to_index = pd.Series(
-            waterbody_df.index, index=waterbody_df[RECORD_LAKE_ID_FIELD]
+    # The crosswalk is keyed on the original nhf_lake_id, the waterbody table on synthetic
+    # ids. Great Lakes keep their native lake_id, match nothing and stay on their declared vfp.
+    record_to_index = pd.Series(
+        waterbody_df.index, index=waterbody_df[RECORD_LAKE_ID_FIELD]
+    )
+    cw = crosswalk.dropna(subset=[LAKE_ID_FIELD, "virtual_fp_id"])
+    mapped = record_to_index.reindex(cw[LAKE_ID_FIELD].to_numpy())
+    keep = mapped.notna().to_numpy()
+    edges.extend(
+        zip(
+            mapped.to_numpy()[keep].astype(int).tolist(),
+            cw["virtual_fp_id"].to_numpy()[keep].astype(int).tolist(),
         )
-        cw = crosswalk.dropna(subset=[LAKE_ID_FIELD, "virtual_fp_id"])
-        mapped = record_to_index.reindex(cw[LAKE_ID_FIELD].to_numpy())
-        keep = mapped.notna().to_numpy()
-        edges.extend(
-            zip(
-                mapped.to_numpy()[keep].astype(int).tolist(),
-                cw["virtual_fp_id"].to_numpy()[keep].astype(int).tolist(),
-            )
-        )
+    )
 
     # Union-find over the (lake, vfp) graph. Keys are TAGGED: synthetic lake ids
     # are allocated above max(dataframe.index), which bounds them against routing
@@ -247,19 +244,14 @@ OPTIONAL_LAYERS: frozenset[str] = frozenset(
     {"lakes", "reservoir_da", "lake_vfp_crosswalk"}
 )
 
-# Columns a PRESENT layer may omit: NHF >= 1.1.4 only, consumed only by the
-# scaling DA (which raises its own clear error when enabled without them).
-OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
-    "flowpaths": frozenset({"total_da_sqkm", "vpu_id"}),
-}
-
 # Columns required from layers loaded in FULL (``columns=None``), which name no
 # column list for the check above to use. Enforced only when the layer is PRESENT,
 # so a gage-free domain stays valid. gages.hy_id is the only key tying a gage to its
-# hydrolocation (site_no and gid both repeat); nhf 1.2.3 dropped it, which without
-# this surfaces as a KeyError deep inside a pandas merge.
+# hydrolocation (site_no and gid both repeat), and gages.fp_id places a gage in its
+# VPU for the scaling DA; without this check a gages layer lacking either surfaces
+# as a KeyError deep inside the build.
 REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
-    "gages": frozenset({"hy_id"}),
+    "gages": frozenset({"hy_id", "fp_id"}),
 }
 
 
@@ -285,8 +277,7 @@ def _missing_requested_columns(
                 if absent:
                     missing_by_layer[name] = absent
             continue
-        optional_cols = OPTIONAL_COLUMNS.get(name, frozenset())
-        required = [c for c in columns if c not in optional_cols]
+        required = list(columns)
         required += [c for c in sorted(must_have) if c not in required]
         if available is None:
             # An absent optional layer is fine; an absent core topology layer is not.
@@ -353,8 +344,8 @@ LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
         "flowpaths",
         ["fp_id", "length_km", "n", "mainstem_lp", "topwdth", "slope",
          "ncc", "btmwdth", "musx", "chslp", "topwdthcc", "musk",
-         # scaling-DA-only fields (NHF >= 1.1.4, optional): drainage area for the
-         # area scaling, and the VPU the per-tree theta is regionalized from.
+         # scaling-DA fields: drainage area for the area scaling, and the VPU
+         # the per-tree theta is regionalized from.
          "total_da_sqkm",
          "vpu_id"],
         True,
@@ -380,9 +371,8 @@ LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
     ("gages", None, True),
     ("hydrolocations", None, True),
     ("reservoir_da", ["nhf_lake_id", "lake_id", "site_no", "da_type"], True),
-    # Every vfp intersecting each lake polygon, one lake to many (NHF >= 1.2.2).
-    # Without it _refactor_reservoirs absorbs only the declared outlet vfp and
-    # routes the rest of the lake as MC channel.
+    # Every vfp intersecting each lake polygon, one lake to many; the lake absorbs
+    # them all in _refactor_reservoirs.
     ("lake_vfp_crosswalk", ["nhf_lake_id", "virtual_fp_id"], True),
 ]
 
@@ -483,18 +473,12 @@ def read_geo_file(supernetwork_parameters, cpu_pool):
             ignore_geometry=ignore_geometry,
         )
 
-    # Read present layers in parallel (absent ones become empty frames), pruning
-    # OPTIONAL columns to what the layer carries -- gpd.read_file raises on a
-    # requested column the layer lacks. Required columns were validated above.
-    to_read = []
-    for name, columns, ignore_geometry in LAYERS_TO_READ:
-        if name not in gpkg_layers:
-            continue
-        optional = OPTIONAL_COLUMNS.get(name)
-        if columns is not None and optional:
-            fields = set(pyogrio.read_info(geo_file_path, layer=name)["fields"])
-            columns = [c for c in columns if c not in optional or c in fields]
-        to_read.append((name, columns, ignore_geometry))
+    # Read present layers in parallel (absent ones become empty frames).
+    to_read = [
+        (name, columns, ignore_geometry)
+        for name, columns, ignore_geometry in LAYERS_TO_READ
+        if name in gpkg_layers
+    ]
     if not to_read:
         raise ValueError(
             f"None of the expected layers to read were present in the geopackage: "
@@ -967,7 +951,7 @@ class NHFPreprocessMixin:
         else:
             self._poi_nex_dict = None
 
-    def preprocess_waterbodies(self, lakes, lake_vfp_crosswalk=None):
+    def preprocess_waterbodies(self, lakes, lake_vfp_crosswalk: pd.DataFrame):
         if not lakes.empty:
             # Add lat, lon, and crs columns for LAKEOUT files:
             if self.output_parameters.get("lakeout_output", None):
@@ -1076,7 +1060,7 @@ class NHFPreprocessMixin:
 
 
     
-    def _refactor_reservoirs(self, lake_vfp_crosswalk=None):
+    def _refactor_reservoirs(self, lake_vfp_crosswalk: pd.DataFrame):
         """Refactor network connectivity to explicitly represent reservoirs (waterbodies) and their interactions with flowpaths and links.
 
         Conceptual model:
@@ -1102,9 +1086,9 @@ class NHFPreprocessMixin:
 
         Parameters
         ----------
-        lake_vfp_crosswalk : pandas.DataFrame, optional
-            NHF ``lake_vfp_crosswalk``. Omitted or empty absorbs each lake's
-            declared outlet flowpath only, leaving the rest of the lake as MC.
+        lake_vfp_crosswalk : pandas.DataFrame
+            NHF ``lake_vfp_crosswalk``: every flowpath each lake polygon covers. A
+            lake it lists no flowpath for absorbs its declared outlet flowpath alone.
         """
         # Precompute every absorbed flowpath's links ONCE: one isin plus one
         # groupby. The original per-waterbody rescan of the full link table was
@@ -1135,7 +1119,7 @@ class NHFPreprocessMixin:
                 absorbed = by_outlet.get(int(outlet_vfp))
                 if absorbed is None:
                     # No crosswalk resolution for this lake: fall back to its own
-                    # declared flowpath, the behavior that shipped before.
+                    # declared flowpath.
                     absorbed = cluster_links[cluster_links["vfp_id"] == outlet_vfp]
                     absorbed = None if absorbed.empty else absorbed
                 work.append((absorbed, sub_group))
@@ -1637,17 +1621,11 @@ class NHFPreprocessMixin:
         """Record ``site_no -> vpu_id`` for the scaling DA's per-tree theta.
 
         Kept as a small dict rather than joined onto the routing table (~1.1M
-        redundant strings at CONUS). Empty on hydrofabrics without vpu_id;
-        callers fall back to the default theta.
+        redundant strings at CONUS). A gage without a vpu_id is left out and its
+        tree falls back to the default theta.
         """
         self.gage_vpu: dict[str, str] = {}
         if gages.empty or flowpaths.empty:
-            return
-        if "vpu_id" not in flowpaths.columns or "fp_id" not in gages.columns:
-            LOG.debug(
-                "gage->vpu map: hydrofabric has no vpu_id on flowpaths; every gage "
-                "tree will use the default theta."
-            )
             return
         fp_to_vpu = (
             flowpaths[["fp_id", "vpu_id"]].dropna().drop_duplicates("fp_id")
