@@ -12,9 +12,6 @@ BMI execution (`utils/run_bmi.py`) is currently broken.
 
 ## Quick Start
 
-> [!WARNING]
-> Running these commands will create some indices in the flowpath table and update the lakes table directly on your source geopackage.  If any of your workflows depend on hashes of the source file, be warned!
-
 ### 1 — Build test data
 
 ```console
@@ -111,7 +108,7 @@ Passing criteria: Peak outflow is within acceptable range.
 
 ### Great Lakes (`great_lakes`)
 
-DA-forced outflows from four fp_id-bearing Great Lakes (Superior, Huron-Michigan, Erie, Ontario). Uses USGS timeslice files, Canadian timeslice files, and a Lake Ontario outflow CSV. Checks that forced values propagate correctly downstream. A domain is committed to the repo and runs as-is; use `prep_tests.py --test great_lakes --refresh` with a newer NHF geopackage to regenerate.
+DA-forced outflows from four fp_id-bearing Great Lakes (Superior, Huron-Michigan, Erie, Ontario). Uses USGS timeslice files, Canadian timeslice files, and a Lake Ontario outflow CSV. Checks that forced values propagate correctly downstream.
 
 Passing criteria: Flows at outlets of lakes match DA values very closely
 
