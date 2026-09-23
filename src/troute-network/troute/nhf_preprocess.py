@@ -300,8 +300,8 @@ def _validate_required_columns(gpkg_path: Path, present_layers: set[str]) -> Non
     validated layer absent from it is reported as missing its full requested
     set, and a present one is checked against ``pyogrio.read_info(...)["fields"]``
     (the attribute field names, read without touching the rows). This costs one
-    metadata lookup per present validated layer and catches a stale hydrofabric
-    (e.g. ``reference_flowpaths`` lacking ``segment_order``) up front, replacing
+    metadata lookup per present validated layer and catches a missing column
+    (e.g. ``segment_order`` in ``reference_flowpaths``) up front, replacing
     a cryptic ``KeyError`` raised deep inside discretization. Layers loaded with
     ``columns=None`` (lakes, gages, hydrolocations, virtual_nexus) name no column
     list, so they are checked only against ``REQUIRED_COLUMNS`` and only when
@@ -323,11 +323,8 @@ def _validate_required_columns(gpkg_path: Path, present_layers: set[str]) -> Non
         )
         raise ValueError(
             "Input geopackage is missing required column(s) needed by the NHF "
-            f"network build -> {details}. Usually the hydrofabric predates the "
-            "current schema (older datasets lack 'segment_order' in "
-            "'reference_flowpaths'); it can also be a newer build that dropped a "
-            "required column (nhf 1.2.3 dropped 'hy_id' from 'gages'). Regenerate "
-            "or switch to a compatible hydrofabric version."
+            f"network build -> {details}. The hydrofabric does not match the "
+            "schema this build reads."
         )
 
 
@@ -336,9 +333,8 @@ def _validate_required_columns(gpkg_path: Path, present_layers: set[str]) -> Non
 # the required-column set validated up front by _validate_required_columns),
 # or None to load every field. We read only what the build consumes to cut
 # processing time and memory. ``reference_flowpaths`` lists its five consumed
-# columns explicitly: `segment_order` is a newer hydrofabric field whose
-# absence otherwise fails deep in discretization, and `ref_fp_id` is the join
-# key in crosswalk_nex_flowpath_poi.
+# columns explicitly: `segment_order` orders the links of a flowpath in
+# discretization, and `ref_fp_id` is the join key in crosswalk_nex_flowpath_poi.
 LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
     (
         "flowpaths",
@@ -711,8 +707,8 @@ def _clean_waterbodies(
     filtered.
 
     Steps, in order (mirroring the historical inline cleaning):
-      1. lake_id integrity: coerce to numeric (the column is text in
-         NHF >= 1.2.0) and drop rows whose lake_id cannot be parsed.
+      1. lake_id integrity: coerce to numeric and drop rows whose lake_id
+         cannot be parsed.
       2. index + dedup: set lake_id as the index and drop duplicated rows
          (pre-existing semantics: duplicates are judged on the parameter
          columns only, since pandas ignores the index).
@@ -862,14 +858,8 @@ def _great_lakes_for_da(gl_df: pd.DataFrame, data_assimilation_parameters: dict)
     )
     if not gl_da_enabled or gl_df.empty:
         return gl_df.iloc[0:0].copy(), gl_da_enabled
-    # Keep a Great Lake if EITHER anchor is present, deciding per row rather than
-    # per column. _refactor_reservoirs resolves reservoirs through the virtual
-    # flowpath, and on nhf_1.2.2 the two Great Lakes carrying real USGS gages
-    # (04127885 and 04159130) have a null fp_id but a valid virtual_fp_id, so
-    # filtering on fp_id alone silently dropped exactly the lakes this function
-    # exists to keep. Choosing a single column for the whole frame has the mirror
-    # failure: a lake with a valid fp_id and a null virtual_fp_id would be dropped
-    # even though it is perfectly anchorable.
+    # Keep a Great Lake if EITHER anchor is present, deciding per row: a null fp_id with
+    # a valid virtual_fp_id, or the reverse, still anchors it.
     anchors = [c for c in ("virtual_fp_id", "fp_id") if c in gl_df.columns]
     if not anchors:
         return gl_df.iloc[0:0].copy(), gl_da_enabled
@@ -1133,7 +1123,7 @@ class NHFPreprocessMixin:
         # are absorbed into a waterbody; every other node maps to itself. Using a
         # dict instead of a dense np.arange(max_node_id + 1) lookup table avoids
         # allocating a max(node_id)-sized array, which is fatal for large/sparse
-        # node ids (NHF >= 1.2.0). Behavior is identical on dense-id datasets.
+        # node ids.
         node_remap: dict[int, int] = {}
         df_rows = []
         index_vals = []

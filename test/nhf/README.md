@@ -15,7 +15,7 @@ BMI execution (`utils/run_bmi.py`) is currently broken.
 ### 1 — Build test data
 
 ```console
-# All tests (uses default NHF geopackage at /t-route/nhf_1.2.1.gpkg)
+# All tests (uses the default NHF geopackage, /hydrofabric/nhf.gpkg)
 python -m test.nhf.prep_tests
 
 # All tests with explicit NHF geopackage path
@@ -170,7 +170,7 @@ Builds test input data without running the tests. Skips existing outputs unless 
 python -m test.nhf.prep_tests [OPTIONS]
 
 Options:
-  --nhf-gpkg PATH        NHF geopackage path (default: /t-route/nhf_1.2.1.gpkg).
+  --nhf-gpkg PATH        NHF geopackage path (default: /hydrofabric/nhf.gpkg).
   --test NAME [NAME ...] Which tests to prep. Default: all.
                          Choices: conecuh patuxent ciss_creek great_lakes
                                   four_lakes

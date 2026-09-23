@@ -21,8 +21,8 @@ import pandas as pd
 
 from troute.nhf_preprocess import _great_lakes_for_da, GREAT_LAKES_IDS
 
-# Mirrors the NHF 1.2.0 lakes layer: every Great Lake has NaN level-pool params;
-# three have an fp_id, 4800007 has none (and is absent from the DA crosswalk).
+# Every Great Lake has NaN level-pool params; three have an fp_id, 4800007 has none
+# (and is absent from the DA crosswalk).
 _GL_FP_IDS = {
     4800002: 1_278_348_000_000_000.0,
     4800004: 1_287_683_000_000_000.0,
@@ -102,20 +102,18 @@ def test_all_great_lakes_unanchored_returns_empty_but_da_enabled():
     assert anchored.empty
 
 
-# nhf_1.2.2 moved the Great Lakes off fp_id: the two lakes carrying real USGS
-# gages (4800002 -> 04127885, 4800004 -> 04159130) have a null fp_id and are
-# anchored through virtual_fp_id instead. Verified against the CONUS 1.2.2 lakes
-# layer. Anchoring on fp_id dropped exactly those two, which silently severed the
-# type-6 DA path for the lakes the feature exists to serve.
+# The two lakes carrying real USGS gages (4800002 -> 04127885, 4800004 -> 04159130)
+# have a null fp_id and anchor through virtual_fp_id. Anchoring on fp_id alone drops
+# exactly those two, severing the type-6 DA path for the lakes the feature serves.
 _GL_VFP_IDS = {
-    4800002: 1_278_347_000_000_000.0,   # null fp_id in 1.2.2
-    4800004: 1_276_841_000_000_000.0,   # null fp_id in 1.2.2
+    4800002: 1_278_347_000_000_000.0,   # null fp_id
+    4800004: 1_276_841_000_000_000.0,   # null fp_id
     4800006: 1_286_155_000_000_000.0,
     4800007: 1_287_248_000_000_000.0,
 }
 
 
-def _gl_df_122():
+def _gl_df_by_vfp():
     idx = pd.Index(list(_GL_VFP_IDS), name="lake_id")
     return pd.DataFrame(
         {
@@ -129,9 +127,9 @@ def _gl_df_122():
 
 
 def test_gage_bearing_great_lakes_survive_when_fp_id_is_null():
-    """The 1.2.2 shape: all four anchor through virtual_fp_id, including the two
-    with a null fp_id that the gage crosswalk depends on."""
-    anchored, enabled = _great_lakes_for_da(_gl_df_122(), _da(True))
+    """All four anchor through virtual_fp_id, including the two with a null fp_id
+    that the gage crosswalk depends on."""
+    anchored, enabled = _great_lakes_for_da(_gl_df_by_vfp(), _da(True))
     assert enabled is True
     assert set(anchored.index) == set(GREAT_LAKES_IDS)
     # the two gage-bearing lakes must be present despite having no fp_id
@@ -139,20 +137,20 @@ def test_gage_bearing_great_lakes_survive_when_fp_id_is_null():
     assert anchored["virtual_fp_id"].dtype.kind == "i"
 
 
-def test_da_disabled_still_excludes_all_great_lakes_on_122():
-    anchored, enabled = _great_lakes_for_da(_gl_df_122(), _da(False))
+def test_da_disabled_still_excludes_great_lakes_anchored_by_vfp():
+    anchored, enabled = _great_lakes_for_da(_gl_df_by_vfp(), _da(False))
     assert enabled is False
     assert anchored.empty
 
 
 def test_lake_anchored_only_by_fp_id_is_kept():
-    """The mirror of the 1.2.2 case: valid fp_id, null virtual_fp_id.
+    """The mirror case: valid fp_id, null virtual_fp_id.
 
     Anchoring decisions are made per row, so a lake that carries only one of the two
     ids is still anchorable and must be retained. Choosing one column for the whole
     frame would drop it.
     """
-    df = _gl_df_122()
+    df = _gl_df_by_vfp()
     df.loc[4800006, "virtual_fp_id"] = np.nan  # keeps a valid fp_id
     anchored, _ = _great_lakes_for_da(df, _da(True))
     assert 4800006 in anchored.index
@@ -160,7 +158,7 @@ def test_lake_anchored_only_by_fp_id_is_kept():
 
 
 def test_lake_with_neither_anchor_is_dropped():
-    df = _gl_df_122()
+    df = _gl_df_by_vfp()
     df.loc[4800007, ["fp_id", "virtual_fp_id"]] = np.nan
     anchored, _ = _great_lakes_for_da(df, _da(True))
     assert 4800007 not in anchored.index

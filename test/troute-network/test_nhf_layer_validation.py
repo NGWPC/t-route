@@ -79,8 +79,8 @@ def test_present_optional_layer_is_column_checked():
 
 
 def test_gages_missing_hy_id_is_rejected():
-    """hy_id is the only key tying a gage to its hydrolocation. nhf 1.2.3 dropped
-    it; unchecked that becomes a KeyError deep inside a pandas merge."""
+    """hy_id is the only key tying a gage to its hydrolocation; unchecked, a gages
+    layer without it becomes a KeyError deep inside a pandas merge."""
     fields = _full_fields()
     fields["gages"].discard("hy_id")
     assert _missing_requested_columns(fields) == {"gages": ["hy_id"]}

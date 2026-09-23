@@ -1,13 +1,11 @@
-"""Regression tests for NHF >= 1.2 large/non-dense integer IDs.
+"""NHF ids are large and sparse (~1e15), stored as floats.
 
-NHF 1.1.4 used small, dense, sequential ids (fp_id 1..5.5M). NHF 1.2.0 switched
-to large ids (~1e15) stored as floats. They are integral and below 2^53 so they
-round-trip through float64 exactly, but their *magnitude* broke code that used
-raw ids to size arrays:
+They are integral and below 2^53 so they round-trip through float64 exactly, but
+their *magnitude* rules out using raw ids to size arrays:
 
-* ``NHF._build_div_weighting_matrix`` did ``np.bincount(div_id)``, allocating a
-  ``max(div_id)+1`` array (~10 PiB for a 1e15 id) -> MemoryError. Fixed by
-  factorizing div_id to dense group codes first.
+* ``NHF._build_div_weighting_matrix`` factorizes div_id to dense group codes;
+  ``np.bincount(div_id)`` would allocate a ``max(div_id)+1`` array (~10 PiB for a
+  1e15 id) and raise MemoryError.
 
 These tests build a minimal network with large ids and assert the network-build
 math completes and is correct, guarding against a reintroduction of any
@@ -19,8 +17,8 @@ import pytest
 
 from troute.NHF import NHF
 
-# A large, sparse id space like NHF >= 1.2 (well above the 1.1.4 dense range,
-# large enough that np.bincount(id) would attempt a multi-petabyte allocation).
+# A large, sparse id space like NHF's, large enough that np.bincount(id) would
+# attempt a multi-petabyte allocation.
 BIG = 1_000_000_000_000_000  # 1e15
 
 
@@ -38,8 +36,8 @@ def _bare_nhf_with_dataframe(dataframe):
 def test_build_div_weighting_matrix_handles_large_ids():
     """_build_div_weighting_matrix must not allocate a max(div_id)-sized array.
 
-    With NHF 1.2 ids (~1e15) the old np.bincount(div_id) raised MemoryError; the
-    factorized version completes and produces the same weights.
+    With ids of ~1e15, np.bincount(div_id) raises MemoryError; the factorized
+    version completes and produces the same weights.
     """
     div_id = BIG + 7              # one divide/flowpath
     n1, n2, term = BIG + 100, BIG + 200, BIG + 300   # routing link node ids

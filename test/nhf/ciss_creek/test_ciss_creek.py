@@ -25,10 +25,9 @@ PEAK_BOUNDS: dict[int, tuple[float, float]] = {
     OUTLET_FP_ID: (0.9 * 1504, 1.1 * 1504),
 }
 # Every lake in the domain must route an outflow in this range. The bound is the same
-# for all of them, so listing ids bought nothing and cost portability: `nhf_lake_id` is
-# assigned per hydrofabric build, and 2 of the 5 hardcoded here moved between nhf 1.2.1
-# and 1.2.2, which failed as though routing had broken. Read them from the domain the
-# test actually runs on; a lake going missing still fails, on the count check below.
+# for all of them, and `nhf_lake_id` is assigned per hydrofabric build, so the ids are
+# read from the domain the test runs on; a lake going missing still fails, on the count
+# check below.
 def _lakeout_bounds() -> dict[int, tuple[float, float]]:
     import geopandas as gpd
 

@@ -507,7 +507,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
         # Check whether percentage_area_contribution sums close to 100 per div.
         # Factorize div_id to dense 0..K-1 group codes before bincount. div_id may be
-        # a large, sparse identifier (NHF >= 1.2.0 ids are ~1e15), and bincount on the
+        # a large, sparse identifier (ids are ~1e15), and bincount on the
         # raw values would allocate a max(div_id)-sized array.
         codes, uniq_divs = pd.factorize(vfp_map["div_id"].astype("int64").to_numpy(), sort=False)
         known_sum = np.bincount(codes, weights=self.weights)

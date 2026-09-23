@@ -11,7 +11,7 @@ from .conus.test_conus_reservoir_da import setup as conus_reservoir_da_setup
 from .old_river.test_old_river import setup as old_river_setup
 from .run_of_river.test_run_of_river import setup as run_of_river_setup
 
-NHF_GPKG_DEFAULT = "/hydrofabric/nhf_1.2.1.gpkg"
+NHF_GPKG_DEFAULT = "/hydrofabric/nhf.gpkg"
 FUNC_LOOKUP = {
     "conecuh": conecuh_setup,
     "patuxent": patuxent_setup,
