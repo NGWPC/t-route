@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from troute.network.reservoirs.levelpool.levelpool import MC_Levelpool
+from troute.routing.compute import NWM_DAM_LENGTH_MULTIPLIER
 
 # A low-head dam's level-pool parameters (waterbody 1285260065444388). Its surface is
 # 1,124 m2, which is what makes one step of overtopping discharge move it so far.
@@ -37,6 +38,7 @@ def _pool(water_elevation: float) -> MC_Levelpool:
         AREA_KM2, MAX_ELEVATION, ORIFICE_AREA, ORIFICE_COEFFICIENT, ORIFICE_ELEVATION,
         WEIR_COEFFICIENT, WEIR_ELEVATION, WEIR_LENGTH, INITIAL_FRACTIONAL_DEPTH, 0.0,
         water_elevation,
+        NWM_DAM_LENGTH_MULTIPLIER,
     ]
     return MC_Levelpool(0, LAKE_NUMBER, array("l", []), args, 1)
 
@@ -103,6 +105,7 @@ def test_a_stable_pool_publishes_its_own_discharge() -> None:
         area_km2, MAX_ELEVATION, ORIFICE_AREA, ORIFICE_COEFFICIENT, ORIFICE_ELEVATION,
         WEIR_COEFFICIENT, WEIR_ELEVATION, WEIR_LENGTH, INITIAL_FRACTIONAL_DEPTH, 0.0,
         start,
+        NWM_DAM_LENGTH_MULTIPLIER,
     ]
     pool = MC_Levelpool(0, LAKE_NUMBER, array("l", []), args, 1)
     outflow, elevation = pool.run(INFLOW, 0.0, int(DT))
@@ -147,6 +150,7 @@ def test_a_pool_cannot_release_water_it_does_not_hold() -> None:
     args = [
         area_km2, 110.0, 1.0, 0.6, orifice_elevation,
         WEIR_COEFFICIENT, 10.0, 33.5, INITIAL_FRACTIONAL_DEPTH, 0.0, start,
+        NWM_DAM_LENGTH_MULTIPLIER,
     ]
     pool = MC_Levelpool(0, LAKE_NUMBER, array("l", []), args, 1)
     outflow, elevation = pool.run(0.0, 0.0, int(DT))
@@ -161,6 +165,7 @@ def test_a_pool_past_the_sub_step_cap_still_stops_at_the_invert() -> None:
     args = [
         1.0e-5, MAX_ELEVATION, ORIFICE_AREA, ORIFICE_COEFFICIENT, ORIFICE_ELEVATION,
         WEIR_COEFFICIENT, WEIR_ELEVATION, WEIR_LENGTH, INITIAL_FRACTIONAL_DEPTH, 0.0, 18.0,
+        NWM_DAM_LENGTH_MULTIPLIER,
     ]
     pool = MC_Levelpool(0, LAKE_NUMBER, array("l", []), args, 1)
     outflow, elevation = pool.run(0.0, 0.0, int(DT))
@@ -192,6 +197,7 @@ def test_a_shallow_pool_under_a_deep_weir_settles() -> None:
     args = [
         0.0011, 20.0, 1.0, 0.6, 0.0,
         WEIR_COEFFICIENT, 10.0, 33.5, INITIAL_FRACTIONAL_DEPTH, 0.0, 0.011,
+        NWM_DAM_LENGTH_MULTIPLIER,
     ]
     pool = MC_Levelpool(0, LAKE_NUMBER, array("l", []), args, 1)
     elevations = [float(pool.run(0.265766815, 0.0, int(DT))[1]) for _ in range(12)]
@@ -211,6 +217,7 @@ def test_a_pool_at_a_high_elevation_still_conserves() -> None:
     args = [
         area_km2, 3110.0, 1.0, 0.6, 3000.0,
         WEIR_COEFFICIENT, 3010.0, 33.5, INITIAL_FRACTIONAL_DEPTH, 0.0, start,
+        NWM_DAM_LENGTH_MULTIPLIER,
     ]
     pool = MC_Levelpool(0, LAKE_NUMBER, array("l", []), args, 1)
     steps = 200
@@ -234,6 +241,7 @@ def test_a_long_run_of_small_steps_loses_only_what_the_state_cannot_hold() -> No
     args = [
         0.0011, 3110.0, 1.0, 0.6, 3000.0,
         WEIR_COEFFICIENT, 3010.0, 33.5, INITIAL_FRACTIONAL_DEPTH, 0.0, start,
+        NWM_DAM_LENGTH_MULTIPLIER,
     ]
     pool = MC_Levelpool(0, LAKE_NUMBER, array("l", []), args, 1)
     delivered, elevation = 0.0, start
@@ -257,6 +265,7 @@ def test_an_outlet_opening_mid_step_is_resolved() -> None:
     args = [
         0.0011, 30.0, 1.0, 0.6, 10.0,
         WEIR_COEFFICIENT, 20.0, 33.5, INITIAL_FRACTIONAL_DEPTH, 0.0, 9.0,
+        NWM_DAM_LENGTH_MULTIPLIER,
     ]
     coarse = MC_Levelpool(0, LAKE_NUMBER, array("l", []), args, 1)
     outflow, elevation = coarse.run(10.0, 0.0, int(DT))
@@ -302,6 +311,7 @@ def test_an_orifice_above_the_weir_crest_creates_no_water() -> None:
     args = [
         area_km2, 200.0, 1.0, 0.1, 190.0,
         WEIR_COEFFICIENT, 185.0, 10.0, INITIAL_FRACTIONAL_DEPTH, 0.0, start,
+        NWM_DAM_LENGTH_MULTIPLIER,
     ]
     pool = MC_Levelpool(0, LAKE_NUMBER, array("l", []), args, 1)
     outflow, elevation = pool.run(inflow, 0.0, int(DT))
@@ -317,6 +327,7 @@ def test_a_large_pool_keeps_a_small_net_inflow() -> None:
     args = [
         area_km2, 103.0, 1.0, 0.1, 101.0,
         WEIR_COEFFICIENT, 102.0, 10.0, INITIAL_FRACTIONAL_DEPTH, 0.0, start,
+        NWM_DAM_LENGTH_MULTIPLIER,
     ]
     pool = MC_Levelpool(0, LAKE_NUMBER, array("l", []), args, 1)
     elevation = start

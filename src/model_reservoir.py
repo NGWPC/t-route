@@ -5,6 +5,7 @@ import yaml
 from array import array
 
 from troute.network.reservoirs.levelpool.levelpool import MC_Levelpool
+from troute.routing.compute import NWM_DAM_LENGTH_MULTIPLIER
 from troute.routing.fast_reach.reservoir_hybrid_da import reservoir_hybrid_da
 from troute.routing.fast_reach.reservoir_RFC_da import reservoir_RFC_da, preprocess_RFC_data
 
@@ -65,7 +66,8 @@ class reservoir_model():
         args = [lake_area, max_depth, orifice_area,
                 orifice_coefficient, orifice_elevation,
                 weir_coefficient, weir_elevation, weir_length,
-                initial_fractional_depth, 0.0, water_elevation]
+                initial_fractional_depth, 0.0, water_elevation,
+                NWM_DAM_LENGTH_MULTIPLIER]
         
         upstream_ids = array('l', values['upstream_ids'])
         self._res_type = values['reservoir_type']

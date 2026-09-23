@@ -368,12 +368,17 @@ class ReachData:
 
 # Initial conditions, attached at warmstate rather than read from the hydrofabric.
 WATERBODY_INITIAL_CONDITIONS = ("qd0", "h0")
-# What WaterbodyData hands the level-pool kernel. The hydrofabric-sourced half must stay
-# in step with nhf_preprocess.LEVEL_POOL_PARAMS, the completeness gate that guarantees
-# they are non-null; test_waterbody_cleanup_subset pins the two together.
+# The overtopping crest in weir lengths (WRF-Hydro's Dam_Length). NWM's LAKEPARM sets 10
+# for every lake, and a lake with no crest length of its own takes it.
+NWM_DAM_LENGTH_MULTIPLIER = 10.0
+# Set per lake by the network after the completeness gate, so never null.
+WATERBODY_DERIVED = ("dam_length_multiplier",)
+# What WaterbodyData hands the level-pool kernel, read by position (qd0 at 9, h0 at 10, the
+# multiplier at 11). The hydrofabric part matches nhf_preprocess.LEVEL_POOL_PARAMS, the gate
+# that keeps it non-null; test_waterbody_cleanup_subset pins the two.
 WATERBODY_VIEW_COLS = (
     "LkArea", "LkMxE", "OrificeA", "OrificeC", "OrificeE", "WeirC", "WeirE", "WeirL", "ifd",
-    *WATERBODY_INITIAL_CONDITIONS,
+    *WATERBODY_INITIAL_CONDITIONS, *WATERBODY_DERIVED,
 )
 
 
@@ -385,6 +390,10 @@ class WaterbodyData:
     types: pd.DataFrame
 
     def __post_init__(self) -> None:
+        if not self.dataframe.empty and "dam_length_multiplier" not in self.dataframe:
+            self.dataframe = self.dataframe.assign(
+                dam_length_multiplier=NWM_DAM_LENGTH_MULTIPLIER
+            )
         # Precompute the column subset AND the index as a set once. generate_view()
         # and the per-job lake intersection in ExecutionPlan._build_compute_job both
         # run once per subnetwork (tens of thousands at CONUS scale); a label-based

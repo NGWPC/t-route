@@ -57,6 +57,7 @@ cdef class MC_Hybrid(Reach):
             weir_length = args[7]
             initial_fractional_depth  = args[8]
             water_elevation = args[10]
+            dam_length = args[11], the overtopping crest in weir lengths
             reservoir_type
             reservoir_parameter_file
             start_date
@@ -69,10 +70,7 @@ cdef class MC_Hybrid(Reach):
     # Note Some issues with __calloc__:
     # The python type isn't guaranteed to be properly constructed, so cannot depend on super class being constructured.
     # Thus I don't think we can put these C init functions in __calloc__, at least not in all cases.
-    # init the backing struct, pass a dam_length of 10.0 for now
-
-    #Setting default dam_length to 10
-    dam_length = 10.0
+    dam_length = args[11]
     area = args[0]
     max_depth = args[1]
     orifice_area = args[2]
