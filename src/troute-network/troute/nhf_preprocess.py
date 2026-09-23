@@ -500,7 +500,11 @@ def read_geo_file(supernetwork_parameters, cpu_pool):
             f"None of the expected layers to read were present in the geopackage: "
             f"{[lyr for lyr, _, _ in LAYERS_TO_READ]}. Found layers: {gpkg_layers}."
         )
-    table_dict = {lyr: pd.DataFrame() for lyr, *_ in LAYERS_TO_READ}
+    # An absent layer loads empty with the columns the build requests from it, so a
+    # lake-free domain reaches every consumer with the schema it indexes.
+    table_dict = {
+        name: pd.DataFrame(columns=columns) for name, columns, _ in LAYERS_TO_READ
+    }
     with Parallel(n_jobs=min(cpu_pool, len(to_read))) as parallel:
         table_dict.update(
             dict(parallel(starmap(delayed(read_layer), to_read)))

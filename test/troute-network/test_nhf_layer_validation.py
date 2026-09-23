@@ -11,8 +11,12 @@ the run was never going to use.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import geopandas as gpd
 import pandas as pd
 import pytest
+from shapely.geometry import Point
 
 from troute.nhf_preprocess import (
     LAYERS_TO_READ,
@@ -24,6 +28,7 @@ from troute.nhf_preprocess import (
     WATERBODY_DF_FIELDS,
     _missing_requested_columns,
     _normalize_run_of_river,
+    read_geo_file,
 )
 
 
@@ -102,6 +107,27 @@ def test_absent_gages_layer_is_still_tolerated():
     fields = _full_fields()
     fields.pop("gages")
     assert _missing_requested_columns(fields) == {}
+
+
+def test_a_lake_free_geopackage_reaches_the_headwater_forcing(tmp_path: Path):
+    """Validation accepts a domain without lakes, reservoir_da or lake_vfp_crosswalk,
+    and NHF.__init__ hands the lakes frame straight to _force_headwater_routing, which
+    indexes its columns."""
+    from troute.NHF import _force_headwater_routing
+
+    path = tmp_path / "nhf.gpkg"
+    for name, columns, _ in LAYERS_TO_READ:
+        if columns is not None and name not in OPTIONAL_LAYERS:
+            gpd.GeoDataFrame(
+                {c: [1.0] for c in columns}, geometry=[Point(0.0, 0.0)], crs=4326
+            ).to_file(path, layer=name, driver="GPKG")
+    tables = read_geo_file({"geo_file_path": str(path)}, 1)
+
+    assert tables["lakes"].empty
+    assert RUN_OF_RIVER_FIELD in tables["lakes"].columns
+    _force_headwater_routing(
+        tables["virtual_flowpaths"], tables["reference_flowpaths"], tables["lakes"]
+    )
 
 
 # --------------------------------------------------- run-of-river tag
