@@ -1173,7 +1173,8 @@ def get_obs_from_timeslices(
     interpolation_limit,
     frequency_secs,
     t0,
-    cpu_pool, 
+    cpu_pool,
+    zero_is_missing=True,
 ):
     """
     Read observations from TimeSlice files, interpolate available observations
@@ -1202,6 +1203,12 @@ def get_obs_from_timeslices(
     
     - cpu_pool                      (int): Number of CPUs used for parallel 
                                            TimeSlice reading and interolation
+
+    - zero_is_missing              (bool): Treat a zero observation as missing. A
+                                           stream gage reading zero is an outage;
+                                           a reservoir releasing zero has its
+                                           outlets closed, so reservoir DA passes
+                                           False.
     
     Returns
     -------
@@ -1269,9 +1276,10 @@ def get_obs_from_timeslices(
                           )
 
     # screen-out poor quality flow observations
+    invalid = observation_df <= 0 if zero_is_missing else observation_df < 0
     observation_df = (observation_df.
                       mask(observation_qual_df < qc_threshold, np.nan).
-                      mask(observation_df <= 0, np.nan)
+                      mask(invalid, np.nan)
                      )
 
     # ---- Interpolate USGS observations to the input frequency (frequency_secs)

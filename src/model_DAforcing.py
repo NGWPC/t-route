@@ -108,25 +108,21 @@ class DAforcing_model():
             # USGS Observations
             if nudging or usgs_persistence:
                 usgs_timeslice_path = str(data_assimilation_parameters.get('usgs_timeslices_folder'))
-                if nudging:
-                    self._usgs_df = _read_timeslice_files(usgs_timeslice_path,
-                                                          timeslice_dates,
-                                                          qc_threshold,
-                                                          dt,
-                                                          cpu_pool,)
-                    self._reservoir_usgs_df = (
-                        self._usgs_df.
-                        transpose().
-                        resample('15min').asfreq().
-                        transpose()
-                        )
-                else:
-                    self._usgs_df = pd.DataFrame()
+                self._usgs_df = (_read_timeslice_files(usgs_timeslice_path,
+                                                       timeslice_dates,
+                                                       qc_threshold,
+                                                       dt,
+                                                       cpu_pool,)
+                                 if nudging else pd.DataFrame())
+                # Read apart from the nudging frame, which drops zeros; a reservoir
+                # releasing zero is observed.
+                if usgs_persistence:
                     self._reservoir_usgs_df = _read_timeslice_files(usgs_timeslice_path,
                                                                     timeslice_dates,
                                                                     qc_threshold,
                                                                     900, #15 minutes
-                                                                    cpu_pool,)
+                                                                    cpu_pool,
+                                                                    zero_is_missing=False,)
 
             # USACE Observations        
             if usace_persistence:
@@ -135,7 +131,8 @@ class DAforcing_model():
                                                                  timeslice_dates,
                                                                  qc_threshold,
                                                                  900, #15 minutes
-                                                                 cpu_pool,)
+                                                                 cpu_pool,
+                                                                 zero_is_missing=False,)
             
             if usbr_persistence:
                 usace_timeslice_path = str(data_assimilation_parameters.get('usbr_timeslices_folder'))
@@ -143,7 +140,8 @@ class DAforcing_model():
                                                                  timeslice_dates,
                                                                  qc_threshold,
                                                                  900, #15 minutes
-                                                                 cpu_pool,)
+                                                                 cpu_pool,
+                                                                 zero_is_missing=False,)
 
             # Produce list of datetimes to search for timeseries files
             rfc_parameters = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_rfc_da', {})
@@ -500,6 +498,7 @@ def _read_timeslice_files(filepath,
                           frequency_secs, 
                           cpu_pool=1,
                           interpolation_limit=59,
+                          zero_is_missing=True,
                           ):
     #Read files
     observation_df = pd.DataFrame()
@@ -521,7 +520,10 @@ def _read_timeslice_files(filepath,
         observation_df.loc[observation_df['discharge_quality']<0, 'discharge'] = np.nan
         observation_df.loc[observation_df['discharge_quality']>1, 'discharge'] = np.nan
         observation_df.loc[observation_df['discharge_quality']<qc_threshold, 'discharge'] = np.nan
-        observation_df.loc[observation_df['discharge']<=0, 'discharge'] = np.nan
+        # A stream gage reading zero is an outage; a reservoir releasing zero is closed.
+        invalid = (observation_df['discharge'] <= 0 if zero_is_missing
+                   else observation_df['discharge'] < 0)
+        observation_df.loc[invalid, 'discharge'] = np.nan
 
         observation_df = observation_df[['stationId','time','discharge']].set_index(['stationId', 'time']).unstack(1, fill_value = np.nan)['discharge']
 

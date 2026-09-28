@@ -636,82 +636,27 @@ class PersistenceDA(AbstractDA):
         else:
 
             if usgs_persistence:
-                # if usgs_df is already created, make reservoir_usgs_df from that rather than reading in data again.
-                # Gate on nudging actually being on, not merely on the frame being
-                # non-empty: with nudging off the diversion's fill also
-                # populates this frame, and it holds only the diversion gage's row, so
-                # taking this shortcut derived reservoir observations from it and left
-                # USGS reservoir persistence with nothing.
-                if (streamflow_da_parameters or {}).get('streamflow_nudging', False) and not self._usgs_df.empty:
-                    
-                    gage_lake_df = (
-                        network.usgs_lake_gage_crosswalk.
-                        reset_index().
-                        set_index(['usgs_gage_id']) # <- TODO use input parameter for this
-                    )
-                    
-                    # build dataframe that crosswalks gageIDs to segmentIDs
-                    gage_link_df = (
-                        network.link_gage_df['gages'].
-                        reset_index().
-                        set_index(['gages'])
-                    )
-                    
-                    # build dataframe that crosswalks segmentIDs to lakeIDs
-                    link_lake_df = (
-                        gage_lake_df.
-                        join(gage_link_df, how = 'inner').
-                        reset_index().set_index('link').
-                        drop(['index'], axis = 1)
-                    )
+                # Read apart from the nudging frame, which drops zeros; a reservoir
+                # releasing zero is observed.
+                (
+                    reservoir_usgs_df,
+                    reservoir_usgs_param_df
+                ) = _create_reservoir_df(
+                    data_assimilation_parameters,
+                    reservoir_da_parameters,
+                    streamflow_da_parameters,
+                    run_parameters,
+                    network,
+                    da_run,
+                    lake_gage_crosswalk = network.usgs_lake_gage_crosswalk,
+                    res_source = 'usgs')
 
-                    # resample `usgs_df` to 15 minute intervals
-                    usgs_df_15min = (
-                        self._usgs_df.
-                        transpose().
-                        resample('15min').asfreq().
-                        transpose()
-                    )                     
-                    
-                    # subset and re-index `usgs_df`, using the segID <> lakeID crosswalk
-                    reservoir_usgs_df = (
-                        usgs_df_15min.join(link_lake_df, how = 'inner').
-                        reset_index(drop=True).
-                        set_index('usgs_lake_id')
-                    )
-                    
-                    # replace link ids with lake ids, for gages at waterbody outlets, 
-                    # otherwise, gage data will not be assimilated at waterbody outlet
-                    # segments.
-                    if network.link_lake_crosswalk:
-                        self._usgs_df = _reindex_link_to_lake_id(self._usgs_df, network.link_lake_crosswalk)
-            
-                    # create reservoir hybrid DA initial parameters dataframe    
-                    if not reservoir_usgs_df.empty:
-                        reservoir_usgs_param_df = pd.DataFrame(
-                            data = 0, 
-                            index = reservoir_usgs_df.index ,
-                            columns = ['update_time']
-                        )
-                        reservoir_usgs_param_df['prev_persisted_outflow'] = np.nan
-                        reservoir_usgs_param_df['persistence_update_time'] = 0
-                        reservoir_usgs_param_df['persistence_index'] = 0
-                    else:
-                        reservoir_usgs_param_df = pd.DataFrame()
-                    
-                else:
-                    (
-                        reservoir_usgs_df,
-                        reservoir_usgs_param_df
-                    ) = _create_reservoir_df(
-                        data_assimilation_parameters,
-                        reservoir_da_parameters,
-                        streamflow_da_parameters,
-                        run_parameters,
-                        network,
-                        da_run,
-                        lake_gage_crosswalk = network.usgs_lake_gage_crosswalk,
-                        res_source = 'usgs')
+                # replace link ids with lake ids, for gages at waterbody outlets,
+                # otherwise, gage data will not be assimilated at waterbody outlet
+                # segments.
+                if ((streamflow_da_parameters or {}).get('streamflow_nudging', False)
+                        and not self._usgs_df.empty and network.link_lake_crosswalk):
+                    self._usgs_df = _reindex_link_to_lake_id(self._usgs_df, network.link_lake_crosswalk)
             else:
                 reservoir_usgs_df = pd.DataFrame()
                 reservoir_usgs_param_df = pd.DataFrame()
@@ -1967,7 +1912,8 @@ def _create_reservoir_df(data_assimilation_parameters, reservoir_da_parameters, 
             interpolation_limit,
             900,                      # 15 minutes, as secs
             network.t0,
-            run_parameters.get("cpu_pool", None)
+            run_parameters.get("cpu_pool", None),
+            zero_is_missing=False,
         )
 		
     else:
