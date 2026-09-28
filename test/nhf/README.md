@@ -135,6 +135,21 @@ Passing criteria: Flows at outlets of lakes (which have been forced low) match D
 
 ---
 
+### Lower Snake (`lower_snake`)
+
+Lower Granite (LGDW1) and Little Goose (LGSW1), run-of-river dams the hydrofabric flags and marks as RFC sites, routed with RFC DA off. Each stays a reservoir and, with no forecast in control, passes its inflow with its level held. A second domain clears the flag on the RFC dams, so the same dams route as ordinary level pools.
+
+Passing criteria: each dam's outflow equals its inflow and its level does not move; with the flag cleared, each release departs from inflow by more than 10% of the peak and each level moves more than 1 m.
+
+| Parameter | Value |
+|---|---|
+| Seed fp_ids | `1267774669700543` (Snake), `1267774688946911` (Clearwater), carved 55 hops down |
+| Period | 2011-05-05 to 2011-05-25 |
+| Forcing | `retro`, the Snake and Clearwater entering as retrospective streamflow |
+| Lat / Lon | 46.65912,-117.42524 (Lower Granite) |
+
+---
+
 ## Unit Tests
 
 | File | Coverage |

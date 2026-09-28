@@ -10,6 +10,7 @@ from .conus.test_conus import setup as conus_setup
 from .conus.test_conus_reservoir_da import setup as conus_reservoir_da_setup
 from .old_river.test_old_river import setup as old_river_setup
 from .run_of_river.test_run_of_river import setup as run_of_river_setup
+from .lower_snake.test_lower_snake import setup as lower_snake_setup
 
 NHF_GPKG_DEFAULT = "/hydrofabric/nhf.gpkg"
 FUNC_LOOKUP = {
@@ -22,6 +23,7 @@ FUNC_LOOKUP = {
     "conus_reservoir_da": conus_reservoir_da_setup,
     "old_river": old_river_setup,
     "run_of_river": run_of_river_setup,
+    "lower_snake": lower_snake_setup,
 }
 ALL_TESTS = list(FUNC_LOOKUP.keys())
 
