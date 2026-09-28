@@ -263,7 +263,7 @@ class bmi_DAforcing(Bmi):
         self._values['nDates_reservoir_usace'] = self._model._nDates_reservoir_usace
         self._values['stationArray_reservoir_usace'] = self._model._stationArray_reservoir_usace
         self._values['stationStringLengthArray_reservoir_usace'] = self._model._stationStringLengthArray_reservoir_usace
-        self._values['nStations_reservoir_usace'] = self._model._reservoirUsaceArray
+        self._values['nStations_reservoir_usace'] = self._model._nStations_reservoir_usace
         self._values['usace_reservoir_Array'] = self._model._reservoirUsaceArray
         #
         # RFC timeseries dataframe converted
