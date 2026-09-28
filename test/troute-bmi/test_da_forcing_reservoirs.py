@@ -20,7 +20,9 @@ from troute.DataAssimilation import PersistenceDA
 _T0 = pd.Timestamp("2026-09-01 00:00")
 # One station per source, with releases that tell the two apart.
 _USACE = ("LD10_Dardanelle", 21, [150.0, 0.0, 310.0])
-_USBR = ("usbr-445", 22, [11.5, 12.5, 13.5])
+# USBR closes at t0: a zero release is an observation.
+_USBR = ("usbr-445", 22, [11.5, 0.0, 13.5])
+_HOURS = [_T0 + pd.Timedelta(hours=h) for h in (-1, 0, 1)]
 _SRC = Path(__file__).resolve().parents[2] / "src"
 
 
@@ -124,3 +126,23 @@ def test_usace_observations_survive_the_bmi_arrays(
     frame = _rebuilt(forcing, ("usace",))._reservoir_usace_df
     assert frame.index.tolist() == [lake]
     assert frame.loc[lake, _T0] == releases[1]
+
+
+def test_usace_and_usbr_read_into_their_own_frames(
+        forcing_modules: tuple[ModuleType, ModuleType], tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    model = _forcing(forcing_modules, tmp_path, monkeypatch,
+                     {"usace": True, "usbr": True})._model
+    assert model._reservoir_usace_df.index.tolist() == [_USACE[0]]
+    assert model._reservoir_usbr_df.index.tolist() == [_USBR[0]]
+
+
+def test_usbr_observations_cross_the_bmi_arrays_beside_usace(
+        forcing_modules: tuple[ModuleType, ModuleType], tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    forcing = _forcing(forcing_modules, tmp_path, monkeypatch, {"usace": True, "usbr": True})
+    da = _rebuilt(forcing, ("usace", "usbr"))
+    for frame, (_, lake, releases) in ((da._reservoir_usace_df, _USACE),
+                                       (da._reservoir_usbr_df, _USBR)):
+        assert frame.index.tolist() == [lake]
+        assert frame.loc[lake, _HOURS].tolist() == releases

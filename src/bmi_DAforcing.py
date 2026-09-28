@@ -55,6 +55,7 @@ class bmi_DAforcing(Bmi):
         'usgs_df',
         'reservoir_usgs_df',
         'reservoir_usace_df',
+        'reservoir_usbr_df',
         'rfc_timeseries_df',
         'lastobs_df'
     ]
@@ -90,6 +91,16 @@ class bmi_DAforcing(Bmi):
         'stationStringLengthArray_reservoir_usace',
         'nStations_reservoir_usace',
         'reservoir_usace_Array'
+    ]
+
+    # Reservoir USBR DF
+    _BMI_output_reservoir_usbr = [
+        'datesSecondsArray_reservoir_usbr',
+        'nDates_reservoir_usbr',
+        'stationArray_reservoir_usbr',
+        'stationStringLengthArray_reservoir_usbr',
+        'nStations_reservoir_usbr',
+        'usbr_reservoir_Array'
     ]
 
     # RFC DF
@@ -210,6 +221,7 @@ class bmi_DAforcing(Bmi):
         self._values['usgs_df'] = self._model._usgs_df
         self._values['reservoir_usgs_df'] = self._model._reservoir_usgs_df
         self._values['reservoir_usace_df'] = self._model._reservoir_usace_df
+        self._values['reservoir_usbr_df'] = self._model._reservoir_usbr_df
         self._values['rfc_timeseries_df'] = self._model._rfc_timeseries_df
         
         self._values['write_lite_restart'] = self._model._write_lite_restart
@@ -265,6 +277,14 @@ class bmi_DAforcing(Bmi):
         self._values['stationStringLengthArray_reservoir_usace'] = self._model._stationStringLengthArray_reservoir_usace
         self._values['nStations_reservoir_usace'] = self._model._nStations_reservoir_usace
         self._values['usace_reservoir_Array'] = self._model._reservoirUsaceArray
+        #
+        # USBR reservoir dataframe converted
+        self._values['datesSecondsArray_reservoir_usbr'] = self._model._datesSecondsArray_reservoir_usbr
+        self._values['nDates_reservoir_usbr'] = self._model._nDates_reservoir_usbr
+        self._values['stationArray_reservoir_usbr'] = self._model._stationArray_reservoir_usbr
+        self._values['stationStringLengthArray_reservoir_usbr'] = self._model._stationStringLengthArray_reservoir_usbr
+        self._values['nStations_reservoir_usbr'] = self._model._nStations_reservoir_usbr
+        self._values['usbr_reservoir_Array'] = self._model._reservoirUsbrArray
         #
         # RFC timeseries dataframe converted
         self._values['rfc_da_timestep'] = self._model._rfc_da_timestep

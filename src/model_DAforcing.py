@@ -30,7 +30,8 @@ class DAforcing_model():
         
         """
         __slots__ = ['_data_assimilation_parameters', '_forcing_parameters', '_compute_parameters',
-                     '_output_parameters', '_usgs_df', 'reservoir_usgs_df', 'reservoir_usace_df', 
+                     '_output_parameters', '_usgs_df', 'reservoir_usgs_df', 'reservoir_usace_df',
+                     'reservoir_usbr_df',
                      '_rfc_timeseries_df', '_lastobs_df', '_t0', '_q0', '_waterbody_df', '_write_lite_restart',
                      '_dateNull', 
                      '_datesSecondsArray_usgs', '_nDates_usgs', '_stationArray_usgs', 
@@ -44,6 +45,10 @@ class DAforcing_model():
                      '_stationArray_reservoir_usace', '_stationStringLengthArray_reservoir_usace',
                      '_nStations_reservoir_usace', 
                      '_usace_reservoir_Array',
+                     '_datesSecondsArray_reservoir_usbr', '_nDates_reservoir_usbr',
+                     '_stationArray_reservoir_usbr', '_stationStringLengthArray_reservoir_usbr',
+                     '_nStations_reservoir_usbr',
+                     '_usbr_reservoir_Array',
                      '_rfc_da_timestep', '_rfc_totalCounts', '_rfc_synthetic_values',
                      '_rfc_discharges', '_rfc_timeseries_idx', '_rfc_use_rfc',
                      '_rfc_Datetime', '_rfc_timeSteps', '_rfc_issue_time', '_rfc_StationId_array',
@@ -102,6 +107,7 @@ class DAforcing_model():
             self._usgs_df = pd.DataFrame()
             self._reservoir_usgs_df = pd.DataFrame()
             self._reservoir_usace_df = pd.DataFrame()
+            self._reservoir_usbr_df = pd.DataFrame()
             self._rfc_timeseries_df = pd.DataFrame()
             self._lastobs_df = pd.DataFrame()
 
@@ -134,14 +140,15 @@ class DAforcing_model():
                                                                  cpu_pool,
                                                                  zero_is_missing=False,)
             
+            # USBR Observations
             if usbr_persistence:
-                usace_timeslice_path = str(data_assimilation_parameters.get('usbr_timeslices_folder'))
-                self._reservoir_usace_df = _read_timeslice_files(usace_timeslice_path, 
-                                                                 timeslice_dates,
-                                                                 qc_threshold,
-                                                                 900, #15 minutes
-                                                                 cpu_pool,
-                                                                 zero_is_missing=False,)
+                usbr_timeslice_path = str(data_assimilation_parameters.get('usbr_timeslices_folder'))
+                self._reservoir_usbr_df = _read_timeslice_files(usbr_timeslice_path,
+                                                                timeslice_dates,
+                                                                qc_threshold,
+                                                                900, #15 minutes
+                                                                cpu_pool,
+                                                                zero_is_missing=False,)
 
             # Produce list of datetimes to search for timeseries files
             rfc_parameters = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_rfc_da', {})
@@ -302,6 +309,23 @@ class DAforcing_model():
                 _reservoirUsaceArray = df2a._flatten_array(self._reservoir_usace_df, np.float32)
                 # ... and save it with the class instance
                 self._reservoirUsaceArray = _reservoirUsaceArray  
+
+            # USBR Reservoir Observations
+            self._datesSecondsArray_reservoir_usbr = np.zeros(0)
+            self._nDates_reservoir_usbr = np.zeros(0)
+            self._stationArray_reservoir_usbr = np.zeros(0)
+            self._stationStringLengthArray_reservoir_usbr = np.zeros(0)
+            self._nStations_reservoir_usbr = np.zeros(0)
+            self._reservoirUsbrArray = np.zeros(0)
+
+            if not self._reservoir_usbr_df.empty:
+
+                # see detailed comments in USGS branch
+                (self._datesSecondsArray_reservoir_usbr, self._nDates_reservoir_usbr,
+                 self._stationArray_reservoir_usbr, self._stationStringLengthArray_reservoir_usbr,
+                 self._nStations_reservoir_usbr) \
+                    = df2a._time_stations_from_df(self._reservoir_usbr_df, start_datetime)
+                self._reservoirUsbrArray = df2a._flatten_array(self._reservoir_usbr_df, np.float32)
 
 
             # RFC Timeseries    
