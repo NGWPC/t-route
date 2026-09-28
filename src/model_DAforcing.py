@@ -80,12 +80,18 @@ class DAforcing_model():
             #############################
             # Read DA files:
             #############################
-            nudging = data_assimilation_parameters.get('streamflow_da', {}).get('streamflow_nudging', False)
+            # The config schema returns an omitted section as None, and an RFC DA section
+            # that is switched off as the switch alone.
+            streamflow_da = data_assimilation_parameters.get('streamflow_da') or {}
+            reservoir_da = data_assimilation_parameters.get('reservoir_da') or {}
+            persistence_da = reservoir_da.get('reservoir_persistence_da') or {}
+            rfc_parameters = reservoir_da.get('reservoir_rfc_da') or {}
+            nudging = streamflow_da.get('streamflow_nudging', False)
             
-            usgs_persistence = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_persistence_da', {}).get('reservoir_persistence_usgs', False)
-            usace_persistence = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_persistence_da', {}).get('reservoir_persistence_usace', False)
-            usbr_persistence = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_persistence_da', {}).get('reservoir_persistence_usbr', False)
-            rfc = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_rfc_da', {}).get('reservoir_rfc_forecasts', False)
+            usgs_persistence = persistence_da.get('reservoir_persistence_usgs', False)
+            usace_persistence = persistence_da.get('reservoir_persistence_usace', False)
+            usbr_persistence = persistence_da.get('reservoir_persistence_usbr', False)
+            rfc = rfc_parameters.get('reservoir_rfc_forecasts', False)
 
             qc_threshold = data_assimilation_parameters.get('qc_threshold')
             cpu_pool = compute_parameters.get('cpu_pool')
@@ -150,22 +156,21 @@ class DAforcing_model():
                                                                 cpu_pool,
                                                                 zero_is_missing=False,)
 
-            # Produce list of datetimes to search for timeseries files
-            rfc_parameters = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_rfc_da', {})
-            lookback_hrs = rfc_parameters.get('reservoir_rfc_forecasts_lookback_hours')
-            offset_hrs = rfc_parameters.get('reservoir_rfc_forecasts_offset_hours')
-            timeseries_end = start_datetime + timedelta(hours=offset_hrs)
-            timeseries_start = timeseries_end - timedelta(hours=lookback_hrs)
-            delta = timedelta(hours=1)
-            timeseries_dates = []
-            while timeseries_start <= timeseries_end:
-                timeseries_dates.append(timeseries_start.strftime('%Y-%m-%d_%H'))
-                timeseries_start += delta
-            rfc_forecast_persist_days = rfc_parameters.get('reservoir_rfc_forecast_persist_days')
-            final_persist_datetime = start_datetime + timedelta(days=rfc_forecast_persist_days)
-
             # RFC Observations
             if rfc:
+                # Produce list of datetimes to search for timeseries files
+                lookback_hrs = rfc_parameters.get('reservoir_rfc_forecasts_lookback_hours')
+                offset_hrs = rfc_parameters.get('reservoir_rfc_forecasts_offset_hours')
+                timeseries_end = start_datetime + timedelta(hours=offset_hrs)
+                timeseries_start = timeseries_end - timedelta(hours=lookback_hrs)
+                delta = timedelta(hours=1)
+                timeseries_dates = []
+                while timeseries_start <= timeseries_end:
+                    timeseries_dates.append(timeseries_start.strftime('%Y-%m-%d_%H'))
+                    timeseries_start += delta
+                rfc_forecast_persist_days = rfc_parameters.get('reservoir_rfc_forecast_persist_days')
+                final_persist_datetime = start_datetime + timedelta(days=rfc_forecast_persist_days)
+
                 rfc_timeseries_path = str(rfc_parameters.get('reservoir_rfc_forecasts_time_series_path'))
                 self._rfc_timeseries_df = _read_timeseries_files(
                     rfc_timeseries_path, timeseries_dates, start_datetime,
@@ -175,7 +180,7 @@ class DAforcing_model():
                 )
 
             # Lastobs
-            lastobs_file = data_assimilation_parameters.get('streamflow_da', {}).get('lastobs_file', False)
+            lastobs_file = streamflow_da.get('lastobs_file', False)
 
             if lastobs_file:
                 self._lastobs_df = _read_lastobs_file(lastobs_file)

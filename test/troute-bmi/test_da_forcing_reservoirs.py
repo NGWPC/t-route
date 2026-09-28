@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from troute.config.compute_parameters import DataAssimilationParameters
 from troute.DataAssimilation import PersistenceDA
 
 _T0 = pd.Timestamp("2026-09-01 00:00")
@@ -24,6 +25,7 @@ _USACE = ("LD10_Dardanelle", 21, [150.0, 0.0, 310.0])
 _USBR = ("usbr-445", 22, [11.5, 0.0, 13.5])
 _HOURS = [_T0 + pd.Timedelta(hours=h) for h in (-1, 0, 1)]
 _SRC = Path(__file__).resolve().parents[2] / "src"
+_RFC_FIXTURES = Path(__file__).resolve().parents[1] / "BMI" / "rfc_timeseries"
 
 
 @pytest.fixture
@@ -55,6 +57,17 @@ def _slices(folder: Path, family: str, site: str, releases: list[float]) -> None
             nc.createVariable("discharge_quality", "i2", ("stationIdInd",))[:] = [100]
 
 
+def _compute(t0: pd.Timestamp) -> dict[str, Any]:
+    """A one-hour window from *t0*, with no restart files."""
+    return {
+        "cpu_pool": 1,
+        "forcing_parameters": {"dt": 300, "nts": 12},
+        "restart_parameters": {"start_datetime": t0.to_pydatetime(),
+                               "lite_channel_restart_file": None,
+                               "lite_waterbody_restart_file": None},
+    }
+
+
 def _forcing(modules: tuple[ModuleType, ModuleType], tmp_path: Path,
              monkeypatch: pytest.MonkeyPatch, persistence: dict[str, bool]) -> Any:
     """An initialized bmi_DAforcing whose config holds the given persistence switches."""
@@ -63,28 +76,20 @@ def _forcing(modules: tuple[ModuleType, ModuleType], tmp_path: Path,
     for family, (site, _, releases) in (("usace", _USACE), ("usbr", _USBR)):
         folders[family] = tmp_path / family
         _slices(folders[family], family, site, releases)
-    compute = {
-        "cpu_pool": 1,
-        "forcing_parameters": {"dt": 300, "nts": 12},
-        "restart_parameters": {"start_datetime": _T0.to_pydatetime(),
-                               "lite_channel_restart_file": None,
-                               "lite_waterbody_restart_file": None},
-    }
-    da = {
-        "qc_threshold": 1,
-        "timeslice_lookback_hours": 1,
-        "usace_timeslices_folder": str(folders["usace"]),
-        "usbr_timeslices_folder": str(folders["usbr"]),
-        "streamflow_da": {},
-        "reservoir_da": {
+    compute = _compute(_T0)
+    # Through the config schema, which is what the model reads: with RFC DA off it keeps
+    # only the switch, and a section left out comes back as None.
+    da = DataAssimilationParameters(
+        qc_threshold=1,
+        timeslice_lookback_hours=1,
+        usace_timeslices_folder=folders["usace"],
+        usbr_timeslices_folder=folders["usbr"],
+        reservoir_da={
             "reservoir_persistence_da": {f"reservoir_persistence_{k}": v
                                          for k, v in persistence.items()},
-            "reservoir_rfc_da": {"reservoir_rfc_forecasts": False,
-                                 "reservoir_rfc_forecasts_lookback_hours": 28,
-                                 "reservoir_rfc_forecasts_offset_hours": 0,
-                                 "reservoir_rfc_forecast_persist_days": 11},
+            "reservoir_rfc_da": {"reservoir_rfc_forecasts": False},
         },
-    }
+    ).model_dump()
     monkeypatch.setattr(model_da, "_read_config_file",
                         lambda _: (compute, compute["forcing_parameters"], da, {}))
     forcing = bmi_da.bmi_DAforcing()
@@ -146,3 +151,19 @@ def test_usbr_observations_cross_the_bmi_arrays_beside_usace(
                                        (da._reservoir_usbr_df, _USBR)):
         assert frame.index.tolist() == [lake]
         assert frame.loc[lake, _HOURS].tolist() == releases
+
+
+def test_rfc_forecasts_are_read_when_rfc_da_is_on(
+        forcing_modules: tuple[ModuleType, ModuleType],
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    model_da, _ = forcing_modules
+    compute = _compute(pd.Timestamp("2021-10-21 12:00"))
+    da = DataAssimilationParameters(reservoir_da={"reservoir_rfc_da": {
+        "reservoir_rfc_forecasts": True,
+        "reservoir_rfc_forecasts_time_series_path": _RFC_FIXTURES,
+        "reservoir_rfc_forecasts_offset_hours": 0,
+    }}).model_dump()
+    monkeypatch.setattr(model_da, "_read_config_file",
+                        lambda _: (compute, compute["forcing_parameters"], da, {}))
+    model = model_da.DAforcing_model("config.yaml")
+    assert set(model._rfc_timeseries_df["stationId"]) == {"KNFC1"}
