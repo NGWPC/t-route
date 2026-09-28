@@ -540,6 +540,17 @@ def overtopping_geometry(
     return weir, multiplier
 
 
+def pass_through_flags(lakes: pd.DataFrame) -> "pd.Series[float] | float":
+    """1.0 for each flagged dam still in the reservoir set, else 0.0.
+
+    Once ``route_run_of_river_as_channel`` has run, a flagged dam still here is an RFC
+    reservoir; the kernel has it pass its inflow while no forecast controls it.
+    """
+    if RUN_OF_RIVER_FIELD not in lakes:
+        return 0.0
+    return lakes[RUN_OF_RIVER_FIELD].astype(float)
+
+
 def _normalize_run_of_river(lakes: "pd.DataFrame | None") -> pd.DataFrame:
     """Give ``lakes`` a boolean ``run_of_river`` column, whatever the layer holds.
 
@@ -1006,7 +1017,8 @@ class NHFPreprocessMixin:
             # Step-by-step cleanup; every dropped category is counted and logged
             # as a warning (see _clean_waterbodies).
             self.waterbody_dataframe = lakes[lake_cols].assign(
-                WeirL=weir, dam_length_multiplier=multiplier
+                WeirL=weir, dam_length_multiplier=multiplier,
+                pass_through=pass_through_flags(lakes),
             )
             self._waterbody_df, gl_df = _clean_waterbodies(
                 self._waterbody_df, LAKE_ID_FIELD

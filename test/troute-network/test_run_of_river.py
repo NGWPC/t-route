@@ -15,6 +15,7 @@ from troute.nhf_preprocess import (
     GREAT_LAKES_IDS,
     LAKE_ID_FIELD,
     RUN_OF_RIVER_FIELD,
+    pass_through_flags,
     route_run_of_river_as_channel,
 )
 
@@ -181,3 +182,16 @@ def test_every_rfc_reservoir_routed_names_nothing():
 
     da = _da_rows([1, 2], [4, 4], ["CCKK2", "CHET1"])
     assert unrouted_rfc_gages(da, {1, 2}).empty
+
+
+def test_the_flagged_rfc_dam_kept_is_the_one_marked_to_pass_its_inflow():
+    """Lakes 1 flagged RFC, 2 flagged level pool, 3 unflagged RFC, 4 unflagged."""
+    lakes = _lakes([1, 2, 3, 4], [True, True, False, False])
+    kept = route_run_of_river_as_channel(lakes, _reservoir_da([1, 2, 3, 4], [4, 1, 4, 1]))
+    flags = pass_through_flags(kept)
+    assert dict(zip(_kept(kept), flags.tolist())) == {1: 1.0, 3: 0.0, 4: 0.0}
+
+
+def test_lakes_without_the_flag_column_pass_nothing():
+    lakes = _lakes([1], [False]).drop(columns="run_of_river")
+    assert pass_through_flags(lakes) == 0.0

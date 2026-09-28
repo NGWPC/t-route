@@ -371,11 +371,14 @@ WATERBODY_INITIAL_CONDITIONS = ("qd0", "h0")
 # The overtopping crest in weir lengths (WRF-Hydro's Dam_Length). NWM's LAKEPARM sets 10
 # for every lake, and a lake with no crest length of its own takes it.
 NWM_DAM_LENGTH_MULTIPLIER = 10.0
-# The NHF reader sets it per lake and WaterbodyData fills NWM's 10 otherwise, so never null.
-WATERBODY_DERIVED = ("dam_length_multiplier",)
+# The NHF reader sets both per lake and WaterbodyData fills NWM's 10 and a pass_through
+# of 0 otherwise, so neither is null. pass_through is 1 for a run-of-river dam kept as an
+# RFC reservoir, which passes its inflow while no forecast controls it.
+WATERBODY_DERIVED = ("dam_length_multiplier", "pass_through")
 # What WaterbodyData hands the level-pool kernel, read by position (qd0 at 9, h0 at 10, the
-# multiplier at 11). The hydrofabric part matches nhf_preprocess.LEVEL_POOL_PARAMS, the gate
-# that keeps it non-null; test_waterbody_cleanup_subset pins the two.
+# multiplier at 11, pass_through at 12). The hydrofabric part matches
+# nhf_preprocess.LEVEL_POOL_PARAMS, the gate that keeps it non-null;
+# test_waterbody_cleanup_subset pins the two.
 WATERBODY_VIEW_COLS = (
     "LkArea", "LkMxE", "OrificeA", "OrificeC", "OrificeE", "WeirC", "WeirE", "WeirL", "ifd",
     *WATERBODY_INITIAL_CONDITIONS, *WATERBODY_DERIVED,
@@ -394,6 +397,8 @@ class WaterbodyData:
             self.dataframe = self.dataframe.assign(
                 dam_length_multiplier=NWM_DAM_LENGTH_MULTIPLIER
             )
+        if not self.dataframe.empty and "pass_through" not in self.dataframe:
+            self.dataframe = self.dataframe.assign(pass_through=0.0)
         # Precompute the column subset AND the index as a set once. generate_view()
         # and the per-job lake intersection in ExecutionPlan._build_compute_job both
         # run once per subnetwork (tens of thousands at CONUS scale); a label-based
