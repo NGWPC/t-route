@@ -17,6 +17,8 @@ import pickle
 import numpy as np
 import pandas as pd
 import pytest
+
+from troute.network_fingerprint import FINGERPRINT_KEY
 from troute_nwm_bmi.troute_model import Model
 
 from troute.DataAssimilation import NudgingDA, _DiversionRow
@@ -27,13 +29,18 @@ class _ExecutionPlanLike:
 
 
 class _NetworkStub:
-    def __init__(self):
+    def __init__(self, fingerprint: str = "stub-network"):
         self._q0 = pd.DataFrame({"q": [1.0, 2.0]})
         self._t0 = "2020-01-01_00:00:00"
         self.waterbody_updated = False
+        self._fingerprint = fingerprint
 
     def update_waterbody_water_elevation(self):
         self.waterbody_updated = True
+
+    def fingerprint(self) -> str:
+        """Every checkpoint is stamped with this and refused on a mismatch."""
+        return self._fingerprint
 
 
 class _DataAssimilationStub:
@@ -249,6 +256,7 @@ def test_load_state_installs_the_warmstate_the_run_will_need():
     cycling = pd.DataFrame({"qd0": [6.0]}, index=[101])
     seeded = pd.DataFrame({"qd0": [8.0]}, index=[101])
     state = {
+        FINGERPRINT_KEY: "stub-network",
         "time": 0.0, "q0": cycling, "seeded_q0": seeded, "t0": None,
         "last_obs": pd.DataFrame(), "usgs": pd.DataFrame(), "usace": pd.DataFrame(),
         "usbr": pd.DataFrame(), "rfc": pd.DataFrame(), "gl": pd.DataFrame(),
@@ -290,6 +298,7 @@ def test_checkpoint_round_trip_preserves_the_forecast_handoff():
     cycling = pd.DataFrame({"qd0": [6.0]}, index=[101])
     seeded = pd.DataFrame({"qd0": [8.0]}, index=[101])
     state = {
+        FINGERPRINT_KEY: "stub-network",
         "time": 0.0, "q0": cycling, "seeded_q0": seeded, "t0": None,
         "last_obs": pd.DataFrame(), "usgs": pd.DataFrame(), "usace": pd.DataFrame(),
         "usbr": pd.DataFrame(), "rfc": pd.DataFrame(), "gl": pd.DataFrame(),
@@ -385,6 +394,7 @@ def test_load_state_does_not_erase_live_reservoir_da_params():
         "q0": pd.DataFrame({"q": [1.0, 2.0]}),
         "seeded_q0": None,
         "t0": "2020-01-01_00:00:00",
+        FINGERPRINT_KEY: "stub-network",
         "last_obs": pd.DataFrame(),
         "usgs": pd.DataFrame(),
         "usace": pd.DataFrame(),
@@ -424,6 +434,7 @@ def test_load_state_still_installs_real_reservoir_da_params():
         "q0": pd.DataFrame({"q": [1.0, 2.0]}),
         "seeded_q0": None,
         "t0": "2020-01-01_00:00:00",
+        FINGERPRINT_KEY: "stub-network",
         "last_obs": pd.DataFrame(),
         "usgs": pd.DataFrame({"a": [11]}),
         "usace": pd.DataFrame({"b": [22]}),
@@ -458,6 +469,7 @@ def test_a_checkpoint_with_fewer_gages_does_not_shrink_the_roster(caplog):
         index=[50, 30],
     )
     state = {
+        FINGERPRINT_KEY: "stub-network",
         "time": 0.0, "q0": pd.DataFrame({"q": [1.0]}), "seeded_q0": None,
         "t0": "2020-01-01_00:00:00", "last_obs": saved,
         "usgs": pd.DataFrame(), "usace": pd.DataFrame(), "usbr": pd.DataFrame(),
@@ -479,6 +491,7 @@ def test_load_state_keeps_this_cycles_rfc_selection():
     model = _make_model(0.0, _ExecutionPlanLike())
     live_rfc = model._data_assimilation._reservoir_rfc_param_df.copy()
     state = {
+        FINGERPRINT_KEY: "stub-network",
         "time": 0.0, "q0": pd.DataFrame({"q": [1.0]}), "seeded_q0": None,
         "t0": "2020-01-01_00:00:00", "last_obs": pd.DataFrame(),
         "usgs": pd.DataFrame(), "usace": pd.DataFrame(), "usbr": pd.DataFrame(),
@@ -504,6 +517,7 @@ def test_load_state_does_not_carry_the_rfc_horizon_deadline():
         {"timeseries_idx": [5], "persist_until": [fresh]}, index=[101]
     )
     state = {
+        FINGERPRINT_KEY: "stub-network",
         "time": 0.0, "q0": pd.DataFrame({"q": [1.0]}), "seeded_q0": None,
         "t0": "2020-01-01_00:00:00", "last_obs": pd.DataFrame(),
         "usgs": pd.DataFrame(), "usace": pd.DataFrame(), "usbr": pd.DataFrame(),
@@ -535,6 +549,7 @@ def test_load_state_rejects_a_no_da_checkpoint_after_routing():
         "q0": pd.DataFrame({"q": [1.0, 2.0]}),
         "seeded_q0": None,
         "t0": "2020-01-01_00:00:00",
+        FINGERPRINT_KEY: "stub-network",
         "last_obs": pd.DataFrame(),
         "usgs": pd.DataFrame(),
         "usace": pd.DataFrame(),
@@ -556,6 +571,7 @@ def test_load_state_into_a_fresh_model_is_still_allowed():
         "q0": pd.DataFrame({"q": [1.0, 2.0]}),
         "seeded_q0": None,
         "t0": "2020-01-01_00:00:00",
+        FINGERPRINT_KEY: "stub-network",
         "last_obs": pd.DataFrame(),
         "usgs": pd.DataFrame(),
         "usace": pd.DataFrame(),
@@ -575,6 +591,7 @@ def _no_da_state():
         "q0": pd.DataFrame({"q": [1.0, 2.0]}),
         "seeded_q0": None,
         "t0": "2020-01-01_00:00:00",
+        FINGERPRINT_KEY: "stub-network",
         "last_obs": pd.DataFrame(),
         "usgs": pd.DataFrame(),
         "usace": pd.DataFrame(),
@@ -990,3 +1007,58 @@ def test_load_state_without_a_diversion_seed_leaves_the_row_as_built():
     dst.load_state(pickle.loads(pickle.dumps(state, pickle.HIGHEST_PROTOCOL)))
     assert da._usgs_df.loc[_DIV_LINK].isna().all()
 
+
+
+def test_a_checkpoint_from_another_network_is_refused():
+    """Waterbody and link ids are positional, so a checkpoint from another lake set or
+    discretization would load each lake's state into its neighbor with no error."""
+    model = _make_model(0.0, _ExecutionPlanLike())
+    state = _state_from(model)
+    state[FINGERPRINT_KEY] = "a-different-network"
+    with pytest.raises(ValueError, match="written for a different network"):
+        model.load_state(state)
+
+
+def test_an_unstamped_checkpoint_is_refused():
+    """A checkpoint from before the stamp cannot have its network verified at all."""
+    model = _make_model(0.0, _ExecutionPlanLike())
+    state = _state_from(model)
+    del state[FINGERPRINT_KEY]
+    with pytest.raises(ValueError, match="carries no network_fingerprint"):
+        model.load_state(state)
+
+
+def test_a_refused_checkpoint_leaves_the_model_untouched():
+    """load_state resolves every frame before mutating, so a refusal must not leave a
+    half-restored model that an identical retry then accepts."""
+    model = _make_model(0.0, _ExecutionPlanLike())
+    state = _state_from(model)
+    state[FINGERPRINT_KEY] = "a-different-network"
+    state["time"] = 999.0
+    before_time = model._time
+    before_q0 = model._network._q0.copy()
+    with pytest.raises(ValueError, match="written for a different network"):
+        model.load_state(state)
+    assert model._time == before_time
+    pd.testing.assert_frame_equal(model._network._q0, before_q0)
+
+
+def test_a_refused_checkpoint_leaves_the_bmi_values_untouched():
+    """BmiTroute._deserialize lets the model verify the network before it installs the
+    wrapper's values, so a caught refusal leaves no foreign catchment ids or forcing
+    arrays beside this run's state."""
+    from troute_nwm_bmi.troute_bmi import BmiTroute
+
+    bmi = BmiTroute.__new__(BmiTroute)
+    mine = {"catchment_id": np.array([1, 2], dtype=np.int64)}
+    bmi._values = mine
+    bmi._model = _make_model(0.0, _ExecutionPlanLike())
+    state = _state_from(bmi._model)
+    state[FINGERPRINT_KEY] = "a-different-network"
+    payload = pickle.dumps(
+        {"values": {"catchment_id": np.array([9, 9, 9], dtype=np.int64)}, "model": state},
+        pickle.HIGHEST_PROTOCOL,
+    )
+    with pytest.raises(ValueError, match="written for a different network"):
+        bmi._deserialize(np.frombuffer(payload, dtype=np.uint8))
+    assert bmi._values is mine

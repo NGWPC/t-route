@@ -29,14 +29,14 @@ contains
         orifice_area, lake_max_water_elevation, initial_fractional_depth, &
         lake_number, reservoir_type, reservoir_parameter_file, start_date, &
         time_series_path, forecast_lookback_hours) BIND(C, NAME='init_rfc')
-            USE, INTRINSIC :: ISO_C_BINDING, ONLY: C_PTR, C_F_POINTER, C_CHAR, c_null_char, C_INT64_T
+            USE, INTRINSIC :: ISO_C_BINDING, ONLY: C_PTR, C_F_POINTER, C_CHAR, c_null_char, C_INT64_T, C_DOUBLE
             TYPE(C_PTR), INTENT(IN), VALUE :: handle
-            real,    intent(inout) :: water_elevation           ! meters AMSL
+            real(C_DOUBLE), intent(inout) :: water_elevation ! meters AMSL
             real,    intent(in)    :: lake_area                 ! area of lake (km^2)
             real,    intent(in)    :: weir_elevation            ! bottom of weir elevation (meters AMSL)
             real,    intent(in)    :: weir_coeffecient          ! weir coefficient
             real,    intent(in)    :: weir_length               ! weir length (meters)
-            real,    intent(in)    :: dam_length                ! dam length (meters)
+            real,    intent(in)    :: dam_length                ! dam length, a multiplier on weir length
             real,    intent(in)    :: orifice_elevation         ! orifice elevation (meters AMSL)
             real,    intent(in)    :: orifice_coefficient       ! orifice coefficient
             real,    intent(in)    :: orifice_area              ! orifice area (meters^2)
@@ -101,12 +101,12 @@ contains
 
         SUBROUTINE run_rfc(handle, inflow, lateral_inflow, water_elevation, outflow, routing_period) BIND(C, NAME='run_rfc')
 
-            USE, INTRINSIC :: ISO_C_BINDING, ONLY: C_PTR, C_F_POINTER, C_CHAR, C_LOC, C_NULL_CHAR
+            USE, INTRINSIC :: ISO_C_BINDING, ONLY: C_PTR, C_F_POINTER, C_CHAR, C_LOC, C_NULL_CHAR, C_DOUBLE
 
             TYPE(C_PTR), INTENT(IN), VALUE :: handle
             real, intent(in)    :: inflow                   ! cubic meters per second (cms)
             real, intent(in)    :: lateral_inflow           ! cubic meters per second (cms)
-            real, intent(inout) :: water_elevation          ! meters AMSL
+            real(C_DOUBLE), intent(inout) :: water_elevation ! meters AMSL
             real, intent(out)   :: outflow                  ! cubic meters per second (cms)
             real, intent(in)    :: routing_period           ! seconds
             integer :: dynamic_reservoir_type               ! dynamic reservoir type sent to lake out files

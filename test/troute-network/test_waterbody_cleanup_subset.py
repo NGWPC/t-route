@@ -17,7 +17,11 @@ from troute.nhf_preprocess import (
     NATIVE_LAKE_ID_FIELD,
     _clean_waterbodies,
 )
-from troute.routing.compute import WATERBODY_INITIAL_CONDITIONS, WATERBODY_VIEW_COLS
+from troute.routing.compute import (
+    WATERBODY_DERIVED,
+    WATERBODY_INITIAL_CONDITIONS,
+    WATERBODY_VIEW_COLS,
+)
 
 
 def _lakes(**overrides: object) -> pd.DataFrame:
@@ -71,6 +75,8 @@ def test_the_gate_covers_every_hydrofabric_column_the_kernel_reads() -> None:
     kernel reads but the gate omits is the silent failure: it reaches the level-pool
     kernel as NaN and produces plausible wrong numbers rather than an error.
     """
-    from_kernel = set(WATERBODY_VIEW_COLS) - set(WATERBODY_INITIAL_CONDITIONS)
+    from_kernel = (
+        set(WATERBODY_VIEW_COLS) - set(WATERBODY_INITIAL_CONDITIONS) - set(WATERBODY_DERIVED)
+    )
     assert set(LEVEL_POOL_PARAMS) == from_kernel
     assert len(LEVEL_POOL_PARAMS) == len(from_kernel)

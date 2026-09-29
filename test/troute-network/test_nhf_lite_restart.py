@@ -29,6 +29,7 @@ def _network() -> NHF:
     net._waterbody_df = pd.DataFrame(  # pyright: ignore[reportPrivateUsage]
         index=pd.Index([], name="lake_id"),
     )
+    net._connections = {link: [] for link in LINKS}  # pyright: ignore[reportPrivateUsage]
     net.break_points = {"break_network_at_waterbodies": False}
     # Set by __init__, which this bare instance skips; read by the flowpath branch.
     net.div_reverse_lookup = {}  # pyright: ignore[reportAttributeAccessIssue]
@@ -51,6 +52,9 @@ def _write_link_restart(tmp_path: Path, links: list[int]) -> Path:
     nhd_io.write_lite_restart(
         q0, pd.DataFrame(columns=["qd0", "h0"]), T0,
         {"lite_restart_output_directory": str(tmp_path)},
+        # The driver stamps every restart it writes; an unstamped one is refused
+        # before these behaviors are reachable.
+        fingerprint=_network().fingerprint(),
     )
     return tmp_path / f"channel_restart_{T0:%Y%m%d%H%M}"
 
@@ -110,3 +114,37 @@ def test_a_restart_keyed_by_neither_is_refused(tmp_path: Path) -> None:
     stray.to_pickle(tmp_path / "stray.pkl")
     with pytest.raises(ValueError, match="keyed by neither"):
         _read(tmp_path / "stray.pkl")
+
+
+def test_a_link_restart_from_another_network_is_refused(tmp_path: Path) -> None:
+    """Link ids are positional: discretization hands them out as one contiguous
+    arange in row order, so a changed link table relabels them and the coverage count
+    below still reports full coverage while every row loads onto a neighbor."""
+    path = _write_link_restart(tmp_path, LINKS)
+    written = pd.read_pickle(path)
+    written.attrs["network_fingerprint"] = "a-different-network"
+    written.to_pickle(path)
+    with pytest.raises(ValueError, match="written for a different network"):
+        _read(path)
+
+
+def test_an_unstamped_link_restart_is_refused(tmp_path: Path) -> None:
+    """A file from before the stamp cannot have its network verified at all."""
+    path = _write_link_restart(tmp_path, LINKS)
+    written = pd.read_pickle(path)
+    written.attrs.pop("network_fingerprint", None)
+    written.to_pickle(path)
+    with pytest.raises(ValueError, match="carries no network_fingerprint"):
+        _read(path)
+
+
+def test_a_flowpath_restart_needs_no_fingerprint(tmp_path: Path) -> None:
+    """feature_id is the hydrofabric's own flowpath id, so the external hot start loads
+    without a stamp."""
+    hot = pd.DataFrame({
+        "feature_id": [1, 2], "qd0": [12.0, 22.0], "h0": [0.5, 0.7],
+        "qu0": [11.0, 21.0], "ql0": [0.1, 0.2], "time": T0,
+    })
+    hot.to_pickle(tmp_path / "hot.pkl")
+    out = _read(tmp_path / "hot.pkl")
+    assert list(out.index) == LINKS

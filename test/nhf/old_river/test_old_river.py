@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
@@ -224,19 +223,6 @@ CFG_SPINUP_NO_DIVERSION = Config(
     data_assimilation_parameters=CFG_NO_DIVERSION.data_assimilation_parameters,
 )
 
-GAGES_PATCH = {
-    "07381482": {"fp_id": 1270478544606477, "virtual_fp_id": 1270478544606478},
-    "07381490": {"fp_id": 1269985531956909, "virtual_fp_id": 1269985531956910},
-}
-
-def patch_gages(domain_path: Path) -> None:
-    """Manually patch fp_id and virtual_fp_id in the gages table."""
-    gages = gpd.read_file(domain_path, layer="gages")
-    for site_no, fields in GAGES_PATCH.items():
-        for field, value in fields.items():
-            gages.loc[gages["site_no"] == site_no, field] = value
-    gages.to_file(domain_path, layer="gages", driver="GPKG")
-
 def setup(source_gpkg: str | Path, refresh: bool = True):
     """Subset the NHF domain and generate forcing for a standard test case."""
     offnetwork_upstreams = None
@@ -249,7 +235,6 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
         offnetwork_upstreams = get_offnetwork_upstreams(source_gpkg, FP_IDS)
         layers = extract_layers(source_gpkg, FP_IDS + offnetwork_upstreams)
         write_gpkg(layers, CFG_DIVERSION.domain_path)
-        patch_gages(CFG_DIVERSION.domain_path)
 
     if refresh or not has_files(CFG_DIVERSION.channel_forcing_dir, CFG_DIVERSION.qlat_file_pattern):
         if offnetwork_upstreams is None:
@@ -345,7 +330,7 @@ def setup(source_gpkg: str | Path, refresh: bool = True):
 MISSISSIPPI_BATON_ROUGE = ("07374000", 1269974759984431)  # downstream of the diversion
 ATCHAFALAYA_SIMMESPORT = ("07381490", 1269985531956909)  # receives the diverted water
 DONOR_FP = 1270479816524705  # Mississippi flowpath the diversion is taken from
-RECEIVING_HEADWATER_FP = 1270478544606477  # where 07381482 sits, per GAGES_PATCH
+RECEIVING_HEADWATER_FP = 1270478544606477  # where 07381482 sits
 MISSISSIPPI_VICKSBURG = ("07289000", 1271020831654835)  # upstream of the structure
 
 # Inputs are generated out of band by ``python -m test.nhf.prep_tests``, which calls

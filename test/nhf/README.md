@@ -12,13 +12,10 @@ BMI execution (`utils/run_bmi.py`) is currently broken.
 
 ## Quick Start
 
-> [!WARNING]
-> Running these commands will create some indices in the flowpath table and update the lakes table directly on your source geopackage.  If any of your workflows depend on hashes of the source file, be warned!
-
 ### 1 — Build test data
 
 ```console
-# All tests (uses default NHF geopackage at /t-route/nhf_1.2.1.gpkg)
+# All tests (uses the default NHF geopackage, /hydrofabric/nhf.gpkg)
 python -m test.nhf.prep_tests
 
 # All tests with explicit NHF geopackage path
@@ -111,7 +108,7 @@ Passing criteria: Peak outflow is within acceptable range.
 
 ### Great Lakes (`great_lakes`)
 
-DA-forced outflows from four fp_id-bearing Great Lakes (Superior, Huron-Michigan, Erie, Ontario). Uses USGS timeslice files, Canadian timeslice files, and a Lake Ontario outflow CSV. Checks that forced values propagate correctly downstream. A domain is committed to the repo and runs as-is; use `prep_tests.py --test great_lakes --refresh` with a newer NHF geopackage to regenerate.
+DA-forced outflows from four fp_id-bearing Great Lakes (Superior, Huron-Michigan, Erie, Ontario). Uses USGS timeslice files, Canadian timeslice files, and a Lake Ontario outflow CSV. Checks that forced values propagate correctly downstream.
 
 Passing criteria: Flows at outlets of lakes match DA values very closely
 
@@ -135,6 +132,21 @@ Passing criteria: Flows at outlets of lakes (which have been forced low) match D
 | Period | 2020-01-01 00:00 to 01:00 |
 | Forcing | Constant qlat + synthetic DA files |
 | Lat / Lon | 42.90326,-89.21309 |
+
+---
+
+### Lower Snake (`lower_snake`)
+
+Lower Granite (LGDW1) and Little Goose (LGSW1), run-of-river dams the hydrofabric flags and marks as RFC sites, routed with RFC DA off. Each stays a reservoir and, with no forecast in control, passes its inflow with its level held. A second domain clears the flag on the RFC dams, so the same dams route as ordinary level pools.
+
+Passing criteria: each dam's outflow equals its inflow and its level does not move; with the flag cleared, each release departs from inflow by more than 10% of the peak and each level moves more than 1 m.
+
+| Parameter | Value |
+|---|---|
+| Seed fp_ids | `1267774669700543` (Snake), `1267774688946911` (Clearwater), carved 55 hops down |
+| Period | 2011-05-05 to 2011-05-25 |
+| Forcing | `retro`, the Snake and Clearwater entering as retrospective streamflow |
+| Lat / Lon | 46.65912,-117.42524 (Lower Granite) |
 
 ---
 
@@ -173,7 +185,7 @@ Builds test input data without running the tests. Skips existing outputs unless 
 python -m test.nhf.prep_tests [OPTIONS]
 
 Options:
-  --nhf-gpkg PATH        NHF geopackage path (default: /t-route/nhf_1.2.1.gpkg).
+  --nhf-gpkg PATH        NHF geopackage path (default: /hydrofabric/nhf.gpkg).
   --test NAME [NAME ...] Which tests to prep. Default: all.
                          Choices: conecuh patuxent ciss_creek great_lakes
                                   four_lakes

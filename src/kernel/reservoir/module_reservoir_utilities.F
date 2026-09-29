@@ -625,7 +625,8 @@ contains
         integer, intent(in) :: weight_update_time, gage_lookback_seconds
         integer, intent(in) :: persistence_weight_index
         real,    intent(in) :: persistence_current_weight, inflow, current_storage
-        real,    intent(in) :: water_elevation, gage_discharge, persisted_outflow
+        double precision, intent(in) :: water_elevation
+        real,    intent(in) :: gage_discharge, persisted_outflow
         real,    intent(in) :: levelpool_outflow, outflow
         character(len=*), intent(in) :: gage_id
         character(len=15)   :: lake_number_string, lake_number_string_trimmed
@@ -679,7 +680,8 @@ contains
         integer, intent(in) :: current_time, time_step, time_series_update_time
         integer, intent(in) :: lookback_seconds, time_series_index
         character(len=*), intent(in) :: gage_id
-        real,    intent(in) :: inflow, water_elevation, levelpool_outflow, outflow
+        real,    intent(in) :: inflow, levelpool_outflow, outflow
+        double precision, intent(in) :: water_elevation
         character(len=15)   :: lake_number_string, lake_number_string_trimmed
         character(len=50)   :: filename_string
 
@@ -724,7 +726,7 @@ contains
     subroutine log_levelpool_diagnostic_data(lake_number, inflow, water_elevation, outflow)
         integer(C_INT64_T), intent(in) :: lake_number
         real,    intent(in) :: inflow
-        real,    intent(in) :: water_elevation
+        double precision, intent(in) :: water_elevation
         real,    intent(in) :: outflow
         character(len=15)   :: lake_number_string, lake_number_string_trimmed
         character(len=50)   :: filename_string

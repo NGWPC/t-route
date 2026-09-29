@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 from troute import nhd_network
+from troute.AbstractNetwork import AbstractNetwork
 from troute.routing.compute import compute_nhd_routing_v02
 
 _T0 = datetime(2011, 5, 1)
@@ -116,12 +117,14 @@ def _nudge(results: object, link: int) -> NDArray[np.float64]:
     raise KeyError(f"the kernel returned no nudge for link {link}")
 
 
+class _Carry:
+    """Holds the q0 that AbstractNetwork.new_q0 writes, so the drivers' carry runs as is."""
+
+    _q0: pd.DataFrame | None = None
+
+
 def _carry_q0(results: object) -> pd.DataFrame:
-    return pd.concat([
-        pd.DataFrame(np.asarray(r[1])[:, [-4, -4, -2, -1]], index=r[0],
-                     columns=["qu0", "qd0", "h0", "ql0"])
-        for r in results  # type: ignore[attr-defined]
-    ])
+    return AbstractNetwork.new_q0(_Carry(), results)
 
 
 @pytest.mark.parametrize("qlat_add_loc", ["middle", "bottom"])

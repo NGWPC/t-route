@@ -10,6 +10,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pyogrio
 from troute.rfc_lake_gage_crosswalk import get_great_lakes_climatology
+from troute.routing.compute import NWM_DAM_LENGTH_MULTIPLIER
 import xarray as xr
 from joblib import Parallel, delayed
 
@@ -31,6 +32,10 @@ _BAD_FPID_PREVIEW_LIMIT = 10
 LAKE_ID_FIELD = "nhf_lake_id"
 RECORD_LAKE_ID_FIELD = "og_" + LAKE_ID_FIELD
 NATIVE_LAKE_ID_FIELD = "lake_id"  # Index of lake in its source dataset
+# NID dam geometry on the lakes layer, in meters, NULL where NID reports none: the length
+# along the top of the dam, and the spillway width at the maximum design pool.
+DAM_CREST_LENGTH_FIELD = "dam_crest_length_m"
+SPILLWAY_WIDTH_FIELD = "spillway_width_m"
 WATERBODY_DF_FIELDS = [
                 LAKE_ID_FIELD,
                 NATIVE_LAKE_ID_FIELD,
@@ -45,6 +50,8 @@ WATERBODY_DF_FIELDS = [
                 "WeirC",
                 "WeirE",
                 "WeirL",
+                DAM_CREST_LENGTH_FIELD,
+                SPILLWAY_WIDTH_FIELD,
             ]
 # Columns the level-pool kernel reads (compute.py's LakeData view). Completeness gates
 # name these explicitly rather than requiring every column present: the waterbody frame
@@ -55,6 +62,10 @@ LEVEL_POOL_PARAMS = (
 )
 RESERVOIR_DA_SITE_ID_FIELD = "site_no"
 RESERVOIR_DA_SITE_TYPE_FIELD = "da_type"
+RFC_DA_TYPE = 4
+# Lakes-layer tag for run-of-river and NRCS low-head dams, too small to route as a level pool.
+# A flagged dam routes as Muskingum-Cunge channel unless da_type 4 keeps it for RFC DA.
+RUN_OF_RIVER_FIELD = "run_of_river"
 
 def _sql_in(field: str, values, quote: bool = False) -> str:
     """An OGR ``where`` clause restricting *field* to *values*."""
@@ -68,13 +79,12 @@ def _sql_in(field: str, values, quote: bool = False) -> str:
 
 def _lake_vfp_clusters(
     waterbody_df: pd.DataFrame,
-    crosswalk: "pd.DataFrame | None",
+    crosswalk: pd.DataFrame,
 ) -> tuple["pd.Series[int]", dict[int, int]]:
     """Cluster lakes that share a virtual flowpath; returns lake and vfp labels.
 
     Lakes sharing a vfp must collapse together: a vfp belongs to one absorbed link
     set, and two claims would pop the same link out of ``connections`` twice.
-    Without a crosswalk this degenerates to ``groupby("virtual_fp_id")``.
     """
     lakes = waterbody_df["virtual_fp_id"].dropna()
     edges = list(
@@ -83,22 +93,20 @@ def _lake_vfp_clusters(
             lakes.to_numpy().astype(int).tolist(),
         )
     )
-    if crosswalk is not None and not crosswalk.empty:
-        # Crosswalk is keyed on the ORIGINAL nhf_lake_id; the waterbody table has
-        # synthetic ids by now. Great Lakes carry their native lake_id and so do
-        # not match -- they stay anchored on their declared vfp alone.
-        record_to_index = pd.Series(
-            waterbody_df.index, index=waterbody_df[RECORD_LAKE_ID_FIELD]
+    # The crosswalk is keyed on the original nhf_lake_id, the waterbody table on synthetic
+    # ids. Great Lakes keep their native lake_id, match nothing and stay on their declared vfp.
+    record_to_index = pd.Series(
+        waterbody_df.index, index=waterbody_df[RECORD_LAKE_ID_FIELD]
+    )
+    cw = crosswalk.dropna(subset=[LAKE_ID_FIELD, "virtual_fp_id"])
+    mapped = record_to_index.reindex(cw[LAKE_ID_FIELD].to_numpy())
+    keep = mapped.notna().to_numpy()
+    edges.extend(
+        zip(
+            mapped.to_numpy()[keep].astype(int).tolist(),
+            cw["virtual_fp_id"].to_numpy()[keep].astype(int).tolist(),
         )
-        cw = crosswalk.dropna(subset=[LAKE_ID_FIELD, "virtual_fp_id"])
-        mapped = record_to_index.reindex(cw[LAKE_ID_FIELD].to_numpy())
-        keep = mapped.notna().to_numpy()
-        edges.extend(
-            zip(
-                mapped.to_numpy()[keep].astype(int).tolist(),
-                cw["virtual_fp_id"].to_numpy()[keep].astype(int).tolist(),
-            )
-        )
+    )
 
     # Union-find over the (lake, vfp) graph. Keys are TAGGED: synthetic lake ids
     # are allocated above max(dataframe.index), which bounds them against routing
@@ -243,19 +251,14 @@ OPTIONAL_LAYERS: frozenset[str] = frozenset(
     {"lakes", "reservoir_da", "lake_vfp_crosswalk"}
 )
 
-# Columns a PRESENT layer may omit: NHF >= 1.1.4 only, consumed only by the
-# scaling DA (which raises its own clear error when enabled without them).
-OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
-    "flowpaths": frozenset({"total_da_sqkm", "vpu_id"}),
-}
-
 # Columns required from layers loaded in FULL (``columns=None``), which name no
 # column list for the check above to use. Enforced only when the layer is PRESENT,
 # so a gage-free domain stays valid. gages.hy_id is the only key tying a gage to its
-# hydrolocation (site_no and gid both repeat); nhf 1.2.3 dropped it, which without
-# this surfaces as a KeyError deep inside a pandas merge.
+# hydrolocation (site_no and gid both repeat), and gages.fp_id places a gage in its
+# VPU for the scaling DA; without this check a gages layer lacking either surfaces
+# as a KeyError deep inside the build.
 REQUIRED_COLUMNS: dict[str, frozenset[str]] = {
-    "gages": frozenset({"hy_id"}),
+    "gages": frozenset({"hy_id", "fp_id"}),
 }
 
 
@@ -281,8 +284,7 @@ def _missing_requested_columns(
                 if absent:
                     missing_by_layer[name] = absent
             continue
-        optional_cols = OPTIONAL_COLUMNS.get(name, frozenset())
-        required = [c for c in columns if c not in optional_cols]
+        required = list(columns)
         required += [c for c in sorted(must_have) if c not in required]
         if available is None:
             # An absent optional layer is fine; an absent core topology layer is not.
@@ -305,8 +307,8 @@ def _validate_required_columns(gpkg_path: Path, present_layers: set[str]) -> Non
     validated layer absent from it is reported as missing its full requested
     set, and a present one is checked against ``pyogrio.read_info(...)["fields"]``
     (the attribute field names, read without touching the rows). This costs one
-    metadata lookup per present validated layer and catches a stale hydrofabric
-    (e.g. ``reference_flowpaths`` lacking ``segment_order``) up front, replacing
+    metadata lookup per present validated layer and catches a missing column
+    (e.g. ``segment_order`` in ``reference_flowpaths``) up front, replacing
     a cryptic ``KeyError`` raised deep inside discretization. Layers loaded with
     ``columns=None`` (lakes, gages, hydrolocations, virtual_nexus) name no column
     list, so they are checked only against ``REQUIRED_COLUMNS`` and only when
@@ -328,11 +330,8 @@ def _validate_required_columns(gpkg_path: Path, present_layers: set[str]) -> Non
         )
         raise ValueError(
             "Input geopackage is missing required column(s) needed by the NHF "
-            f"network build -> {details}. Usually the hydrofabric predates the "
-            "current schema (older datasets lack 'segment_order' in "
-            "'reference_flowpaths'); it can also be a newer build that dropped a "
-            "required column (nhf 1.2.3 dropped 'hy_id' from 'gages'). Regenerate "
-            "or switch to a compatible hydrofabric version."
+            f"network build -> {details}. The hydrofabric does not match the "
+            "schema this build reads."
         )
 
 
@@ -341,16 +340,15 @@ def _validate_required_columns(gpkg_path: Path, present_layers: set[str]) -> Non
 # the required-column set validated up front by _validate_required_columns),
 # or None to load every field. We read only what the build consumes to cut
 # processing time and memory. ``reference_flowpaths`` lists its five consumed
-# columns explicitly: `segment_order` is a newer hydrofabric field whose
-# absence otherwise fails deep in discretization, and `ref_fp_id` is the join
-# key in crosswalk_nex_flowpath_poi.
+# columns explicitly: `segment_order` orders the links of a flowpath in
+# discretization, and `ref_fp_id` is the join key in crosswalk_nex_flowpath_poi.
 LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
     (
         "flowpaths",
         ["fp_id", "length_km", "n", "mainstem_lp", "topwdth", "slope",
          "ncc", "btmwdth", "musx", "chslp", "topwdthcc", "musk",
-         # scaling-DA-only fields (NHF >= 1.1.4, optional): drainage area for the
-         # area scaling, and the VPU the per-tree theta is regionalized from.
+         # scaling-DA fields: drainage area for the area scaling, and the VPU
+         # the per-tree theta is regionalized from.
          "total_da_sqkm",
          "vpu_id"],
         True,
@@ -369,14 +367,15 @@ LAYERS_TO_READ: list[tuple[str, Optional[list[str]], bool]] = [
     ("virtual_nexus", None, True),
     (
         "lakes",
-        WATERBODY_DF_FIELDS + ["hy_id", "ref_fp_id"],
+        # RUN_OF_RIVER_FIELD is consumed before preprocess_waterbodies, so it stays
+        # outside WATERBODY_DF_FIELDS, the columns the waterbody frame keeps.
+        WATERBODY_DF_FIELDS + ["hy_id", "ref_fp_id", RUN_OF_RIVER_FIELD],
         False),
     ("gages", None, True),
     ("hydrolocations", None, True),
     ("reservoir_da", ["nhf_lake_id", "lake_id", "site_no", "da_type"], True),
-    # Every vfp intersecting each lake polygon, one lake to many (NHF >= 1.2.2).
-    # Without it _refactor_reservoirs absorbs only the declared outlet vfp and
-    # routes the rest of the lake as MC channel.
+    # Every vfp intersecting each lake polygon, one lake to many; the lake absorbs
+    # them all in _refactor_reservoirs.
     ("lake_vfp_crosswalk", ["nhf_lake_id", "virtual_fp_id"], True),
 ]
 
@@ -477,31 +476,179 @@ def read_geo_file(supernetwork_parameters, cpu_pool):
             ignore_geometry=ignore_geometry,
         )
 
-    # Read present layers in parallel (absent ones become empty frames), pruning
-    # OPTIONAL columns to what the layer carries -- gpd.read_file raises on a
-    # requested column the layer lacks. Required columns were validated above.
-    to_read = []
-    for name, columns, ignore_geometry in LAYERS_TO_READ:
-        if name not in gpkg_layers:
-            continue
-        optional = OPTIONAL_COLUMNS.get(name)
-        if columns is not None and optional:
-            fields = set(pyogrio.read_info(geo_file_path, layer=name)["fields"])
-            columns = [c for c in columns if c not in optional or c in fields]
-        to_read.append((name, columns, ignore_geometry))
+    # Read present layers in parallel (absent ones become empty frames).
+    to_read = [
+        (name, columns, ignore_geometry)
+        for name, columns, ignore_geometry in LAYERS_TO_READ
+        if name in gpkg_layers
+    ]
     if not to_read:
         raise ValueError(
             f"None of the expected layers to read were present in the geopackage: "
             f"{[lyr for lyr, _, _ in LAYERS_TO_READ]}. Found layers: {gpkg_layers}."
         )
-    table_dict = {lyr: pd.DataFrame() for lyr, *_ in LAYERS_TO_READ}
+    # An absent layer loads empty with the columns the build requests from it, so a
+    # lake-free domain reaches every consumer with the schema it indexes.
+    table_dict = {
+        name: pd.DataFrame(columns=columns) for name, columns, _ in LAYERS_TO_READ
+    }
     with Parallel(n_jobs=min(cpu_pool, len(to_read))) as parallel:
         table_dict.update(
             dict(parallel(starmap(delayed(read_layer), to_read)))
         )
 
     _validate_flowpaths_channel_params(table_dict.get("flowpaths"))
+    _validate_nid_geometry(table_dict["lakes"])
+    table_dict["lakes"] = _normalize_run_of_river(table_dict.get("lakes"))
     return table_dict
+
+
+def _validate_nid_geometry(lakes: pd.DataFrame) -> None:
+    """Raise unless every NID crest length and spillway width is NULL or positive.
+
+    NULL means NID reports none and the lake keeps NWM's proportions; zero, a negative
+    or a non-number would size a weir wrong.
+    """
+    for col in (DAM_CREST_LENGTH_FIELD, SPILLWAY_WIDTH_FIELD):
+        raw = lakes[col]
+        value = pd.to_numeric(raw, errors="coerce")
+        bad = raw.notna() & ~(np.isfinite(value) & (value > 0))
+        if bad.any():
+            preview = raw[bad].unique()[:_BAD_FPID_PREVIEW_LIMIT].tolist()
+            msg = (
+                f"lakes column '{col}' must be NULL or a positive length in meters, but "
+                f"{int(bad.sum())} of {len(raw)} row(s) hold other values: {preview}."
+            )
+            raise ValueError(msg)
+
+
+def overtopping_geometry(
+    weir_length: "pd.Series[float]",
+    crest_length: "pd.Series[float]",
+    spillway_width: "pd.Series[float]",
+) -> tuple["pd.Series[float]", "pd.Series[float]"]:
+    """The service weir length and the kernel's dam-length multiplier for each lake.
+
+    The weir is the NID spillway width, else ``WeirL``, else a tenth of the NID crest;
+    where NID has a crest and no spillway width, ``WeirL`` spans the whole crest, closer to
+    NID's reported spillway capacity than a tenth of it. The overtopping crest is the NID
+    crest, else NWM's 10 weir lengths.
+    """
+    weir = spillway_width.where(spillway_width.notna(), weir_length)
+    weir = weir.where(weir.notna(), crest_length / NWM_DAM_LENGTH_MULTIPLIER)
+    multiplier = (crest_length / weir).where(crest_length.notna(), NWM_DAM_LENGTH_MULTIPLIER)
+    return weir, multiplier
+
+
+def pass_through_flags(lakes: pd.DataFrame) -> "pd.Series[float] | float":
+    """1.0 for each flagged dam still in the reservoir set, else 0.0.
+
+    Once ``route_run_of_river_as_channel`` has run, a flagged dam still here is an RFC
+    reservoir; the kernel has it pass its inflow while no forecast controls it.
+    """
+    if RUN_OF_RIVER_FIELD not in lakes:
+        return 0.0
+    return lakes[RUN_OF_RIVER_FIELD].astype(float)
+
+
+def _normalize_run_of_river(lakes: "pd.DataFrame | None") -> pd.DataFrame:
+    """Give ``lakes`` a boolean ``run_of_river`` column, whatever the layer holds.
+
+    A NULL means the dam is not run-of-river. Anything neither null nor 0/1 raises, since
+    a misread flag routes a real reservoir as channel or impounds a low-head dam.
+    """
+    if lakes is None:
+        return pd.DataFrame()
+    if lakes.empty:
+        return lakes
+    lakes = lakes.copy()
+    raw = lakes[RUN_OF_RIVER_FIELD]
+    if raw.dtype == bool:
+        return lakes
+    # A GPKG BOOLEAN column comes back from the reader as the strings "True"/"False"
+    # once any row is NULL, so map those before the numeric parse below.
+    if raw.dtype == object:
+        raw = raw.map(
+            {"True": 1, "true": 1, "False": 0, "false": 0}
+        ).where(raw.isin(("True", "true", "False", "false")), raw)
+    # Through float64 with an explicit NaN fill: a nullable dtype (BooleanDtype from a
+    # GPKG BOOLEAN column, Int64 from a nullable integer) survives to_numeric as a
+    # masked array, and fillna(0) on one raises.
+    parsed = pd.Series(
+        pd.to_numeric(raw, errors="coerce").to_numpy(dtype="float64", na_value=np.nan),
+        index=raw.index,
+    )
+    bad = (parsed.isna() & raw.notna()) | (parsed.notna() & ~parsed.isin([0, 1]))
+    if bad.any():
+        preview = raw[bad].unique()[:_BAD_FPID_PREVIEW_LIMIT].tolist()
+        raise ValueError(
+            f"lakes column '{RUN_OF_RIVER_FIELD}' must hold 0, 1 or NULL, but "
+            f"{int(bad.sum())} of {len(raw)} row(s) hold other values: {preview}."
+        )
+    lakes[RUN_OF_RIVER_FIELD] = parsed.fillna(0).astype(bool)
+    return lakes
+
+
+def unrouted_rfc_gages(
+    reservoir_da: pd.DataFrame, routed_record_ids: "set[int]"
+) -> pd.DataFrame:
+    """RFC rows whose lake did not survive into the routable waterbody set.
+
+    ``_clean_waterbodies`` drops a lake with no ``virtual_fp_id``, no level-pool parameters
+    or inconsistent elevations, and its flowpath routes as MC channel. An RFC reservoir's
+    gage still reaches ``rfc_lake_gage_crosswalk``, so its forecast is read and discarded.
+    """
+    if reservoir_da.empty or RESERVOIR_DA_SITE_TYPE_FIELD not in reservoir_da.columns:
+        return reservoir_da.iloc[:0]
+    unrouted = ~reservoir_da[LAKE_ID_FIELD].isin(routed_record_ids)
+    return reservoir_da[unrouted & (reservoir_da[RESERVOIR_DA_SITE_TYPE_FIELD] == RFC_DA_TYPE)]
+
+
+def route_run_of_river_as_channel(
+    lakes: pd.DataFrame, reservoir_da: pd.DataFrame
+) -> pd.DataFrame:
+    """Drop run-of-river dams from the reservoir set so they route as MC channel.
+
+    A flagged dam that ``reservoir_da`` marks ``da_type`` 4 stays a reservoir whether or
+    not RFC DA is on, and Great Lakes are never eligible. The decision reads the
+    hydrofabric only, since ``ExecutionPlan`` is built once for every forcing window. The
+    crosswalk needs no filtering: ``_lake_vfp_clusters`` keeps only rows that resolve to a
+    surviving lake.
+    """
+    if lakes.empty:
+        return lakes
+    flagged = lakes[RUN_OF_RIVER_FIELD].astype(bool)
+    if not flagged.any():
+        return lakes
+
+    rfc_ids: set[int] = set()
+    if not reservoir_da.empty and RESERVOIR_DA_SITE_TYPE_FIELD in reservoir_da.columns:
+        is_rfc_row = reservoir_da[RESERVOIR_DA_SITE_TYPE_FIELD] == RFC_DA_TYPE
+        rfc_ids = set(
+            pd.to_numeric(reservoir_da.loc[is_rfc_row, LAKE_ID_FIELD], errors="coerce")
+            .dropna()
+            .astype(int)
+        )
+    lake_ids = pd.to_numeric(lakes[LAKE_ID_FIELD], errors="coerce")
+    is_rfc = lake_ids.isin(rfc_ids)
+    is_great_lake = (
+        lakes[NATIVE_LAKE_ID_FIELD].astype(str).isin([str(i) for i in GREAT_LAKES_IDS])
+    )
+    to_channel = flagged & ~is_rfc & ~is_great_lake
+    if not to_channel.any():
+        LOG.info(
+            "run-of-river: all %d flagged dam(s) are RFC reservoirs and keep their "
+            "reservoir routing", int(flagged.sum()),
+        )
+        return lakes
+
+    kept_rfc = int((flagged & is_rfc).sum())
+    LOG.warning(
+        "run-of-river: %d of %d flagged dam(s) routed as MC channel; %d kept as RFC "
+        "reservoirs. Their flowpaths stay in the link table and no level pool is "
+        "created for them.", int(to_channel.sum()), int(flagged.sum()), kept_rfc,
+    )
+    return lakes[~to_channel]
 
 
 def load_bmi_data(
@@ -616,8 +763,8 @@ def _clean_waterbodies(
     filtered.
 
     Steps, in order (mirroring the historical inline cleaning):
-      1. lake_id integrity: coerce to numeric (the column is text in
-         NHF >= 1.2.0) and drop rows whose lake_id cannot be parsed.
+      1. lake_id integrity: coerce to numeric and drop rows whose lake_id
+         cannot be parsed.
       2. index + dedup: set lake_id as the index and drop duplicated rows
          (pre-existing semantics: duplicates are judged on the parameter
          columns only, since pandas ignores the index).
@@ -767,14 +914,8 @@ def _great_lakes_for_da(gl_df: pd.DataFrame, data_assimilation_parameters: dict)
     )
     if not gl_da_enabled or gl_df.empty:
         return gl_df.iloc[0:0].copy(), gl_da_enabled
-    # Keep a Great Lake if EITHER anchor is present, deciding per row rather than
-    # per column. _refactor_reservoirs resolves reservoirs through the virtual
-    # flowpath, and on nhf_1.2.2 the two Great Lakes carrying real USGS gages
-    # (04127885 and 04159130) have a null fp_id but a valid virtual_fp_id, so
-    # filtering on fp_id alone silently dropped exactly the lakes this function
-    # exists to keep. Choosing a single column for the whole frame has the mirror
-    # failure: a lake with a valid fp_id and a null virtual_fp_id would be dropped
-    # even though it is perfectly anchorable.
+    # Keep a Great Lake if EITHER anchor is present, deciding per row: a null fp_id with
+    # a valid virtual_fp_id, or the reverse, still anchors it.
     anchors = [c for c in ("virtual_fp_id", "fp_id") if c in gl_df.columns]
     if not anchors:
         return gl_df.iloc[0:0].copy(), gl_da_enabled
@@ -856,7 +997,7 @@ class NHFPreprocessMixin:
         else:
             self._poi_nex_dict = None
 
-    def preprocess_waterbodies(self, lakes, lake_vfp_crosswalk=None):
+    def preprocess_waterbodies(self, lakes, lake_vfp_crosswalk: pd.DataFrame):
         if not lakes.empty:
             # Add lat, lon, and crs columns for LAKEOUT files:
             if self.output_parameters.get("lakeout_output", None):
@@ -868,9 +1009,17 @@ class NHFPreprocessMixin:
             else:
                 lake_cols = WATERBODY_DF_FIELDS
 
+            # The weir and crest are set first, so the completeness gate below judges
+            # the WeirL the kernel reads.
+            weir, multiplier = overtopping_geometry(
+                lakes["WeirL"], lakes[DAM_CREST_LENGTH_FIELD], lakes[SPILLWAY_WIDTH_FIELD]
+            )
             # Step-by-step cleanup; every dropped category is counted and logged
             # as a warning (see _clean_waterbodies).
-            self.waterbody_dataframe = lakes[lake_cols]
+            self.waterbody_dataframe = lakes[lake_cols].assign(
+                WeirL=weir, dam_length_multiplier=multiplier,
+                pass_through=pass_through_flags(lakes),
+            )
             self._waterbody_df, gl_df = _clean_waterbodies(
                 self._waterbody_df, LAKE_ID_FIELD
             )
@@ -965,7 +1114,7 @@ class NHFPreprocessMixin:
 
 
     
-    def _refactor_reservoirs(self, lake_vfp_crosswalk=None):
+    def _refactor_reservoirs(self, lake_vfp_crosswalk: pd.DataFrame):
         """Refactor network connectivity to explicitly represent reservoirs (waterbodies) and their interactions with flowpaths and links.
 
         Conceptual model:
@@ -991,9 +1140,9 @@ class NHFPreprocessMixin:
 
         Parameters
         ----------
-        lake_vfp_crosswalk : pandas.DataFrame, optional
-            NHF ``lake_vfp_crosswalk``. Omitted or empty absorbs each lake's
-            declared outlet flowpath only, leaving the rest of the lake as MC.
+        lake_vfp_crosswalk : pandas.DataFrame
+            NHF ``lake_vfp_crosswalk``: every flowpath each lake polygon covers. A
+            lake it lists no flowpath for absorbs its declared outlet flowpath alone.
         """
         # Precompute every absorbed flowpath's links ONCE: one isin plus one
         # groupby. The original per-waterbody rescan of the full link table was
@@ -1024,7 +1173,7 @@ class NHFPreprocessMixin:
                 absorbed = by_outlet.get(int(outlet_vfp))
                 if absorbed is None:
                     # No crosswalk resolution for this lake: fall back to its own
-                    # declared flowpath, the behavior that shipped before.
+                    # declared flowpath.
                     absorbed = cluster_links[cluster_links["vfp_id"] == outlet_vfp]
                     absorbed = None if absorbed.empty else absorbed
                 work.append((absorbed, sub_group))
@@ -1038,7 +1187,7 @@ class NHFPreprocessMixin:
         # are absorbed into a waterbody; every other node maps to itself. Using a
         # dict instead of a dense np.arange(max_node_id + 1) lookup table avoids
         # allocating a max(node_id)-sized array, which is fatal for large/sparse
-        # node ids (NHF >= 1.2.0). Behavior is identical on dense-id datasets.
+        # node ids.
         node_remap: dict[int, int] = {}
         df_rows = []
         index_vals = []
@@ -1231,6 +1380,19 @@ class NHFPreprocessMixin:
         if len(id_diff) > 0:
             raise ValueError(
                 f"Missing {RECORD_LAKE_ID_FIELD} values {id_diff} in reservoir_da table"
+            )
+        routed_ids = set(self.waterbody_dataframe[RECORD_LAKE_ID_FIELD].to_numpy())
+        lost_rfc = unrouted_rfc_gages(reservoir_da, routed_ids)
+        if not lost_rfc.empty:
+            LOG.warning(
+                "reservoir RFC DA: %d RFC reservoir(s) are not in the routable "
+                "waterbody set, so their forecasts are read and discarded while the "
+                "dam routes as MC channel. Gage(s): %s. Lake id(s): %s. A lake is "
+                "dropped for a missing virtual_fp_id, missing level-pool parameters "
+                "or inconsistent elevations; see the waterbodies warnings above.",
+                len(lost_rfc),
+                sorted(lost_rfc[RESERVOIR_DA_SITE_ID_FIELD].dropna().astype(str)),
+                sorted(lost_rfc[LAKE_ID_FIELD]),
             )
         reservoir_da = reservoir_da[
             reservoir_da[LAKE_ID_FIELD].isin(
@@ -1513,17 +1675,11 @@ class NHFPreprocessMixin:
         """Record ``site_no -> vpu_id`` for the scaling DA's per-tree theta.
 
         Kept as a small dict rather than joined onto the routing table (~1.1M
-        redundant strings at CONUS). Empty on hydrofabrics without vpu_id;
-        callers fall back to the default theta.
+        redundant strings at CONUS). A gage without a vpu_id is left out and its
+        tree falls back to the default theta.
         """
         self.gage_vpu: dict[str, str] = {}
         if gages.empty or flowpaths.empty:
-            return
-        if "vpu_id" not in flowpaths.columns or "fp_id" not in gages.columns:
-            LOG.debug(
-                "gage->vpu map: hydrofabric has no vpu_id on flowpaths; every gage "
-                "tree will use the default theta."
-            )
             return
         fp_to_vpu = (
             flowpaths[["fp_id", "vpu_id"]].dropna().drop_duplicates("fp_id")

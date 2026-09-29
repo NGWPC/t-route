@@ -1,10 +1,8 @@
-"""Regression tests for collapsing a lake's whole flowpath subnetwork.
+"""Collapsing a lake's whole flowpath subnetwork into its level pool.
 
-``_refactor_reservoirs`` used to absorb only the outlet ``virtual_fp_id`` the
-``lakes`` layer declares, leaving every other flowpath crossing the polygon to
-route as Muskingum-Cunge channel *inside the reservoir* -- ~7.5 of the 8.5
-flowpaths a CONUS lake has. These pin the behavior now that ``lake_vfp_crosswalk``
-supplies the real one-to-many association.
+``_refactor_reservoirs`` absorbs every flowpath ``lake_vfp_crosswalk`` associates with a
+lake, the outlet ``virtual_fp_id`` the ``lakes`` layer declares included, so nothing
+inside the polygon routes as Muskingum-Cunge channel.
 """
 from __future__ import annotations
 
@@ -12,7 +10,6 @@ from collections import defaultdict
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from troute.nhf_preprocess import NHFPreprocessMixin, _lake_vfp_clusters
 
@@ -117,12 +114,12 @@ def test_whole_subnetwork_is_absorbed_and_both_inlets_rewired():
     assert set(net._fp_outlet_crosswalk[100]) == {10, 11, 12}
 
 
-def test_no_crosswalk_absorbs_only_the_declared_outlet_flowpath():
-    """Pre-crosswalk behavior, still reachable for older geopackages."""
+def test_a_lake_the_crosswalk_does_not_list_absorbs_only_its_declared_outlet():
+    """A lake with no crosswalk rows keeps its declared outlet flowpath as the level
+    pool; the arms the crosswalk would have named route as channel."""
     net = _Net(_links(_SPAN_EDGES), _SPAN_LAKES.copy())
-    net._refactor_reservoirs(None)
+    net._refactor_reservoirs(_crosswalk([]))
 
-    # The arms keep routing as Muskingum-Cunge channels inside the lake.
     assert set(net.dataframe["vfp_id"]).issuperset({10, 11})
     assert net.connections[100] == [5]
     assert set(net._fp_outlet_crosswalk[100]) == {12}
@@ -227,11 +224,17 @@ def test_a_lake_id_equal_to_a_flowpath_id_does_not_merge_unrelated_lakes():
     assert lake_cluster[10] != lake_cluster[11]
 
 
-@pytest.mark.parametrize("crosswalk", [None, pd.DataFrame()])
-def test_clusters_degenerate_to_the_declared_outlet_without_a_crosswalk(crosswalk):
-    lakes = _lakes({100: (7001, 12), 101: (7002, 12), 102: (7003, 10)})
-    lake_cluster, vfp_cluster = _lake_vfp_clusters(lakes, crosswalk)
+def test_the_fingerprint_sees_where_a_lake_drains():
+    """A lake's outlet edge lives only in ``connections``: its absorbed links leave the
+    link table and the synthetic headwater points at the lake. Two networks differing
+    only in where the lake drains must still fingerprint apart."""
+    from troute.AbstractNetwork import AbstractNetwork
 
-    # Lakes sharing a declared outlet merge; the third stays on its own.
-    assert lake_cluster[100] == lake_cluster[101] != lake_cluster[102]
-    assert set(vfp_cluster) == {10, 12}
+    def drained_through(outlet: int) -> tuple[list[int], str]:
+        net = _Net(_links([(10, outlet, 1), (20, 0, 2), (30, 0, 3)]), _lakes({100: (7001, 1)}))
+        net._refactor_reservoirs(_crosswalk([(7001, 1)]))
+        return net.connections[100], AbstractNetwork.fingerprint(net)
+
+    to_20, to_30 = drained_through(20), drained_through(30)
+    assert (to_20[0], to_30[0]) == ([20], [30])
+    assert to_20[1] != to_30[1]

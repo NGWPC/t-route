@@ -368,12 +368,20 @@ class ReachData:
 
 # Initial conditions, attached at warmstate rather than read from the hydrofabric.
 WATERBODY_INITIAL_CONDITIONS = ("qd0", "h0")
-# What WaterbodyData hands the level-pool kernel. The hydrofabric-sourced half must stay
-# in step with nhf_preprocess.LEVEL_POOL_PARAMS, the completeness gate that guarantees
-# they are non-null; test_waterbody_cleanup_subset pins the two together.
+# The overtopping crest in weir lengths (WRF-Hydro's Dam_Length). NWM's LAKEPARM sets 10
+# for every lake, and a lake with no crest length of its own takes it.
+NWM_DAM_LENGTH_MULTIPLIER = 10.0
+# The NHF reader sets both per lake and WaterbodyData fills NWM's 10 and a pass_through
+# of 0 otherwise, so neither is null. pass_through is 1 for a run-of-river dam kept as an
+# RFC reservoir, which passes its inflow while no forecast controls it.
+WATERBODY_DERIVED = ("dam_length_multiplier", "pass_through")
+# What WaterbodyData hands the level-pool kernel, read by position (qd0 at 9, h0 at 10, the
+# multiplier at 11, pass_through at 12). The hydrofabric part matches
+# nhf_preprocess.LEVEL_POOL_PARAMS, the gate that keeps it non-null;
+# test_waterbody_cleanup_subset pins the two.
 WATERBODY_VIEW_COLS = (
     "LkArea", "LkMxE", "OrificeA", "OrificeC", "OrificeE", "WeirC", "WeirE", "WeirL", "ifd",
-    *WATERBODY_INITIAL_CONDITIONS,
+    *WATERBODY_INITIAL_CONDITIONS, *WATERBODY_DERIVED,
 )
 
 
@@ -385,6 +393,12 @@ class WaterbodyData:
     types: pd.DataFrame
 
     def __post_init__(self) -> None:
+        if not self.dataframe.empty and "dam_length_multiplier" not in self.dataframe:
+            self.dataframe = self.dataframe.assign(
+                dam_length_multiplier=NWM_DAM_LENGTH_MULTIPLIER
+            )
+        if not self.dataframe.empty and "pass_through" not in self.dataframe:
+            self.dataframe = self.dataframe.assign(pass_through=0.0)
         # Precompute the column subset AND the index as a set once. generate_view()
         # and the per-job lake intersection in ExecutionPlan._build_compute_job both
         # run once per subnetwork (tens of thousands at CONUS scale); a label-based
@@ -1923,13 +1937,9 @@ def build_compute_package(
         data_idx=job.river_reaches,
         data_cols=job.river_fields,
         data_values=job.river_values,
-        # to_numpy(dtype=...) does not force a copy (copy
-        # defaults to False), so it returns a view when the
-        # source already matches the requested dtype (q0 is
-        # float32 after build_channel_initial_state, qlats is
-        # float32 after np.stack of CHRTOUT data); for eloss_df
-        # (built as pd.DataFrame(0.0, ...) which is float64)
-        # the float64 -> float32 cast still forces a copy.
+        # to_numpy(dtype=...) returns a view when the source already has the dtype (qlats is
+        # float32 after np.stack); q0, float64 to hold reservoir elevations in double, and
+        # eloss_df, built float64, are copied.
         initial_conditions=q0_sub.to_numpy(dtype="float32"),
         qlat_values=qlat_sub.to_numpy(dtype="float32"),
         eloss_values=eloss_sub.to_numpy(dtype="float32"),
@@ -2546,6 +2556,9 @@ class RoutingResultsCollection(Sequence[Any]):
             merged.nudge = np.concatenate([r.nudge for r in self.results], axis=0)
             merged.great_lakes = RoutingGreatLakes.merge([r.great_lakes for r in self.results])
             merged.diversion = RoutingDiversion.merge([r.diversion for r in self.results])
+            merged.reservoir_elevation = RoutingReservoirElevation.merge(
+                [r.reservoir_elevation for r in self.results]
+            )
             return merged
         return self.results[0]
 
@@ -2575,8 +2588,8 @@ class RoutingResults(_RoutingResultsParser):
         self.usbr_reservoir = self.usbr_reservoir.align_ids(source.usbr_reservoir)
         self.rfc_reservoir = self.rfc_reservoir.align_ids(source.rfc_reservoir)
         self.great_lakes = self.great_lakes.align_ids(source.great_lakes)
-        # The diversion element is state keyed by donor id, not a series in the
-        # source's order: it is kept as the window produced it.
+        # The diversion and reservoir elevation elements are state keyed by id, kept as the
+        # window produced them.
         return self
 
     def append(self, other: RoutingResults):  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -2591,8 +2604,9 @@ class RoutingResults(_RoutingResultsParser):
         # remove leading timestep from other's nudge
         appended.nudge = self._append(self.nudge, other.nudge[:, 1:])
         appended.great_lakes = self.great_lakes.append(other.great_lakes)
-        # State, not a series: the later window's amount is the current one.
+        # State: the later window's values are the current ones.
         appended.diversion = other.diversion
+        appended.reservoir_elevation = other.reservoir_elevation
         return appended
 
     @property
@@ -2683,6 +2697,21 @@ class RoutingResults(_RoutingResultsParser):
         self._set_index(list(value), 11)
 
     @property
+    def reservoir_elevation(self) -> RoutingReservoirElevation:
+        # Kernels without the element (the diffusive leg) carry no reservoir state.
+        raw = self._raw[12] if len(self._raw) > 12 else None
+        if raw is None:
+            return RoutingReservoirElevation(
+                (np.array([], dtype=np.intp), np.array([], dtype=np.float64))
+            )
+        return RoutingReservoirElevation(raw)
+    @reservoir_elevation.setter
+    def reservoir_elevation(self, value: Iterable[Any]) -> None:
+        if len(self._raw) <= 12:
+            self._raw = list(self._raw) + [None] * (13 - len(self._raw))
+        self._set_index(list(value), 12)
+
+    @property
     def great_lakes(self):
         return RoutingGreatLakes(self._raw[10])
     @great_lakes.setter
@@ -2703,6 +2732,12 @@ class RoutingLastObs(_RoutingResultsParser):
 class RoutingDiversion(_RoutingResultsParser):
     @property
     def applied(self) -> Float32Array:
+        return self._raw[1]
+
+
+class RoutingReservoirElevation(_RoutingResultsParser):
+    @property
+    def elevation(self) -> Float64Array:
         return self._raw[1]
 
 

@@ -84,6 +84,11 @@ lint.per-file-ignores."src/troute-network/troute/job_memory.py" = [
   # __init__.py here would shadow troute.config, troute.routing and the rest.
   "INP001",
 ]
+lint.per-file-ignores."src/troute-network/troute/network_fingerprint.py" = [
+  # `troute` is a namespace package shared by every distribution in src/; an
+  # __init__.py here would shadow troute.config, troute.routing and the rest.
+  "INP001",
+]
 lint.per-file-ignores."src/troute-network/troute/window_plan.py" = [
   # `troute` is a namespace package shared by every distribution in src/; an
   # __init__.py here would shadow troute.config, troute.routing and the rest.

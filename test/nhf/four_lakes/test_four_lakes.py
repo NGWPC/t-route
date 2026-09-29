@@ -24,11 +24,10 @@ FORCING_MODE = "constant"
 CONSTANT_QLAT = 100
 
 # Reservoir DA configuration. One DA type per lake, assigned to the domain's lakes in
-# id order rather than to hardcoded ids: `nhf_lake_id` is assigned per hydrofabric
-# build, and on nhf 1.2.2 NONE of the four ids this used to name still existed. The
-# UPDATEs in modify_lakes_table then matched zero rows, silently, so no DA type was set,
-# no observations were written, and the peaks came out at background -- which reads as a
-# routing regression and is not one. See _lake_plan and its rowcount check.
+# id order, since `nhf_lake_id` is assigned per hydrofabric build. An UPDATE in
+# modify_lakes_table that matches zero rows sets no DA type and writes no observations,
+# and the peaks come out at background, which reads as a routing regression; see
+# _lake_plan and its rowcount check.
 DA_TYPE_BY_SLOT = [
     (2, 1.0, "USGS00000000002"),      # USGS persistence
     (3, 1.0, "USAC00000000003"),      # USACE persistence

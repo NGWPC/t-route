@@ -6,7 +6,7 @@
 /* RFC Reservoir Interface */
 extern void* get_rfc_handle();
 
-extern void init_rfc(void* handle, float *water_elevation, float *lake_area, float *weir_elevation,
+extern void init_rfc(void* handle, double *water_elevation, float *lake_area, float *weir_elevation,
                     float *weir_coefficient, float *weir_length, float *dam_length, float *orifice_elevation,
                     float *orifice_coefficient, float *orifice_area, float *max_depth, 
                     float *initial_fractional_depth, int64_t *lake_number, int *reservoir_type, 
@@ -14,7 +14,7 @@ extern void init_rfc(void* handle, float *water_elevation, float *lake_area, flo
                     int *forecast_lookback_hours);
 
 extern void run_rfc(void* handle, float *inflow, float *lateral_inflow,
-                    float *water_elevation, float *outflow, float *routing_period);
+                    double *water_elevation, float *outflow, float *routing_period);
 
 extern void free_rfc(void* handle);
 
@@ -22,7 +22,7 @@ void init_rfc_reach(_Reach* reach, int64_t lake_number,
                           float dam_length, float area, float max_depth,
                           float orifice_area, float orifice_coefficient, float orifice_elevation,
                           float weir_coefficient, float weir_elevation, float weir_length,
-                          float initial_fractional_depth, float water_elevation,
+                          float initial_fractional_depth, double water_elevation,
                           int reservoir_type, char *reservoir_parameter_file_ptr, char *start_date_ptr,
                           char *time_series_path_ptr, int forecast_lookback_hours
 )
@@ -82,7 +82,7 @@ void free_rfc_reach(_Reach* reach)
 }
 
 void route(_Reach* reach, float inflow, float lateral_inflow, float routing_period,
-           float* outflow,  float* water_elevation)
+           float* outflow,  double* water_elevation)
 {
   run_rfc(reach->reach.rfc.handle, &inflow, &lateral_inflow, &reach->reach.rfc.water_elevation, outflow, &routing_period);
   *water_elevation = reach->reach.rfc.water_elevation;

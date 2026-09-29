@@ -21,6 +21,7 @@ import dateutil.parser as dparser
 from datetime import datetime, timedelta
 
 from troute.nhd_network import reverse_dict
+from troute.network_fingerprint import FINGERPRINT_KEY
 
 LOG = logging.getLogger("TROUTE")
 
@@ -1172,7 +1173,8 @@ def get_obs_from_timeslices(
     interpolation_limit,
     frequency_secs,
     t0,
-    cpu_pool, 
+    cpu_pool,
+    zero_is_missing=True,
 ):
     """
     Read observations from TimeSlice files, interpolate available observations
@@ -1201,6 +1203,12 @@ def get_obs_from_timeslices(
     
     - cpu_pool                      (int): Number of CPUs used for parallel 
                                            TimeSlice reading and interolation
+
+    - zero_is_missing              (bool): Treat a zero observation as missing. A
+                                           stream gage reading zero is an outage;
+                                           a reservoir releasing zero has its
+                                           outlets closed, so reservoir DA passes
+                                           False.
     
     Returns
     -------
@@ -1268,9 +1276,10 @@ def get_obs_from_timeslices(
                           )
 
     # screen-out poor quality flow observations
+    invalid = observation_df <= 0 if zero_is_missing else observation_df < 0
     observation_df = (observation_df.
                       mask(observation_qual_df < qc_threshold, np.nan).
-                      mask(observation_df <= 0, np.nan)
+                      mask(invalid, np.nan)
                      )
 
     # ---- Interpolate USGS observations to the input frequency (frequency_secs)
@@ -1510,6 +1519,14 @@ def get_channel_restart_from_wrf_hydro(
     return q_initial_states
 
 
+# The lite waterbody restart is indexed by the hydrofabric lake id under this name,
+# which tells it apart from NHF's positional index (nhf_lake_id). The BMI forcing module
+# reads the pickle positionally, so it carries only qd0 and h0.
+WBODY_RESTART_ID_FIELD = "lake_id"
+# Mirrors nhf_preprocess.RECORD_LAKE_ID_FIELD; test_waterbody_restart_key pins it.
+WBODY_RECORD_ID_FIELD = "og_nhf_lake_id"
+
+
 def read_lite_restart(
     file
 ):
@@ -1536,10 +1553,11 @@ def read_lite_restart(
     
 
 def write_lite_restart(
-    q0, 
-    waterbodies_df, 
-    t0, 
-    restart_parameters
+    q0,
+    waterbodies_df,
+    t0,
+    restart_parameters,
+    fingerprint=None,
 ):
     '''
     Save initial conditions dataframes as pickle files
@@ -1569,14 +1587,26 @@ def write_lite_restart(
         
         q0_out = q0.copy()
         q0_out['time'] = t0
+        q0_out.attrs[FINGERPRINT_KEY] = fingerprint
         q0_out.to_pickle(pathlib.Path.joinpath(output_path, channel_restart_filename))
         LOG.debug('Dropped lite channel restart file %s' % pathlib.Path.joinpath(output_path, channel_restart_filename))
 
         if not waterbodies_df.empty:
-            wbody_initial_states = waterbodies_df.loc[:,['qd0','h0']]
+            wbody_initial_states = waterbodies_df.loc[:,['qd0','h0']].copy()
+            # Keyed by the hydrofabric lake id: NHF waterbody ids are positional, so a
+            # dropped lake would load every later lake's state into its neighbor.
+            stable_ids = (
+                waterbodies_df[WBODY_RECORD_ID_FIELD]
+                if WBODY_RECORD_ID_FIELD in waterbodies_df.columns
+                else waterbodies_df.index
+            )
+            wbody_initial_states.index = pd.Index(
+                np.asarray(stable_ids), name=WBODY_RESTART_ID_FIELD
+            )
             wbody_initial_states['time'] = t0
+            wbody_initial_states.attrs[FINGERPRINT_KEY] = fingerprint
             wbody_initial_states.to_pickle(pathlib.Path.joinpath(output_path, waterbody_restart_filename))
-            LOG.debug('Dropped lite waterbody restart file %s' % pathlib.Path.joinpath(output_path, channel_restart_filename))
+            LOG.debug('Dropped lite waterbody restart file %s' % pathlib.Path.joinpath(output_path, waterbody_restart_filename))
         else:
             LOG.debug('No lite waterbody restart file dropped becuase waterbodies are either turned off or do not exist in this domain.')
         

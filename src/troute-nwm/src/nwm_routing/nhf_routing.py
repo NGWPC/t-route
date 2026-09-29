@@ -362,6 +362,7 @@ def nhf_routing(argv):
                 network._waterbody_df,
                 t0 + timedelta(seconds=dt * nts),
                 output_parameters["lite_restart"],
+                fingerprint=network.fingerprint(),
             )
 
         # Prepare input forcing for next time loop simulation when mutiple time loops are presented.

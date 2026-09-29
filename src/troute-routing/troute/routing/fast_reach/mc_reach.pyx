@@ -7,7 +7,7 @@ from libc.stdint cimport int64_t
 from operator import itemgetter
 from array import array
 from numpy cimport ndarray  # TODO: Do we need to import numpy and ndarray separately?
-from libc.math cimport isnan, NAN
+from libc.math cimport isnan, isinf, NAN
 cimport numpy as np  # TODO: We are cimporting and importing numpy into the same symbol, 'np'. Problem?
 cimport cython
 from libc.stdlib cimport malloc, free
@@ -331,6 +331,14 @@ cpdef object compute_network_structured(
     cdef int qlat_ts_previous
     # list of reach objects to operate on
     cdef list reach_objects = []
+    # Lakes that pass their inflow while no forecast controls them: column 12 of the
+    # waterbody parameters (compute.WATERBODY_VIEW_COLS), rows paired with lake_numbers_col.
+    cdef set pass_through_lakes = set()
+    if wbody_parameters.shape[1] > 12:
+        pass_through_lakes = {
+            lake_numbers_col[i] for i in range(wbody_parameters.shape[0])
+            if wbody_parameters[i, 12] > 0
+        }
     cdef list segment_objects
 
     cdef long sid
@@ -589,7 +597,8 @@ cpdef object compute_network_structured(
     # zeros, not empty: only reservoir rows are written, so any other row reaches
     # the LAKEOUT inflow column as uninitialized heap, varying run to run.
     cdef np.ndarray[float, ndim=3] upstream_array = np.zeros((data_idx.shape[0], nsteps+1, 1), dtype='float32')
-    cdef float reservoir_outflow, reservoir_water_elevation
+    cdef float reservoir_outflow
+    cdef double reservoir_water_elevation, initial_water_elevation
     cdef int id = 0
     
     cdef float qlat
@@ -658,6 +667,16 @@ cpdef object compute_network_structured(
                     
                     # levelpool reservoir storage/outflow calculation
                     run_lp_c(r, upstream_flows, 0.0, routing_period, &reservoir_outflow, &reservoir_water_elevation)
+
+                    # A run-of-river RFC dam passes its inflow and keeps its level, zero active
+                    # storage, unless a forecast overrides it below. Where the inflow is not a
+                    # flow or the level needed repair, the level pool's own guards stand.
+                    if (r.reach.lp.lake_number in pass_through_lakes
+                            and upstream_flows >= 0.0 and not isinf(upstream_flows)
+                            and not isnan(initial_water_elevation)
+                            and not isinf(initial_water_elevation)):
+                        reservoir_outflow = upstream_flows
+                        update_lp_c(r, initial_water_elevation, &reservoir_water_elevation)
                     
                     # USGS reservoir hybrid DA inputs
                     if r.reach.lp.wbody_type_code == 2:
@@ -981,6 +1000,19 @@ cpdef object compute_network_structured(
 
     #pr.disable()
     #pr.print_stats(sort='time')
+    # The reservoirs' elevation state in double, for the next window's h0. flowveldepth
+    # holds it as float32, which would drop storage changes below half an ulp at every
+    # window boundary. Great Lakes publish no elevation, so they carry none.
+    reservoir_ids = []
+    reservoir_elevations = []
+    for i in range(num_reaches):
+        r = &reach_structs[i]
+        if r.type == compute_type.RESERVOIR_LP and r.reach.lp.wbody_type_code != 6:
+            reservoir_ids.append(data_idx[r.id])
+            reservoir_elevations.append(r.reach.lp.water_elevation)
+        elif r.type == compute_type.RESERVOIR_RFC:
+            reservoir_ids.append(data_idx[r.id])
+            reservoir_elevations.append(r.reach.rfc.water_elevation)
     #IMPORTANT, free the dynamic array created
     free(reach_structs)
     #slice off the initial condition timestep and return
@@ -1038,5 +1070,9 @@ cpdef object compute_network_structured(
         (
             np.asarray([data_idx[pos] for pos in diversion_da], dtype=np.intp),
             np.asarray([div_applied[gage_i] for gage_i in diversion_da.values()], dtype="float32"),
-        )
+        ),
+        (
+            np.asarray(reservoir_ids, dtype=np.intp),
+            np.asarray(reservoir_elevations, dtype=np.float64),
+        ),
     )

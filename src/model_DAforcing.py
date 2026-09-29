@@ -30,7 +30,8 @@ class DAforcing_model():
         
         """
         __slots__ = ['_data_assimilation_parameters', '_forcing_parameters', '_compute_parameters',
-                     '_output_parameters', '_usgs_df', 'reservoir_usgs_df', 'reservoir_usace_df', 
+                     '_output_parameters', '_usgs_df', 'reservoir_usgs_df', 'reservoir_usace_df',
+                     'reservoir_usbr_df',
                      '_rfc_timeseries_df', '_lastobs_df', '_t0', '_q0', '_waterbody_df', '_write_lite_restart',
                      '_dateNull', 
                      '_datesSecondsArray_usgs', '_nDates_usgs', '_stationArray_usgs', 
@@ -44,6 +45,10 @@ class DAforcing_model():
                      '_stationArray_reservoir_usace', '_stationStringLengthArray_reservoir_usace',
                      '_nStations_reservoir_usace', 
                      '_usace_reservoir_Array',
+                     '_datesSecondsArray_reservoir_usbr', '_nDates_reservoir_usbr',
+                     '_stationArray_reservoir_usbr', '_stationStringLengthArray_reservoir_usbr',
+                     '_nStations_reservoir_usbr',
+                     '_usbr_reservoir_Array',
                      '_rfc_da_timestep', '_rfc_totalCounts', '_rfc_synthetic_values',
                      '_rfc_discharges', '_rfc_timeseries_idx', '_rfc_use_rfc',
                      '_rfc_Datetime', '_rfc_timeSteps', '_rfc_issue_time', '_rfc_StationId_array',
@@ -75,12 +80,18 @@ class DAforcing_model():
             #############################
             # Read DA files:
             #############################
-            nudging = data_assimilation_parameters.get('streamflow_da', {}).get('streamflow_nudging', False)
+            # The config schema returns an omitted section as None, and an RFC DA section
+            # that is switched off as the switch alone.
+            streamflow_da = data_assimilation_parameters.get('streamflow_da') or {}
+            reservoir_da = data_assimilation_parameters.get('reservoir_da') or {}
+            persistence_da = reservoir_da.get('reservoir_persistence_da') or {}
+            rfc_parameters = reservoir_da.get('reservoir_rfc_da') or {}
+            nudging = streamflow_da.get('streamflow_nudging', False)
             
-            usgs_persistence = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_persistence_da', {}).get('reservoir_persistence_usgs', False)
-            usace_persistence = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_persistence_da', {}).get('reservoir_persistence_usace', False)
-            usbr_persistence = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_persistence_da', {}).get('reservoir_persistence_usbr', False)
-            rfc = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_rfc_da', {}).get('reservoir_rfc_forecasts', False)
+            usgs_persistence = persistence_da.get('reservoir_persistence_usgs', False)
+            usace_persistence = persistence_da.get('reservoir_persistence_usace', False)
+            usbr_persistence = persistence_da.get('reservoir_persistence_usbr', False)
+            rfc = rfc_parameters.get('reservoir_rfc_forecasts', False)
 
             qc_threshold = data_assimilation_parameters.get('qc_threshold')
             cpu_pool = compute_parameters.get('cpu_pool')
@@ -102,31 +113,28 @@ class DAforcing_model():
             self._usgs_df = pd.DataFrame()
             self._reservoir_usgs_df = pd.DataFrame()
             self._reservoir_usace_df = pd.DataFrame()
+            self._reservoir_usbr_df = pd.DataFrame()
             self._rfc_timeseries_df = pd.DataFrame()
             self._lastobs_df = pd.DataFrame()
 
             # USGS Observations
             if nudging or usgs_persistence:
                 usgs_timeslice_path = str(data_assimilation_parameters.get('usgs_timeslices_folder'))
-                if nudging:
-                    self._usgs_df = _read_timeslice_files(usgs_timeslice_path,
-                                                          timeslice_dates,
-                                                          qc_threshold,
-                                                          dt,
-                                                          cpu_pool,)
-                    self._reservoir_usgs_df = (
-                        self._usgs_df.
-                        transpose().
-                        resample('15min').asfreq().
-                        transpose()
-                        )
-                else:
-                    self._usgs_df = pd.DataFrame()
+                self._usgs_df = (_read_timeslice_files(usgs_timeslice_path,
+                                                       timeslice_dates,
+                                                       qc_threshold,
+                                                       dt,
+                                                       cpu_pool,)
+                                 if nudging else pd.DataFrame())
+                # Read apart from the nudging frame, which drops zeros; a reservoir
+                # releasing zero is observed.
+                if usgs_persistence:
                     self._reservoir_usgs_df = _read_timeslice_files(usgs_timeslice_path,
                                                                     timeslice_dates,
                                                                     qc_threshold,
                                                                     900, #15 minutes
-                                                                    cpu_pool,)
+                                                                    cpu_pool,
+                                                                    zero_is_missing=False,)
 
             # USACE Observations        
             if usace_persistence:
@@ -135,42 +143,44 @@ class DAforcing_model():
                                                                  timeslice_dates,
                                                                  qc_threshold,
                                                                  900, #15 minutes
-                                                                 cpu_pool,)
+                                                                 cpu_pool,
+                                                                 zero_is_missing=False,)
             
+            # USBR Observations
             if usbr_persistence:
-                usace_timeslice_path = str(data_assimilation_parameters.get('usbr_timeslices_folder'))
-                self._reservoir_usace_df = _read_timeslice_files(usace_timeslice_path, 
-                                                                 timeslice_dates,
-                                                                 qc_threshold,
-                                                                 900, #15 minutes
-                                                                 cpu_pool,)
-
-            # Produce list of datetimes to search for timeseries files
-            rfc_parameters = data_assimilation_parameters.get('reservoir_da', {}).get('reservoir_rfc_da', {})
-            lookback_hrs = rfc_parameters.get('reservoir_rfc_forecasts_lookback_hours')
-            offset_hrs = rfc_parameters.get('reservoir_rfc_forecasts_offset_hours')
-            timeseries_end = start_datetime + timedelta(hours=offset_hrs)
-            timeseries_start = timeseries_end - timedelta(hours=lookback_hrs)
-            delta = timedelta(hours=1)
-            timeseries_dates = []
-            while timeseries_start <= timeseries_end:
-                timeseries_dates.append(timeseries_start.strftime('%Y-%m-%d_%H'))
-                timeseries_start += delta
-            rfc_forecast_persist_days = rfc_parameters.get('reservoir_rfc_forecast_persist_days')
-            final_persist_datetime = start_datetime + timedelta(days=rfc_forecast_persist_days)
+                usbr_timeslice_path = str(data_assimilation_parameters.get('usbr_timeslices_folder'))
+                self._reservoir_usbr_df = _read_timeslice_files(usbr_timeslice_path,
+                                                                timeslice_dates,
+                                                                qc_threshold,
+                                                                900, #15 minutes
+                                                                cpu_pool,
+                                                                zero_is_missing=False,)
 
             # RFC Observations
             if rfc:
+                # Produce list of datetimes to search for timeseries files
+                lookback_hrs = rfc_parameters.get('reservoir_rfc_forecasts_lookback_hours')
+                offset_hrs = rfc_parameters.get('reservoir_rfc_forecasts_offset_hours')
+                timeseries_end = start_datetime + timedelta(hours=offset_hrs)
+                timeseries_start = timeseries_end - timedelta(hours=lookback_hrs)
+                delta = timedelta(hours=1)
+                timeseries_dates = []
+                while timeseries_start <= timeseries_end:
+                    timeseries_dates.append(timeseries_start.strftime('%Y-%m-%d_%H'))
+                    timeseries_start += delta
+                rfc_forecast_persist_days = rfc_parameters.get('reservoir_rfc_forecast_persist_days')
+                final_persist_datetime = start_datetime + timedelta(days=rfc_forecast_persist_days)
+
                 rfc_timeseries_path = str(rfc_parameters.get('reservoir_rfc_forecasts_time_series_path'))
                 self._rfc_timeseries_df = _read_timeseries_files(
                     rfc_timeseries_path, timeseries_dates, start_datetime,
                     final_persist_datetime, routing_period=dt,
                     unavailable_action=rfc_parameters.get(
-                        'reservoir_rfc_forecasts_unavailable_action', 'error'),
+                        'reservoir_rfc_forecasts_unavailable_action', 'level_pool'),
                 )
 
             # Lastobs
-            lastobs_file = data_assimilation_parameters.get('streamflow_da', {}).get('lastobs_file', False)
+            lastobs_file = streamflow_da.get('lastobs_file', False)
 
             if lastobs_file:
                 self._lastobs_df = _read_lastobs_file(lastobs_file)
@@ -304,6 +314,23 @@ class DAforcing_model():
                 _reservoirUsaceArray = df2a._flatten_array(self._reservoir_usace_df, np.float32)
                 # ... and save it with the class instance
                 self._reservoirUsaceArray = _reservoirUsaceArray  
+
+            # USBR Reservoir Observations
+            self._datesSecondsArray_reservoir_usbr = np.zeros(0)
+            self._nDates_reservoir_usbr = np.zeros(0)
+            self._stationArray_reservoir_usbr = np.zeros(0)
+            self._stationStringLengthArray_reservoir_usbr = np.zeros(0)
+            self._nStations_reservoir_usbr = np.zeros(0)
+            self._reservoirUsbrArray = np.zeros(0)
+
+            if not self._reservoir_usbr_df.empty:
+
+                # see detailed comments in USGS branch
+                (self._datesSecondsArray_reservoir_usbr, self._nDates_reservoir_usbr,
+                 self._stationArray_reservoir_usbr, self._stationStringLengthArray_reservoir_usbr,
+                 self._nStations_reservoir_usbr) \
+                    = df2a._time_stations_from_df(self._reservoir_usbr_df, start_datetime)
+                self._reservoirUsbrArray = df2a._flatten_array(self._reservoir_usbr_df, np.float32)
 
 
             # RFC Timeseries    
@@ -500,6 +527,7 @@ def _read_timeslice_files(filepath,
                           frequency_secs, 
                           cpu_pool=1,
                           interpolation_limit=59,
+                          zero_is_missing=True,
                           ):
     #Read files
     observation_df = pd.DataFrame()
@@ -521,7 +549,10 @@ def _read_timeslice_files(filepath,
         observation_df.loc[observation_df['discharge_quality']<0, 'discharge'] = np.nan
         observation_df.loc[observation_df['discharge_quality']>1, 'discharge'] = np.nan
         observation_df.loc[observation_df['discharge_quality']<qc_threshold, 'discharge'] = np.nan
-        observation_df.loc[observation_df['discharge']<=0, 'discharge'] = np.nan
+        # A stream gage reading zero is an outage; a reservoir releasing zero is closed.
+        invalid = (observation_df['discharge'] <= 0 if zero_is_missing
+                   else observation_df['discharge'] < 0)
+        observation_df.loc[invalid, 'discharge'] = np.nan
 
         observation_df = observation_df[['stationId','time','discharge']].set_index(['stationId', 'time']).unstack(1, fill_value = np.nan)['discharge']
 

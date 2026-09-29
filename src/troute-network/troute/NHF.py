@@ -14,9 +14,11 @@ from troute.scaling_da import build_scaling_da_setup
 from troute.nhf_preprocess import (
     LAKE_ID_FIELD,
     LEVEL_POOL_PARAMS,
+    RUN_OF_RIVER_FIELD,
     NHFPreprocessMixin,
     read_geo_file,
     read_qlat_file,
+    route_run_of_river_as_channel,
 )
 
 import logging
@@ -120,8 +122,13 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
             discretization_len = self.supernetwork_parameters.get("nhf_discretization_len", 300.0)
             # Create a list of waterbody associated flowpaths that can be used
             # to protect waterbody-bearing flowpaths from being aggregated away
-            # during short-reach discretization
+            # during short-reach discretization. Taken before the run-of-river filter,
+            # since unprotecting a flagged dam's flowpath would shift every later link id.
             wb_fp_ids = set(waterbodies["fp_id"].dropna().astype(int).values)
+            # After headwater forcing keeps their flowpaths routable, and before
+            # _refactor_reservoirs would absorb them. An all-flagged domain then
+            # reaches the lake-free branch that disables reservoir DA.
+            waterbodies = route_run_of_river_as_channel(waterbodies, reservoir_da)
             self.preprocess_network(
                 flowpaths, reference_flowpaths, virtual_flowpaths,
                 discretization_len, protected_fp_ids=wb_fp_ids,
@@ -255,6 +262,12 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
                 f"lite_channel_restart_file {restart_file} is keyed by neither this network's "
                 "routing links nor a 'feature_id' column."
             )
+        # Only the link-keyed shape needs this. Link ids are positional, so a
+        # relabeled id passes the coverage count below and loads a neighbor's state;
+        # a feature_id restart is keyed by the hydrofabric's own flowpath id.
+        self._check_state_fingerprint(
+            restart, f"lite_channel_restart_file {restart_file}"
+        )
         if restart.index[known].duplicated().any():
             raise ValueError(
                 f"lite_channel_restart_file {restart_file} has duplicate link ids, "
@@ -494,7 +507,7 @@ class NHF(NHFPreprocessMixin, AbstractNetwork):
 
         # Check whether percentage_area_contribution sums close to 100 per div.
         # Factorize div_id to dense 0..K-1 group codes before bincount. div_id may be
-        # a large, sparse identifier (NHF >= 1.2.0 ids are ~1e15), and bincount on the
+        # a large, sparse identifier (ids are ~1e15), and bincount on the
         # raw values would allocate a max(div_id)-sized array.
         codes, uniq_divs = pd.factorize(vfp_map["div_id"].astype("int64").to_numpy(), sort=False)
         known_sum = np.bincount(codes, weights=self.weights)
@@ -746,7 +759,15 @@ def _force_headwater_routing(
     numeric_lake_id = pd.to_numeric(waterbodies[LAKE_ID_FIELD], errors="coerce")
     _waterbodies = waterbodies.loc[numeric_lake_id.notna()].copy()
     _required_lp_fields = [*LEVEL_POOL_PARAMS, "virtual_fp_id"]
-    waterbody_vfps = _waterbodies.dropna(subset=_required_lp_fields)["virtual_fp_id"].astype(int).values
+    # A run-of-river dam routes as channel and needs no level-pool parameters.
+    # Gating it on them leaves a flagged headwater neither forced nor absorbed,
+    # so the network refactor drops its flowpath and the reach vanishes.
+    eligible = _waterbodies.dropna(subset=_required_lp_fields).index.union(
+        _waterbodies.index[_waterbodies[RUN_OF_RIVER_FIELD].astype(bool)]
+    )
+    waterbody_vfps = (
+        _waterbodies.loc[eligible, "virtual_fp_id"].dropna().astype(int).values
+    )
     forced_vfps.extend(list(set(headwater_vfps).intersection(waterbody_vfps)))
 
     # In the future, could add more conditions here

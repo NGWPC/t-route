@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import pytest
-import geopandas as gpd
 
 from ..utils.integration_helpers import (
     assert_peak_bounds,
@@ -40,58 +39,17 @@ CFG.data_assimilation_parameters.usgs_timeslices_folder = "usgs_timeslice"
 CFG.data_assimilation_parameters.canada_timeslices_folder = "canadian_timeslices"
 CFG.data_assimilation_parameters.LakeOntario_outflow = "ontario/ontario_outflow.csv"
 
-### Correct NHF versions prior to 1.2.1 ###
-
+# Each Great Lake's fp_id; the domain is carved downstream of them.
 FP_LINKAGE = {
     "4800002": 1278348162056612,
     "4800004": 1276364270499315,
     "4800006": 1286192735893685,
     "4800007": 1287248237297035
 }
-VFP_LINKAGE = {
-    "4800002": 1278346877373953,
-    "4800004": 1276364270423160,
-    "4800006": 1286154743979494,
-    "4800007": 1287248166320950
-}
 
-
-def patch_gpkg_lakes(gpkg_path: str) -> None:
-    """Patch Great Lakes fp_id and virtual_fp_id values in-place."""
-    linkages = {"fp_id": FP_LINKAGE, "virtual_fp_id": VFP_LINKAGE}
-    lake_id_list = ", ".join(FP_LINKAGE.keys())  # same keys for both
-
-    # Quick check: skip if all columns already match.
-    gl = gpd.read_file(gpkg_path, layer="lakes", where=f"lake_id IN ({lake_id_list})")
-    if all(
-        row[col] == {int(k): v for k, v in mapping.items()}[int(row["lake_id"])]
-        for col, mapping in linkages.items()
-        for _, row in gl.iterrows()
-    ):
-        return
-
-    gdf = gpd.read_file(gpkg_path, layer="lakes")
-    dirty = False
-    for col, mapping in linkages.items():
-        old = gdf[col].copy()
-        gdf[col] = gdf["lake_id"].map(mapping).fillna(gdf[col]).astype(gdf[col].dtype)
-        changed = ~((gdf[col] == old) | (gdf[col].isna() & old.isna()))
-        for lake_id, old_val, new_val in (
-            gdf.loc[changed, ["lake_id", col]]
-            .assign(old_col=old[changed])[["lake_id", "old_col", col]]
-            .itertuples(index=False)
-        ):
-            print(f"  [patch_gpkg] lake_id {lake_id}: {col} {old_val} -> {new_val}")
-        dirty |= changed.any()
-
-    if dirty:
-        gdf.to_file(gpkg_path, layer="lakes", driver="GPKG")
-
-### ###
 
 def make_domain_gpkg(nhf_gpkg: Path, out_path: Path):
     """Subset 'mainstem' for great lakes instead of full watershed."""
-    patch_gpkg_lakes(nhf_gpkg)
     gl_fps = FP_LINKAGE.values()
     fp_ids = get_downstream_fp_ids(nhf_gpkg, gl_fps, 30)
     layers = extract_layers(nhf_gpkg, fp_ids)

@@ -71,7 +71,10 @@ def test_a_folder_of_only_stray_files_names_the_real_problem(tmp_path):
     (tmp_path / "README.txt").touch()
     t0 = _t0()
     with pytest.raises(FileNotFoundError, match="no RFC timeseries file"):
-        _read_timeseries_files(str(tmp_path), _dates(t0), t0, t0 + pd.Timedelta(days=11))
+        _read_timeseries_files(
+            str(tmp_path), _dates(t0), t0, t0 + pd.Timedelta(days=11),
+            unavailable_action="error",
+        )
 
 
 def test_stray_files_do_not_change_a_single_value(tmp_path):

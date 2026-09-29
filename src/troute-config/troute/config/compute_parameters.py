@@ -423,8 +423,8 @@ class StreamflowScalingParams(BaseModel):
     construction -- the hand-off instant is always seeded UNTIMED, so the
     forecast equals the untimed arm's. Off for runnability, not skill: the
     span must fit the opening update (fail-closed) and operational 3-28 h
-    lookbacks cannot host the 48 h default, plus ~5% runtime. Enable where
-    the cadence hosts the span and record timing matters.
+    lookbacks cannot host the 48 h default. Enable where the cadence hosts the
+    span and record timing matters.
 
     On, an upstream segment at time ``t`` is corrected by ``dQ_o(t + tau)``: a
     correction placed there routes down and reaches the gage at ``t + tau``, so
@@ -566,13 +566,13 @@ class ReservoirRfcParameters(BaseModel):
     """
     Days to persist an observation when no new, good observations can be found.
     """
-    reservoir_rfc_forecasts_unavailable_action: Literal['error', 'level_pool'] = 'error'
+    reservoir_rfc_forecasts_unavailable_action: Literal['error', 'level_pool'] = 'level_pool'
     """
     What to do when a forecast a reservoir needs is missing or does not cover the run.
-    'error' ends the run naming the reason, on the grounds that enabling RFC DA asserts
-    the forecasts are provisioned. 'level_pool' runs that reservoir as level pool and
-    warns, which is what an operational cycle wants: one late gage should not break a
-    chain of runs.
+    'level_pool' runs that reservoir as level pool and warns, which is what an
+    operational cycle wants: one late gage should not break a chain of runs, and an
+    hourly AnA cycle that raises breaks every cycle after it. 'error' ends the run
+    naming the reason, for a configuration that treats the forecasts as provisioned.
     """
 
 

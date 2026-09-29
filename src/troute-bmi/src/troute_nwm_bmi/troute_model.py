@@ -14,6 +14,7 @@ import xarray as xr
 from pathlib import Path
 from datetime import timedelta, datetime
 from troute.config import Config
+from troute.network_fingerprint import FINGERPRINT_KEY, check_fingerprint
 
 from troute.NHDNetwork import NHDNetwork
 from troute.HYFeaturesNetwork import HYFeaturesNetwork
@@ -567,6 +568,9 @@ class Model:
     def create_state(self):
         """Create a dictionary of data that can be serialized using `pickle.dumps`."""
         return {
+            # Every frame below is keyed by positional waterbody and link ids, which a
+            # changed lake set or discretization relabels while leaving them present.
+            FINGERPRINT_KEY: self._network.fingerprint(),
             "time": self._time,
             # BOTH warmstates: "q0" is the cycling background (a resumed analysis
             # must start from it, or its next innovation is debited), "seeded_q0"
@@ -817,6 +821,10 @@ class Model:
             resolved["usbr"] = restore_reservoir(
                 "usbr", data["usbr"], da._reservoir_usbr_param_df,
                 "USBR reservoir DA parameters")
+
+        check_fingerprint(
+            data.get(FINGERPRINT_KEY), self._network.fingerprint(), "the BMI checkpoint"
+        )
 
         # Nothing below here may raise.
         self._has_routed = False
