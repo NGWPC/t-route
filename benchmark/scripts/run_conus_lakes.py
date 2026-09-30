@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate an NHF release against t-route: full CONUS routing WITH lakes.
 
-This is an acceptance test for new NextGen Hydrofabric releases, intended for
+This is an acceptance test for new NGWPC Hydrofabric releases, intended for
 the NHF team: point it at a CONUS geopackage and it answers "does this release
 still route through t-route?". It exercises the paths a release is most likely
 to break:

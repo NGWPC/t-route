@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Carve a whole VPU out of the NextGen Hydrofabric into a t-route-readable gpkg.
+"""Carve a whole VPU out of the NGWPC Hydrofabric into a t-route-readable gpkg.
 
 Unlike prep_ohio_data.py, which keeps the upstream subgraph of ONE tailwater, this
 keeps every flowpath in a VPU (a whole hydrologic region, many tailwaters). VPU 01

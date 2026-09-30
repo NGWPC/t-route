@@ -1,6 +1,6 @@
 # NHF Tests
 
-Tests for the NHF (NextGen Hydrofabric) routing implementation and the t-route V5 CLI.
+Tests for the [NHF (NGWPC Hydrofabric)](https://github.com/NGWPC/nhf-builds) routing implementation and the t-route V5 CLI.
 
 - **Integration tests** — full model runs, marked `integration` for pytest. Each test checks whether its input data exists and skips if not. Run `prep_tests.py` first.
 - **Unit tests** — partially broken, see below.

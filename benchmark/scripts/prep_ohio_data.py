@@ -2,7 +2,7 @@
 """Prepare the Tier A benchmark dataset (``nhf_subset_ohio``) from the CONUS source.
 
 The Tier A workload (``nhf_subset_ohio``) is the topological subgraph
-upstream of one tailwater within the NextGen Hydrofabric. By default we
+upstream of one tailwater within the NGWPC Hydrofabric. By default we
 use ``fp_id = 1275377122765895``, an Ohio River basin (VPU 05) outlet whose
 upstream contributing area covers 11,327 flowpaths (~80,000 km² total
 drainage area). It is a "real-world but tractable" benchmark: big
@@ -14,7 +14,7 @@ synthesized-forcing CSVs from the same CONUS geopackage that
 ``prep_conus.py`` consumes. One source covers both tiers.
 
 Usage:
-    # Once you have the NextGen Hydrofabric CONUS geopackage:
+    # Once you have the NGWPC Hydrofabric CONUS geopackage:
     python benchmark/scripts/prep_ohio_data.py --src /path/to/nhf_1.1.4.gpkg
 
     # Carve a different tailwater (use any fp_id from the CONUS gpkg):
@@ -25,7 +25,7 @@ Usage:
 
 The data set is gitignored; ``MANIFEST.json`` records sha256 checksums.
 
-The source is the NextGen Hydrofabric v1.1.4 CONUS geopackage used by
+The source is the NGWPC Hydrofabric v1.1.4 CONUS geopackage used by
 the EDFS team for this analysis; reviewers with access can reproduce
 the numbers in ``RESULTS.md`` directly.
 """
@@ -327,7 +327,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--src", type=Path, required=True,
-                    help="NextGen Hydrofabric CONUS geopackage "
+                    help="NGWPC Hydrofabric CONUS geopackage "
                          "(same file prep_conus.py consumes)")
     ap.add_argument("--tailwater", type=int, default=DEFAULT_TAILWATER_FPID,
                     help=f"fp_id of the tailwater to carve upstream from "
@@ -348,7 +348,7 @@ def main() -> int:
         return 0
     if not args.src.is_file():
         sys.exit(f"ERROR: source geopackage not found: {args.src}\n"
-                 f"Provide the path to the NextGen Hydrofabric v1.1.4 "
+                 f"Provide the path to the NGWPC Hydrofabric v1.1.4 "
                  f"CONUS geopackage (the same file prep_conus.py consumes).")
 
     DOMAIN_DIR.mkdir(parents=True, exist_ok=True)
