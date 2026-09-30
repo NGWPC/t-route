@@ -32,7 +32,7 @@ directory** (hence the `../data/...` in `configs/*.yaml`).
 | File | Purpose |
 |---|---|
 | `nhf_subset_ohio.yaml` | Tier A config: 1-day, ~11 k flowpaths, single worker. Used for correctness gates and kernel-dominated wall measurement. |
-| `conus.yaml` | Tier C config: full CONUS NHF (1.1 M flowpaths), 8 workers, 24 timesteps. Used for production-scale wall measurement. |
+| `conus.yaml` | Tier C config: full CONUS [NHF](https://github.com/NGWPC/nhf-builds) (1.1 M flowpaths), 8 workers, 24 timesteps. Used for production-scale wall measurement. |
 
 ### `holdouts/`
 
@@ -213,7 +213,7 @@ exceed physical RAM), hiding the true ~28 GB footprint reported in
 
 ### Source data
 
-Both tiers derive from the **NextGen Hydrofabric v1.1.4 CONUS
+Both tiers derive from the **NGWPC Hydrofabric v1.1.4 CONUS
 GeoPackage** (`nhf_1.1.4.gpkg`, ~6 GB). The numbers in `RESULTS.md`
 were produced against this exact dataset; reviewers with access to
 it can reproduce them directly. Remember the local path; the
@@ -344,7 +344,7 @@ directory; only the benchmark prep scripts will complain.
 ## Validating a new NHF release (lakes included)
 
 The performance tiers above intentionally empty the lakes layer; to check
-whether a new NextGen Hydrofabric release still routes through t-route with
+whether a new NGWPC Hydrofabric release still routes through t-route with
 waterbodies enabled, run:
 
 ```bash
